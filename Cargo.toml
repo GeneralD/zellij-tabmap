@@ -1,0 +1,27 @@
+[package]
+name = "zellij-tabmap"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A multi-row zellij tab bar that renders each tab as a color-coded minimap of its pane layout"
+repository = "https://github.com/GeneralD/zellij-tabmap"
+readme = "README.md"
+keywords = ["zellij", "plugin", "tab-bar", "minimap", "tui"]
+categories = ["command-line-utilities"]
+
+[lib]
+name = "zellij_tabmap"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zellij-tabmap"
+path = "src/main.rs"
+
+[dependencies]
+zellij-tile = "0.44.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

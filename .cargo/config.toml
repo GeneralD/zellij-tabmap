@@ -1,0 +1,5 @@
+# zellij plugins compile to a WASI preview-1 module. Make it the default
+# build target so `cargo build` produces the loadable `.wasm` artifact.
+# Native unit tests override this with `cargo test --lib --target <host>`.
+[build]
+target = "wasm32-wasip1"

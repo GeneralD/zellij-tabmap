@@ -12,7 +12,10 @@
 //! and prints the ANSI string this module returns. Per-pane colors come from
 //! the theme-derived [`Palette`], keyed on each pane's stable id.
 
-use crate::color::{Palette, Rgb};
+use crate::color::Palette;
+// Re-exported so the historical `minimap::Rgb` path keeps resolving (the
+// canonical definition lives in `crate::color`).
+pub use crate::color::Rgb;
 
 /// Tokyonight background (`#1a1b26`) — painted on empty space.
 const BG: Rgb = (26, 27, 38);
@@ -304,35 +307,37 @@ mod tests {
     #[test]
     fn render_keys_fill_on_pane_id_not_position() {
         let palette = test_palette();
-        // Same pane (id 2), two unfocused snapshots where it sits at a
-        // different list position. Its fill must be identical in both — the
-        // color follows identity, not slice index.
-        let first = render(
-            &[
-                PaneRect::new(2, 0, 0, 50, 40, "a", false),
-                PaneRect::new(5, 50, 0, 50, 40, "b", false),
-            ],
-            &palette,
-            12,
-            3,
-            false,
-        );
-        let second = render(
-            &[
-                PaneRect::new(5, 0, 0, 50, 40, "b", false),
-                PaneRect::new(2, 50, 0, 50, 40, "a", false),
-            ],
-            &palette,
-            12,
-            3,
-            false,
-        );
+        // Two unfocused panes whose ids land on *distinct* slots (1 and 2 in
+        // the 3-slot test palette). Each must paint its own color in both list
+        // orderings — proving the fill follows identity, not slice index.
+        let render_pair = |a: usize, b: usize| {
+            render(
+                &[
+                    PaneRect::new(a, 0, 0, 50, 40, "a", false),
+                    PaneRect::new(b, 50, 0, 50, 40, "b", false),
+                ],
+                &palette,
+                12,
+                3,
+                false,
+            )
+        };
+        let id1 = fg(palette.color_for(1));
         let id2 = fg(palette.color_for(2));
-        assert!(first.contains(&id2), "id 2 should paint its slot color");
-        assert!(
-            second.contains(&id2),
-            "id 2 keeps its color after reordering"
+        assert_ne!(
+            id1, id2,
+            "test palette must give ids 1 and 2 distinct slots"
         );
+        for out in [render_pair(1, 2), render_pair(2, 1)] {
+            assert!(
+                out.contains(&id1),
+                "id 1 keeps its color regardless of order"
+            );
+            assert!(
+                out.contains(&id2),
+                "id 2 keeps its color regardless of order"
+            );
+        }
     }
 
     #[test]

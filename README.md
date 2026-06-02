@@ -10,7 +10,7 @@ A [zellij](https://zellij.dev) plugin that replaces the thin one-row tab bar wit
 
 ![renderer preview](assets/demo.png)
 
-> The renderer rendered standalone in a terminal: five sample layouts (a single pane, a 2-column split, a 2-row split, a 2×2 grid, and a main+stack) shown as color-coded minimaps — pixel-only on top, with overlaid labels below at two widths. Wiring this renderer into the **live** zellij tab bar is in progress (see [Status](#status)).
+> The renderer rendered standalone in a terminal: five sample layouts (a single pane, a 2-column split, a 2-row split, a 2×2 grid, and a main+stack) shown as color-coded minimaps — pixel-only on top, with overlaid labels below at two widths. This renderer is now wired into the **live** zellij tab bar, including click-to-switch (see [Status](#status)); a published `.wasm` release is the remaining milestone.
 
 ## Why a color half-block grid?
 

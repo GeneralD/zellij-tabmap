@@ -329,7 +329,7 @@ pub extern "C" fn host_run_plugin_command() {}
 | ci.yml / release.yml / cliff.toml | 同一構成 | 踏襲 |
 | `zellij-tile 0.43.1` | `0.44.3` | 変更 |
 | loading: load_plugins 常駐 | default_tab_template 埋め込み | 逸脱 |
-| 権限 4 種 | v1=1 種 / v2=2 種 | 逸脱 |
+| 権限 4 種 | v1=2 種(Read + Change) / v2=3 種(+ RunActions) | 逸脱 |
 | render 空 | 3 行描画 | 逸脱 |
 
 ---

@@ -10,7 +10,7 @@ A [zellij](https://zellij.dev) plugin that replaces the thin one-row tab bar wit
 
 ![renderer preview](assets/demo.png)
 
-> The renderer rendered standalone in a terminal: five sample layouts (a single pane, a 2-column split, a 2-row split, a 2×2 grid, and a main+stack) shown as color-coded minimaps — pixel-only on top, with overlaid labels below at two widths. This renderer is now wired into the **live** zellij tab bar, including click-to-switch (see [Status](#status)); a published `.wasm` release is the remaining milestone.
+> The renderer rendered standalone in a terminal: five sample layouts (a single pane, a 2-column split, a 2-row split, a 2×2 grid, and a main+stack) shown as color-coded minimaps — pixel-only on top, with overlaid labels below at two widths. This renderer is now wired into the **live** zellij tab bar, including click-to-switch, and shipped in [`v0.1.0`](https://github.com/GeneralD/zellij-tabmap/releases/tag/v0.1.0) as a prebuilt wasm (see [Status](#status)).
 
 ## Why a color half-block grid?
 
@@ -32,7 +32,7 @@ A focused pane is emphasized with a bright outline ring and a more vivid hue; no
 - ✅ The minimap renderer ([`src/minimap.rs`](src/minimap.rs)) is complete and unit-tested (HSL palette, half-block grid, focus ring, label degradation). It has **no zellij dependency**, so it runs and is tested on the native host.
 - ✅ The full render pipeline is wired: every tab is projected from zellij's live `PaneManifest`, packed into column spans ([`src/line.rs`](src/line.rs)), assembled into a per-tab block at its budgeted width ([`src/tab_block.rs`](src/tab_block.rs)), and composed into the multi-row bar ([`src/paint.rs`](src/paint.rs)). The active tab is centered; tabs that don't fit collapse into `← +N` / `+N →` end markers.
 - ✅ Mouse click-to-switch is wired: a left click anywhere inside a tab's column span focuses that tab. The hit-test ([`src/line.rs`](src/line.rs)) maps the clicked column to the tab drawn there and converts its 0-based position to the 1-based index `switch_tab_to` expects, so it needs the `ChangeApplicationState` permission (see the first-run note below).
-- 🔜 A published `.wasm` release is the next milestone — tracked in the [issues](https://github.com/GeneralD/zellij-tabmap/issues).
+- ✅ [`v0.1.0`](https://github.com/GeneralD/zellij-tabmap/releases/tag/v0.1.0) is published with a prebuilt `zellij-tabmap.wasm` asset, so you can wire the plugin in by URL without building it — see [Use it in zellij](#use-it-in-zellij).
 
 The full design — architecture, rendering pipeline, degradation ladder, golden-repo mapping, risks, and test strategy — lives in [`docs/design.md`](docs/design.md).
 
@@ -46,12 +46,12 @@ cargo build --release               # .cargo/config.toml targets wasm32-wasip1
 
 ## Use it in zellij
 
-In your layout's `default_tab_template`, give the tab-bar pane a height of 3 rows and point it at the plugin. Build from source and reference the local `.wasm` while the plugin is in early development:
+In your layout's `default_tab_template`, give the tab-bar pane a height of 3 rows and point it at the hosted release artifact. zellij fetches and caches the wasm on first use — no clone, no build:
 
 ```kdl
 default_tab_template {
     pane size=3 borderless=true {                       // 1 → 3 rows
-        plugin location="file:/absolute/path/to/zellij-tabmap.wasm" {
+        plugin location="https://github.com/GeneralD/zellij-tabmap/releases/latest/download/zellij-tabmap.wasm" {
             shortcut_prefix "⌘"
             active_width "24"
         }
@@ -61,10 +61,12 @@ default_tab_template {
 }
 ```
 
-Once a tagged release is published, you can instead reference the hosted artifact directly (zellij fetches and caches it):
+The hosted URL above always tracks the newest release. To pin a specific version instead, swap it for the per-tag form — e.g. `https://github.com/GeneralD/zellij-tabmap/releases/download/v0.1.0/zellij-tabmap.wasm`.
+
+Contributors hacking on the plugin can [build from source](#build-from-source) and point at the local artifact instead:
 
 ```kdl
-plugin location="https://github.com/GeneralD/zellij-tabmap/releases/latest/download/zellij-tabmap.wasm"
+plugin location="file:/absolute/path/to/zellij-tabmap.wasm"
 ```
 
 > **First-run permission note** ([zellij#4982](https://github.com/zellij-org/zellij/issues/4982)): plugins started from `default_tab_template` cannot show the interactive permission dialog. If the plugin appears inert on first launch, grant it `ReadApplicationState` / `ChangeApplicationState` in zellij's plugin permission cache (`permissions` under the plugin cache) and reload.

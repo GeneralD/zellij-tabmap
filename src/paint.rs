@@ -1,154 +1,275 @@
 //! Plugin-pane output framing — the opposite end of the pipeline from
 //! [`crate::projection`].
 //!
-//! [`crate::minimap::render`] produces a clean `\n`-separated block, but writing
-//! that block straight into a multi-row plugin pane corrupts it (see [`framed`]).
-//! These helpers reshape the renderer's output for the pane and provide the
-//! minimal non-active-tab placeholder for this milestone. Both are pure string
-//! transforms with no zellij dependency, so they unit-test natively.
+//! [`crate::line::pack`] decides where every tab sits; [`crate::tab_block::assemble`]
+//! turns each into a raw, color-only [`TabBlock`] (no cursor positioning). This
+//! module is the final stage: [`bar`] assembles every visible tab from a packed
+//! [`LineLayout`] and lays the blocks — plus the `← +N` / `+N →` overflow
+//! markers — into the multi-row plugin pane via [`compose`], which positions
+//! each block at its column and clears every row so a wider previous frame
+//! cannot bleed through. Both are pure string transforms with no zellij
+//! dependency, so they unit-test natively.
 
-/// Reframe the minimap's `\n`-separated, fully-painted rows into output safe for
-/// a multi-row plugin pane.
+use std::collections::BTreeMap;
+
+use crate::color::Palette;
+use crate::line::LineLayout;
+use crate::minimap::PaneRect;
+use crate::tab_block::{self, TabBlock};
+
+/// Render a packed [`LineLayout`] into the full multi-row bar string.
 ///
-/// `render` returns each row as exactly `cols` painted cells terminated by a
-/// reset and a newline. zellij homes the cursor to the pane's top-left before
-/// each `render()`, but the official one-row tab bar leans on a bare `print!` —
-/// reused unchanged across three rows it corrupts the block. So each row is
-/// explicitly positioned (`\u{1b}[{n};1H`, 1-based and pane-relative) and cleared
-/// to end-of-line (`\u{1b}[0K`) so a previous, wider frame cannot bleed through
-/// when the layout shrinks. Emits no trailing newline: a 3rd newline in a 3-row
-/// pane would scroll the block up.
-pub fn framed(body: &str, rows: usize) -> String {
-    body.lines()
-        .take(rows)
-        .enumerate()
-        .map(|(index, line)| format!("\u{1b}[{row};1H{line}\u{1b}[0K", row = index + 1))
+/// Output is driven from `layout.tabs` (already ordered left-to-right). For each
+/// [`crate::line::TabHit`] the tab's already-projected panes are looked up by
+/// `position` in `panes_by_position` (an empty slice when the tab has none yet)
+/// and assembled into a block of exactly `hit.width` columns via
+/// [`crate::tab_block::assemble`]. Two invariants matter here:
+///
+/// * **Key panes by `position`, never by iteration order** — the pane manifest
+///   is a map, so iterating it for output would make the bytes depend on its
+///   ordering; looking each tab up by its own position keeps the frame stable.
+/// * **Feed the *budgeted* width** (`hit.width`) into the ladder, not the active
+///   width — a narrow inactive tab must degrade to its own rung.
+///
+/// The `← +N` / `+N →` overflow markers are placed at their own columns on the
+/// middle row.
+pub fn bar(
+    rows: usize,
+    layout: &LineLayout,
+    panes_by_position: &BTreeMap<usize, Vec<PaneRect>>,
+    palette: &Palette,
+    prefix: &str,
+) -> String {
+    let blocks: Vec<TabBlock> = layout
+        .tabs
+        .iter()
+        .map(|hit| {
+            let panes = panes_by_position
+                .get(&hit.position)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            tab_block::assemble(panes, palette, hit.width, hit.position, prefix)
+        })
+        .collect();
+    let placed: Vec<(usize, &TabBlock)> = layout
+        .tabs
+        .iter()
+        .zip(&blocks)
+        .map(|(hit, block)| (hit.start, block))
+        .collect();
+    let markers: Vec<(usize, &str)> = layout
+        .left
+        .iter()
+        .chain(layout.right.iter())
+        .map(|overflow| (overflow.start, overflow.text.as_str()))
+        .collect();
+    compose(rows, &placed, &markers)
+}
+
+/// Lay pre-rendered blocks and overflow markers into `rows` absolutely
+/// positioned, end-of-line-cleared rows for a multi-row plugin pane.
+///
+/// Each `(start, block)` in `placed` has its rows drawn at 0-based column
+/// `start` (emitted 1-based); each `(start, text)` in `markers` is a single-line
+/// overflow marker drawn on the middle row only — [`crate::line::pack`]
+/// guarantees a marker span never overlaps a tab span. Every row is first homed
+/// (`\u{1b}[{n};1H`) and cleared to end-of-line (`\u{1b}[0K`) so a previous,
+/// wider frame cannot bleed through when the layout shrinks; no trailing newline
+/// is emitted (a 4th line in a 3-row pane scrolls the block up). Output order
+/// follows `placed` then `markers`, so callers pass blocks left-to-right for
+/// byte-stable output.
+pub fn compose(rows: usize, placed: &[(usize, &TabBlock)], markers: &[(usize, &str)]) -> String {
+    let middle = rows / 2;
+    (0..rows)
+        .map(|row| {
+            let cleared = format!("\u{1b}[{n};1H\u{1b}[0K", n = row + 1);
+            let blocks: String = placed
+                .iter()
+                .filter_map(|(start, block)| {
+                    block.lines.get(row).map(|line| {
+                        format!(
+                            "\u{1b}[{n};{col}H{text}",
+                            n = row + 1,
+                            col = start + 1,
+                            text = line.as_str()
+                        )
+                    })
+                })
+                .collect();
+            let marks: String = if row == middle {
+                markers
+                    .iter()
+                    .map(|(start, text)| {
+                        format!("\u{1b}[{n};{col}H{text}", n = row + 1, col = start + 1)
+                    })
+                    .collect()
+            } else {
+                String::new()
+            };
+            format!("{cleared}{blocks}{marks}")
+        })
         .collect()
-}
-
-/// Minimal placeholder for non-active tabs in this milestone: space-joined
-/// position hints such as `⌘2 ⌘3`.
-///
-/// `positions` are the 0-based `TabInfo.position`s of the non-active tabs;
-/// `prefix` is the configured shortcut glyph. Each hint comes from
-/// [`crate::tab_block::hint_text`] (the single source of the 1-based / `>= 10`
-/// drops-prefix rule per design §4.5). Full width-budgeted multi-tab packing
-/// with `+N` overflow lands in the layout issue (#4); this is deliberately just
-/// a non-panicking marker.
-pub fn inactive_hints(positions: impl Iterator<Item = usize>, prefix: &str) -> String {
-    positions
-        .map(|position| crate::tab_block::hint_text(position, prefix))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Place the non-active hint string just to the right of the active block, or
-/// emit nothing when there are no other tabs — or when the hints would not fit
-/// within `cols` to the right of the block. Printing past the pane's last column
-/// wraps into the next row and corrupts the 3-row block, so an overflowing hint
-/// is dropped rather than truncated (full width-budgeted packing is #4). Row 2
-/// keeps it vertically centered in the 3-row bar; `block_width` is the active
-/// block's column budget, and the `+ 2` leaves a one-column gap after it.
-pub fn positioned_hints(hints: &str, block_width: usize, cols: usize) -> String {
-    if hints.is_empty() {
-        return String::new();
-    }
-    // 1-based start column; the hints span `column ..= column + width - 1`.
-    // `chars().count()` is the display width here (every hint glyph — `⌘`,
-    // digits, spaces — is one cell). If the last column exceeds `cols`, the
-    // text would wrap past the pane edge, so drop it entirely.
-    let column = block_width + 2;
-    if column + hints.chars().count() - 1 > cols {
-        return String::new();
-    }
-    format!("\u{1b}[2;{column}H{hints}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::line::{Overflow, TabHit};
+    use crate::tab_block::StyledLine;
+
+    /// A three-row block with the given row texts, for `compose` placement tests.
+    fn block(rows: [&str; 3], width: usize, position: usize) -> TabBlock {
+        TabBlock {
+            lines: rows.map(|text| StyledLine(text.to_string())),
+            width,
+            position,
+        }
+    }
+
+    // ---- compose ---------------------------------------------------------
 
     #[test]
-    fn framed_positions_each_row_top_to_bottom() -> Result<(), Box<dyn std::error::Error>> {
-        let framed = framed("AA\nBB\nCC\n", 3);
-        let one = framed.find("\u{1b}[1;1H").ok_or("row 1 positioned")?;
-        let two = framed.find("\u{1b}[2;1H").ok_or("row 2 positioned")?;
-        let three = framed.find("\u{1b}[3;1H").ok_or("row 3 positioned")?;
-        assert!(one < two && two < three, "rows are in top-to-bottom order");
-        assert!(framed.contains("\u{1b}[1;1HAA\u{1b}[0K"));
-        assert!(framed.contains("\u{1b}[2;1HBB\u{1b}[0K"));
-        assert!(framed.contains("\u{1b}[3;1HCC\u{1b}[0K"));
+    fn compose_positions_each_row_at_the_block_start_column() {
+        // Block at start column 4 → 1-based column 5, one cursor move per row.
+        let b = block(["R0", "R1", "R2"], 2, 0);
+        let out = compose(3, &[(4, &b)], &[]);
+        assert!(out.contains("\u{1b}[1;5HR0"));
+        assert!(out.contains("\u{1b}[2;5HR1"));
+        assert!(out.contains("\u{1b}[3;5HR2"));
+    }
+
+    #[test]
+    fn compose_clears_every_row_to_end_of_line() {
+        let b = block(["R0", "R1", "R2"], 2, 0);
+        assert_eq!(compose(3, &[(0, &b)], &[]).matches("\u{1b}[0K").count(), 3);
+    }
+
+    #[test]
+    fn compose_has_no_trailing_newline() {
+        let b = block(["R0", "R1", "R2"], 2, 0);
+        assert!(!compose(3, &[(0, &b)], &[]).ends_with('\n'));
+    }
+
+    #[test]
+    fn compose_caps_at_the_row_budget() {
+        // Two-row pane: the block's third row must not be emitted.
+        let b = block(["R0", "R1", "R2"], 2, 0);
+        let out = compose(2, &[(0, &b)], &[]);
+        assert_eq!(out.matches("\u{1b}[0K").count(), 2);
+        assert!(out.contains("R0") && out.contains("R1"));
+        assert!(!out.contains("R2"));
+    }
+
+    #[test]
+    fn compose_lays_blocks_left_to_right_in_order() -> Result<(), Box<dyn std::error::Error>> {
+        let a = block(["AA", "AA", "AA"], 2, 0);
+        let b = block(["BB", "BB", "BB"], 2, 1);
+        let out = compose(3, &[(0, &a), (5, &b)], &[]);
+        let first = out.find("\u{1b}[1;1HAA").ok_or("block A on row 1")?;
+        let second = out
+            .find("\u{1b}[1;6HBB")
+            .ok_or("block B on row 1 at col 6")?;
+        assert!(first < second, "blocks emitted in given order");
         Ok(())
     }
 
     #[test]
-    fn framed_clears_every_row_to_end_of_line() {
-        assert_eq!(framed("AA\nBB\nCC\n", 3).matches("\u{1b}[0K").count(), 3);
+    fn compose_draws_markers_only_on_the_middle_row() {
+        let b = block(["R0", "R1", "R2"], 2, 0);
+        let out = compose(3, &[(0, &b)], &[(8, "+9")]);
+        // rows=3 → middle is row index 1 → 1-based row 2, start col 8+1=9.
+        assert!(out.contains("\u{1b}[2;9H+9"));
+        assert_eq!(
+            out.matches("+9").count(),
+            1,
+            "marker drawn once, on row 2 only"
+        );
+    }
+
+    // ---- bar -------------------------------------------------------------
+
+    fn layout(tabs: Vec<TabHit>, left: Option<Overflow>, right: Option<Overflow>) -> LineLayout {
+        LineLayout { tabs, left, right }
+    }
+
+    fn hit(position: usize, start: usize, width: usize, active: bool) -> TabHit {
+        TabHit {
+            position,
+            start,
+            width,
+            active,
+        }
     }
 
     #[test]
-    fn framed_has_no_trailing_newline() {
-        assert!(!framed("AA\nBB\nCC\n", 3).ends_with('\n'));
+    fn bar_places_each_visible_block_at_its_start_column() {
+        // Two narrow (L4) tabs at columns 0 and 2; no panes needed for the hint
+        // rung. Every (row, block) pair gets a cursor move at the block's column.
+        let lo = layout(vec![hit(0, 0, 2, false), hit(1, 2, 2, true)], None, None);
+        let out = bar(3, &lo, &BTreeMap::new(), &Palette::default(), "\u{2318}");
+        for row in 1..=3 {
+            assert!(
+                out.contains(&format!("\u{1b}[{row};1H")),
+                "block 0 row {row}"
+            );
+            assert!(
+                out.contains(&format!("\u{1b}[{row};3H")),
+                "block 1 row {row}"
+            );
+        }
     }
 
     #[test]
-    fn framed_caps_at_the_row_budget() {
-        // A body with more lines than the pane has rows must not overflow.
-        let framed = framed("AA\nBB\nCC\nDD\nEE\n", 3);
-        assert_eq!(framed.matches(";1H").count(), 3);
-        assert!(!framed.contains("DD"));
+    fn bar_keys_the_hint_by_hit_position_not_iteration_index() {
+        // Positions 3 and 4 sit at loop indices 0 and 1. The L4 hint encodes the
+        // 1-based position, so a position-keyed bar shows ⌘4 / ⌘5; an
+        // index-keyed bug would show ⌘1 / ⌘2.
+        let lo = layout(vec![hit(3, 0, 2, true), hit(4, 2, 2, false)], None, None);
+        let out = bar(3, &lo, &BTreeMap::new(), &Palette::default(), "\u{2318}");
+        assert!(out.contains("\u{2318}4"), "position 3 → ⌘4");
+        assert!(out.contains("\u{2318}5"), "position 4 → ⌘5");
+        assert!(!out.contains("\u{2318}1"), "must not key by loop index");
+        assert!(!out.contains("\u{2318}2"), "must not key by loop index");
     }
 
     #[test]
-    fn framed_empty_body_is_empty() {
-        assert_eq!(framed("", 3), "");
+    fn bar_assembles_each_tab_at_its_own_budgeted_width() {
+        // Active tab budgeted 16 (L0 color grid, no hint glyph); inactive tab
+        // budgeted 2 (L4 hint). If `bar` fed the active width to the inactive it
+        // would render an L0 grid with no ⌘2; if it fed the inactive width to the
+        // active it would emit ⌘1. Neither must happen.
+        let mut panes = BTreeMap::new();
+        panes.insert(0, vec![PaneRect::new(0, 0, 0, 10, 10, "shell", true)]);
+        let lo = layout(vec![hit(0, 0, 16, true), hit(1, 16, 2, false)], None, None);
+        let out = bar(3, &lo, &panes, &Palette::default(), "\u{2318}");
+        assert!(
+            out.contains("\u{2318}2"),
+            "inactive tab degrades to its own L4 hint"
+        );
+        assert!(!out.contains("\u{2318}1"), "active tab is L0, not a hint");
     }
 
     #[test]
-    fn inactive_hints_prefixes_low_positions() {
-        // Positions 1 and 2 (0-based) → tabs 2 and 3 (1-based).
-        assert_eq!(inactive_hints([1, 2].into_iter(), "⌘"), "⌘2 ⌘3");
-    }
-
-    #[test]
-    fn inactive_hints_drops_prefix_without_a_binding() {
-        // Position 9 (0-based) → tab 10, which has no `Super 10` binding.
-        assert_eq!(inactive_hints([9].into_iter(), "⌘"), "10");
-    }
-
-    #[test]
-    fn inactive_hints_empty_for_no_other_tabs() {
-        assert_eq!(inactive_hints(std::iter::empty(), "⌘"), "");
-    }
-
-    #[test]
-    fn positioned_hints_places_after_the_block() {
-        // Block width 24 → hints start at column 26 (one-column gap), row 2;
-        // a wide pane (120) easily fits "⌘2" (columns 26–27).
-        assert_eq!(positioned_hints("⌘2", 24, 120), "\u{1b}[2;26H⌘2");
-    }
-
-    #[test]
-    fn positioned_hints_empty_when_no_hints() {
-        assert_eq!(positioned_hints("", 24, 120), "");
-    }
-
-    #[test]
-    fn positioned_hints_emits_at_the_exact_fit() {
-        // "⌘2" spans columns 26–27; cols 27 is the tightest pane that still fits.
-        assert_eq!(positioned_hints("⌘2", 24, 27), "\u{1b}[2;26H⌘2");
-    }
-
-    #[test]
-    fn positioned_hints_skips_when_one_column_short() {
-        // cols 26 leaves no room for the second hint cell at column 27 — dropping
-        // the hint avoids wrapping into the next row and corrupting the block.
-        assert_eq!(positioned_hints("⌘2", 24, 26), "");
-    }
-
-    #[test]
-    fn positioned_hints_skips_when_block_fills_the_pane() {
-        // width == cols: there is no column to the right of the block at all.
-        assert_eq!(positioned_hints("⌘2", 28, 28), "");
+    fn bar_draws_overflow_markers_on_the_middle_row() {
+        let lo = layout(
+            vec![hit(2, 5, 2, true)],
+            Some(Overflow {
+                hidden: 2,
+                start: 0,
+                text: "\u{2190} +2 ".to_string(),
+            }),
+            Some(Overflow {
+                hidden: 3,
+                start: 7,
+                text: " +3 \u{2192}".to_string(),
+            }),
+        );
+        let out = bar(3, &lo, &BTreeMap::new(), &Palette::default(), "\u{2318}");
+        // Middle row (row 2): left marker at col 1, right marker at col 8.
+        assert!(out.contains("\u{1b}[2;1H\u{2190} +2 "));
+        assert!(out.contains("\u{1b}[2;8H +3 \u{2192}"));
+        // Each marker appears exactly once — never duplicated onto rows 1 / 3.
+        assert_eq!(out.matches("+2").count(), 1);
+        assert_eq!(out.matches("+3").count(), 1);
     }
 }

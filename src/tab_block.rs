@@ -25,7 +25,7 @@
 //! ANSI-styled string whose *display* width (escape sequences excluded) equals
 //! the block's budgeted width. Lines are **raw** — they carry color but no
 //! cursor positioning; framing into the plugin pane stays in
-//! [`crate::paint::framed`] so width accounting and the layer boundary hold.
+//! [`crate::paint::compose`] so width accounting and the layer boundary hold.
 
 use crate::color::{Palette, Rgb};
 use crate::minimap::{self, LabelMode, PaneRect};
@@ -154,8 +154,8 @@ pub fn assemble(
 ///
 /// Shown 1-based to match `GoToTab N`. Per design §4.5 a tab with no `Super N`
 /// binding (the 10th tab onward, i.e. 1-based >= 10) drops the prefix and shows
-/// the bare number. This is the single source of the rule, reused by
-/// [`crate::paint::inactive_hints`].
+/// the bare number. This is the single source of the rule, used by the L4 rung
+/// of [`assemble`].
 pub fn hint_text(position: usize, prefix: &str) -> String {
     match position + 1 {
         number if number >= 10 => number.to_string(),

@@ -30,7 +30,8 @@ A focused pane is emphasized with a bright outline ring and a more vivid hue; no
 🚧 **Early development.**
 
 - ✅ The minimap renderer ([`src/minimap.rs`](src/minimap.rs)) is complete and unit-tested (HSL palette, half-block grid, focus ring, label degradation). It has **no zellij dependency**, so it runs and is tested on the native host.
-- 🔜 Projecting zellij's live `PaneManifest` into the renderer and packing the per-tab blocks across the bar is the first implementation milestone — tracked in the [issues](https://github.com/GeneralD/zellij-tabmap/issues). Until that lands, the plugin is intended to render only a placeholder status line.
+- ✅ The full render pipeline is wired: every tab is projected from zellij's live `PaneManifest`, packed into column spans ([`src/line.rs`](src/line.rs)), assembled into a per-tab block at its budgeted width ([`src/tab_block.rs`](src/tab_block.rs)), and composed into the multi-row bar ([`src/paint.rs`](src/paint.rs)). The active tab is centered; tabs that don't fit collapse into `← +N` / `+N →` end markers.
+- 🔜 Mouse click-to-switch and a published `.wasm` release are the next milestones — tracked in the [issues](https://github.com/GeneralD/zellij-tabmap/issues).
 
 The full design — architecture, rendering pipeline, degradation ladder, golden-repo mapping, risks, and test strategy — lives in [`docs/design.md`](docs/design.md).
 

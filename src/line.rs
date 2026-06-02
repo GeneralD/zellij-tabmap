@@ -105,7 +105,14 @@ pub fn switch_target_at_column(tabs: &[TabHit], column: usize) -> Option<u32> {
 /// distance between `from` and the drop position. Direction is `zellij`-free
 /// (see [`Shift`]); the caller maps it to `Direction` and emits one move per
 /// step.
+///
+/// `from` must be the position of a currently drawn tab. A `from` that is not
+/// among `tabs` — a stale grab whose tab scrolled into the overflow, or the
+/// layout repacked mid-drag — resolves to `None` rather than a delta against a
+/// position no longer on screen, keeping the conservative "uncertain ⇒ no-op"
+/// stance of the click hit-test (a stray gesture never moves the wrong tab).
 pub fn drag_steps(tabs: &[TabHit], from: usize, release_col: usize) -> Option<(Shift, usize)> {
+    tabs.iter().find(|tab| tab.position == from)?;
     let to = drop_position_at_column(tabs, release_col)?;
     let steps = to.abs_diff(from);
     let shift = if to > from { Shift::Right } else { Shift::Left };
@@ -811,6 +818,31 @@ mod tests {
         assert_eq!(drag_steps(&one, 0, 4), None, "onto itself");
         assert_eq!(drag_steps(&one, 0, 0), None, "clamped left to itself");
         assert_eq!(drag_steps(&one, 0, 99), None, "clamped right to itself");
+    }
+
+    #[test]
+    fn drag_with_a_grabbed_position_not_currently_drawn_is_a_no_op() {
+        // Only positions 5,6,7 are visible (the rest collapsed into overflow). A
+        // grab whose recorded position is no longer on screen — a stale drag, or
+        // the grabbed tab scrolled into the overflow before release — resolves to
+        // no move, never a delta against an off-screen position.
+        let tabs = vec![hit(5, 0, 2, false), hit(6, 2, 2, true), hit(7, 4, 2, false)];
+        assert_eq!(
+            drag_steps(&tabs, 2, 4),
+            None,
+            "grabbed position 2 is hidden"
+        );
+        assert_eq!(
+            drag_steps(&tabs, 9, 0),
+            None,
+            "grabbed position 9 is hidden"
+        );
+        // A grab on a position that IS drawn still resolves normally.
+        assert_eq!(
+            drag_steps(&tabs, 5, 4),
+            Some((Shift::Right, 2)),
+            "visible grab works"
+        );
     }
 
     #[test]

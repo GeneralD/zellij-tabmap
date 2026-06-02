@@ -5,6 +5,7 @@
 //! every relevant event, repaints. The actual pixel rendering lives in the
 //! dependency-free [`minimap`] module so it can be unit-tested off-wasm.
 
+pub mod color;
 pub mod config;
 pub mod line;
 pub mod minimap;
@@ -21,13 +22,55 @@ use config::Config;
 const ROWS: usize = 3;
 
 /// Plugin state: parsed configuration plus the most recent tab and pane
-/// snapshots from zellij.
+/// snapshots from zellij, and the theme-derived color palette.
 #[derive(Default)]
 pub struct State {
     config: Config,
     permitted: bool,
     tabs: Vec<TabInfo>,
     panes: PaneManifest,
+    /// Pane colors derived from the live theme. Starts at the default-theme
+    /// fallback (see [`color::Palette::default`]) and is refreshed on every
+    /// `ModeUpdate`, which is how zellij delivers the active style.
+    palette: color::Palette,
+}
+
+/// Convert a zellij theme color to the renderer's [`color::Rgb`].
+fn rgb(c: PaletteColor) -> color::Rgb {
+    match c {
+        PaletteColor::Rgb(v) => v,
+        PaletteColor::EightBit(n) => color::from_eightbit(n),
+    }
+}
+
+/// Build the pane palette from the active theme style.
+///
+/// Slots are the four `emphasis` colors of three representative style
+/// declarations (unselected text, unselected ribbon, selected frame),
+/// deduped in order — the default theme yields roughly eight distinct hues.
+/// The focused pane uses `frame_highlight`: its `base` as the accent fill and
+/// `emphasis_0` as the ring.
+fn palette_from_style(style: &Style) -> color::Palette {
+    let colors = &style.colors;
+    let slots = [
+        colors.text_unselected,
+        colors.ribbon_unselected,
+        colors.frame_selected,
+    ]
+    .into_iter()
+    .flat_map(|d| [d.emphasis_0, d.emphasis_1, d.emphasis_2, d.emphasis_3])
+    .map(rgb)
+    .fold(Vec::new(), |mut acc, v| {
+        if !acc.contains(&v) {
+            acc.push(v);
+        }
+        acc
+    });
+    color::Palette::new(
+        slots,
+        rgb(colors.frame_highlight.base),
+        rgb(colors.frame_highlight.emphasis_0),
+    )
 }
 
 impl ZellijPlugin for State {
@@ -68,11 +111,16 @@ impl ZellijPlugin for State {
                 self.panes = panes;
                 true
             }
-            // ModeUpdate and Mouse are subscribed in `load()` to establish the
-            // event plumbing, but intentionally not acted on yet: the current
-            // render depends on neither, so skipping the repaint is correct.
-            // Acting on them — mode-dependent switch hints and click-to-switch
-            // — lands in later rendering/interaction milestones.
+            Event::ModeUpdate(mode_info) => {
+                // zellij delivers the active theme via the mode style. Refresh
+                // the palette and repaint so pane colors track theme changes.
+                self.palette = palette_from_style(&mode_info.style);
+                true
+            }
+            // Mouse is subscribed in `load()` to establish the event plumbing,
+            // but intentionally not acted on yet: the current render does not
+            // depend on it, so skipping the repaint is correct. Click-to-switch
+            // lands in a later interaction milestone.
             _ => false,
         }
     }
@@ -97,7 +145,13 @@ impl ZellijPlugin for State {
             .map(Vec::as_slice)
             .unwrap_or_default();
         let width = self.config.active_width.clamp(16, 28).min(cols);
-        let block = minimap::render(&projection::project(panes), width, ROWS, true);
+        let block = minimap::render(
+            &projection::project(panes),
+            &self.palette,
+            width,
+            ROWS,
+            true,
+        );
 
         // Non-active tabs get a minimal `⌘N` placeholder for now; full
         // width-budgeted multi-tab packing lands in the layout issue (#4).

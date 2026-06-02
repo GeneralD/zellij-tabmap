@@ -9,10 +9,13 @@
 //!
 //! This module has no zellij dependency, so it is unit-tested natively. The
 //! plugin layer ([`crate::State`]) maps zellij's `PaneInfo` into [`PaneRect`]
-//! and prints the ANSI string this module returns.
+//! and prints the ANSI string this module returns. Per-pane colors come from
+//! the theme-derived [`Palette`], keyed on each pane's stable id.
 
-/// 24-bit color.
-pub type Rgb = (u8, u8, u8);
+use crate::color::Palette;
+// Re-exported so the historical `minimap::Rgb` path keeps resolving (the
+// canonical definition lives in `crate::color`).
+pub use crate::color::Rgb;
 
 /// Tokyonight background (`#1a1b26`) — painted on empty space.
 const BG: Rgb = (26, 27, 38);
@@ -25,9 +28,12 @@ const RESET: &str = "\x1b[0m";
 ///
 /// Coordinates are absolute terminal cells, but only *relative* positions
 /// matter: [`render`] normalizes every pane against the group's bounding box,
-/// so the coordinate origin is irrelevant.
+/// so the coordinate origin is irrelevant. `id` is the pane's stable identity
+/// (from zellij's `PaneInfo.id`); it is the color key, so a pane keeps its
+/// color across repaints even as its position in the list changes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneRect {
+    pub id: usize,
     pub x: u32,
     pub y: u32,
     pub w: u32,
@@ -37,8 +43,17 @@ pub struct PaneRect {
 }
 
 impl PaneRect {
-    pub fn new(x: u32, y: u32, w: u32, h: u32, title: impl Into<String>, focused: bool) -> Self {
+    pub fn new(
+        id: usize,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        title: impl Into<String>,
+        focused: bool,
+    ) -> Self {
         Self {
+            id,
             x,
             y,
             w,
@@ -47,45 +62,6 @@ impl PaneRect {
             focused,
         }
     }
-}
-
-// ---- palette ------------------------------------------------------------
-
-/// Standard HSL → RGB. `h` in degrees, `s`/`l` in `0.0..=1.0`.
-fn hsl(h: f64, s: f64, l: f64) -> Rgb {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let hp = h.rem_euclid(360.0) / 60.0;
-    let x = c * (1.0 - (hp.rem_euclid(2.0) - 1.0).abs());
-    let (r1, g1, b1) = match hp as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let m = l - c / 2.0;
-    let q = |v: f64| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
-    (q(r1), q(g1), q(b1))
-}
-
-/// Distinct hue per pane index, spread by the golden angle (blue-first).
-fn pane_hue(i: usize) -> f64 {
-    210.0 + (i as f64) * 137.5
-}
-
-/// Fill color for a pane: vivid when focused, muted (same hue) otherwise.
-fn pane_color(i: usize, focused: bool) -> Rgb {
-    if focused {
-        hsl(pane_hue(i), 0.72, 0.66)
-    } else {
-        hsl(pane_hue(i), 0.26, 0.50)
-    }
-}
-
-/// Bright outline color drawn on the focused pane's border.
-fn ring_color(i: usize) -> Rgb {
-    hsl(pane_hue(i), 0.85, 0.82)
 }
 
 // ---- ANSI emission ------------------------------------------------------
@@ -123,28 +99,38 @@ fn summarize(title: &str, max: usize) -> String {
 
 // ---- core renderer ------------------------------------------------------
 
-/// Color of the pixel at `(px, py)` in the pixel grid.
+/// Color of the pixel at `(px, py)` in the pixel grid. `grid` stores the
+/// pane's *slice index* (to reach `panes[i]`); the color itself is keyed on
+/// that pane's stable `id`, never its position.
 fn pixel_color(
     grid: &[Option<usize>],
     ring: &[bool],
     panes: &[PaneRect],
+    palette: &Palette,
     pw: usize,
     px: usize,
     py: usize,
 ) -> Rgb {
     match grid[py * pw + px] {
-        Some(i) if ring[py * pw + px] => ring_color(i),
-        Some(i) => pane_color(i, panes[i].focused),
+        Some(_) if ring[py * pw + px] => palette.ring(),
+        Some(i) => palette.style_for(panes[i].id, panes[i].focused).fill,
         None => BG,
     }
 }
 
 /// Render `panes` into a `cols` × `text_rows` block (pixel rows = `2*text_rows`).
 ///
-/// Returns an ANSI string of `text_rows` lines, each terminated by a reset and
-/// newline. When `labels` is true, summarized pane titles are overlaid where
-/// width allows. Empty input yields an all-background block.
-pub fn render(panes: &[PaneRect], cols: usize, text_rows: usize, labels: bool) -> String {
+/// Colors come from `palette`, keyed on each pane's stable id. Returns an ANSI
+/// string of `text_rows` lines, each terminated by a reset and newline. When
+/// `labels` is true, summarized pane titles are overlaid where width allows.
+/// Empty input yields an all-background block.
+pub fn render(
+    panes: &[PaneRect],
+    palette: &Palette,
+    cols: usize,
+    text_rows: usize,
+    labels: bool,
+) -> String {
     let pw = cols;
     let ph = text_rows * 2;
     if pw == 0 || text_rows == 0 {
@@ -226,13 +212,20 @@ pub fn render(panes: &[PaneRect], cols: usize, text_rows: usize, labels: bool) -
     for tr in 0..text_rows {
         for c in 0..pw {
             if let Some((ch, i)) = overlay[tr * pw + c] {
-                put_bg(&mut out, pane_color(i, panes[i].focused));
+                let style = palette.style_for(panes[i].id, panes[i].focused);
+                put_bg(&mut out, style.fill);
                 put_fg(&mut out, LABEL_FG);
+                if style.emphasized {
+                    out.push_str("\x1b[1m");
+                    out.push(ch);
+                    out.push_str("\x1b[22m");
+                    continue;
+                }
                 out.push(ch);
                 continue;
             }
-            let top = pixel_color(&grid, &ring, panes, pw, c, 2 * tr);
-            let bottom = pixel_color(&grid, &ring, panes, pw, c, 2 * tr + 1);
+            let top = pixel_color(&grid, &ring, panes, palette, pw, c, 2 * tr);
+            let bottom = pixel_color(&grid, &ring, panes, palette, pw, c, 2 * tr + 1);
             put_fg(&mut out, top);
             put_bg(&mut out, bottom);
             out.push('▀');
@@ -247,20 +240,18 @@ pub fn render(panes: &[PaneRect], cols: usize, text_rows: usize, labels: bool) -
 mod tests {
     use super::*;
 
-    #[test]
-    fn hsl_primaries() {
-        assert_eq!(hsl(0.0, 1.0, 0.5), (255, 0, 0));
-        assert_eq!(hsl(120.0, 1.0, 0.5), (0, 255, 0));
-        assert_eq!(hsl(240.0, 1.0, 0.5), (0, 0, 255));
-        assert_eq!(hsl(0.0, 0.0, 0.0), (0, 0, 0));
-        assert_eq!(hsl(0.0, 0.0, 1.0), (255, 255, 255));
+    /// A palette with distinct, easily recognized colors so tests can assert
+    /// on exact escape sequences. Accent and ring are unlike every slot.
+    fn test_palette() -> Palette {
+        Palette::new(
+            vec![(10, 20, 30), (40, 50, 60), (70, 80, 90)],
+            (200, 100, 50),
+            (250, 250, 250),
+        )
     }
 
-    #[test]
-    fn hue_is_distinct_per_index() {
-        assert_ne!(pane_color(0, false), pane_color(1, false));
-        // Focused is more saturated/lighter than the muted variant.
-        assert_ne!(pane_color(0, true), pane_color(0, false));
+    fn fg(c: Rgb) -> String {
+        format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
     }
 
     #[test]
@@ -286,18 +277,18 @@ mod tests {
     }
 
     fn one_focused() -> Vec<PaneRect> {
-        vec![PaneRect::new(0, 0, 100, 40, "nvim", true)]
+        vec![PaneRect::new(0, 0, 0, 100, 40, "nvim", true)]
     }
 
     #[test]
     fn render_emits_requested_row_count() {
-        let out = render(&one_focused(), 10, 3, false);
+        let out = render(&one_focused(), &test_palette(), 10, 3, false);
         assert_eq!(out.lines().count(), 3);
     }
 
     #[test]
     fn render_uses_truecolor_and_halfblock() {
-        let out = render(&one_focused(), 10, 3, false);
+        let out = render(&one_focused(), &test_palette(), 10, 3, false);
         assert!(out.contains("\x1b[38;2;"), "expected a truecolor fg escape");
         assert!(out.contains("\x1b[48;2;"), "expected a truecolor bg escape");
         assert!(out.contains('▀'), "expected the upper-half-block glyph");
@@ -305,24 +296,59 @@ mod tests {
 
     #[test]
     fn render_draws_focus_ring_for_large_pane() {
-        let out = render(&one_focused(), 10, 3, false);
-        let (r, g, b) = ring_color(0);
-        let needle = format!("\x1b[38;2;{};{};{}m", r, g, b);
+        let palette = test_palette();
+        let out = render(&one_focused(), &palette, 10, 3, false);
         assert!(
-            out.contains(&needle),
+            out.contains(&fg(palette.ring())),
             "focused pane should show its ring color"
         );
     }
 
     #[test]
+    fn render_keys_fill_on_pane_id_not_position() {
+        let palette = test_palette();
+        // Two unfocused panes whose ids land on *distinct* slots (1 and 2 in
+        // the 3-slot test palette). Each must paint its own color in both list
+        // orderings — proving the fill follows identity, not slice index.
+        let render_pair = |a: usize, b: usize| {
+            render(
+                &[
+                    PaneRect::new(a, 0, 0, 50, 40, "a", false),
+                    PaneRect::new(b, 50, 0, 50, 40, "b", false),
+                ],
+                &palette,
+                12,
+                3,
+                false,
+            )
+        };
+        let id1 = fg(palette.color_for(1));
+        let id2 = fg(palette.color_for(2));
+        assert_ne!(
+            id1, id2,
+            "test palette must give ids 1 and 2 distinct slots"
+        );
+        for out in [render_pair(1, 2), render_pair(2, 1)] {
+            assert!(
+                out.contains(&id1),
+                "id 1 keeps its color regardless of order"
+            );
+            assert!(
+                out.contains(&id2),
+                "id 2 keeps its color regardless of order"
+            );
+        }
+    }
+
+    #[test]
     fn render_zero_size_is_empty() {
-        assert!(render(&one_focused(), 0, 3, false).is_empty());
-        assert!(render(&one_focused(), 10, 0, false).is_empty());
+        assert!(render(&one_focused(), &test_palette(), 0, 3, false).is_empty());
+        assert!(render(&one_focused(), &test_palette(), 10, 0, false).is_empty());
     }
 
     #[test]
     fn render_empty_panes_is_all_background() {
-        let out = render(&[], 4, 2, false);
+        let out = render(&[], &test_palette(), 4, 2, false);
         assert_eq!(out.lines().count(), 2);
         let (r, g, b) = BG;
         let bg = format!("\x1b[48;2;{};{};{}m", r, g, b);
@@ -334,12 +360,12 @@ mod tests {
 
     #[test]
     fn labels_appear_when_wide_and_drop_when_narrow() {
-        let panes = vec![PaneRect::new(0, 0, 100, 40, "cargo", false)];
+        let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "cargo", false)];
         // Wide enough: the label's leading char should be overlaid (dark text fg).
-        let wide = render(&panes, 12, 3, true);
+        let wide = render(&panes, &test_palette(), 12, 3, true);
         assert!(wide.contains('c'), "expected label text in a wide block");
         // Too narrow (cw < 4 after normalization): no label, only block glyphs.
-        let narrow = render(&panes, 3, 3, true);
+        let narrow = render(&panes, &test_palette(), 3, 3, true);
         assert!(!narrow.contains('c'), "narrow block should drop the label");
     }
 }

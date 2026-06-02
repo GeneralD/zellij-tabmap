@@ -18,6 +18,7 @@ name = "zellij-tabmap"
 path = "src/main.rs"
 
 [dependencies]
+unicode-width = "0.2.2"
 zellij-tile = "0.44.3"
 
 [profile.release]

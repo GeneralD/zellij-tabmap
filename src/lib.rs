@@ -302,28 +302,37 @@ impl State {
         false
     }
 
-    /// On release, reorder the grabbed tab to the drop `column`. No-op unless a
-    /// drag was actually in motion. The grabbed tab's *current* position is
-    /// re-derived from its stable id (focus and prior hops may have shifted it),
-    /// then [`line::drag_steps`] gives the direction and neighbour count. Returns
-    /// whether anything moved.
+    /// On release, reorder the grabbed tab to the drop `column`: resolve the
+    /// pure [`reorder_plan`](Self::reorder_plan), then emit it. No-op (returns
+    /// `false`) when the plan is `None`. Keeping the decision in `reorder_plan`
+    /// leaves this method a thin resolve→effect seam and makes the move math
+    /// testable without a zellij host.
     fn commit_drag_at(&self, column: usize) -> bool {
-        let Some(drag) = self.drag.filter(|drag| drag.dragging) else {
+        let Some((tab_id, shift, steps)) = self.reorder_plan(column) else {
             return false;
         };
-        let Some(from) = self
+        self.reorder(tab_id, shift, steps);
+        true
+    }
+
+    /// The reorder decision for a release at `column`: the grabbed tab's stable
+    /// id, which way to shift it, and how many neighbour hops — or `None` when
+    /// nothing should move (no drag in motion, the grabbed tab is gone, or the
+    /// drop lands on its own slot). Pure: reads state and derives the plan but
+    /// emits no action. The grabbed tab's *current* position is re-derived from
+    /// its stable id (focus and every prior hop reshuffle positions, the id is
+    /// invariant); [`line::drag_steps`] then gives the direction and neighbour
+    /// count. That re-derivation is the invariant that keeps a focus/hop repack
+    /// from corrupting the move, so it is pinned by unit tests.
+    fn reorder_plan(&self, column: usize) -> Option<(usize, line::Shift, usize)> {
+        let drag = self.drag.filter(|drag| drag.dragging)?;
+        let from = self
             .tabs
             .iter()
             .find(|tab| tab.tab_id == drag.grabbed_tab_id)
-            .map(|tab| tab.position)
-        else {
-            return false;
-        };
-        let Some((shift, steps)) = line::drag_steps(&self.tab_layout, from, column) else {
-            return false;
-        };
-        self.reorder(drag.grabbed_tab_id, shift, steps);
-        true
+            .map(|tab| tab.position)?;
+        let (shift, steps) = line::drag_steps(&self.tab_layout, from, column)?;
+        Some((drag.grabbed_tab_id, shift, steps))
     }
 
     /// Emit one `MoveTabByTabId` per step. The action shifts a tab a single
@@ -359,7 +368,115 @@ extern "C" fn host_run_plugin_command() {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::line::TabHit;
+    use crate::line::{Shift, TabHit};
+
+    /// A `TabInfo` carrying only the two fields the reorder math reads.
+    fn tab(position: usize, tab_id: usize) -> TabInfo {
+        TabInfo {
+            position,
+            tab_id,
+            ..Default::default()
+        }
+    }
+
+    /// A drawn span; `active` is irrelevant to drag resolution, so it is `false`.
+    fn hit(position: usize, start: usize, width: usize) -> TabHit {
+        TabHit {
+            position,
+            start,
+            width,
+            active: false,
+        }
+    }
+
+    /// Five contiguous 4-column blocks: position `p` owns columns `4p..4p+4`,
+    /// so positions span 0..5 across columns 0..20.
+    fn five_block_layout() -> Vec<TabHit> {
+        (0..5).map(|p| hit(p, p * 4, 4)).collect()
+    }
+
+    #[test]
+    fn reorder_plan_resolves_from_by_the_grabbed_tabs_current_position() {
+        // The drag stores only the *stable* tab_id. Here the grabbed tab (id
+        // 100) currently sits at position 1 — deliberately not position 0, the
+        // slot a grab-time position snapshot might have frozen — so the plan
+        // MUST look up its live slot by id. Release lands in position 4's span
+        // (columns 16..20), making the move 3 hops right (1 → 4). If the code
+        // ever resolved `from` from a cached position instead of the current
+        // tabs, this count would change and the test would fail.
+        let mut state = State::default();
+        state.tabs = vec![tab(0, 7), tab(1, 100), tab(2, 8), tab(3, 9), tab(4, 10)];
+        state.tab_layout = five_block_layout();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 100,
+            dragging: true,
+        });
+
+        assert_eq!(
+            state.reorder_plan(18),
+            Some((100, Shift::Right, 3)),
+            "from is the grabbed tab's current position (1), resolved by stable id"
+        );
+    }
+
+    #[test]
+    fn reorder_plan_is_none_when_the_press_never_became_a_drag() {
+        // `dragging` stays false for a plain click (press + release, no motion).
+        // The plan must be `None` so a click is a pure switch, never a reorder —
+        // even though the release column would otherwise resolve to a move.
+        let mut state = State::default();
+        state.tabs = vec![tab(0, 7), tab(1, 100), tab(2, 8), tab(3, 9), tab(4, 10)];
+        state.tab_layout = five_block_layout();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 100,
+            dragging: false,
+        });
+
+        assert_eq!(state.reorder_plan(18), None);
+    }
+
+    #[test]
+    fn reorder_plan_is_none_when_the_grabbed_tab_vanished() {
+        // A tab closed mid-drag: the grabbed id is no longer among the tabs, so
+        // there is no current position to move from. The plan must be `None`
+        // rather than panicking or moving the wrong tab.
+        let mut state = State::default();
+        state.tabs = vec![tab(0, 7), tab(1, 8), tab(2, 9)];
+        state.tab_layout = five_block_layout();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 999,
+            dragging: true,
+        });
+
+        assert_eq!(state.reorder_plan(18), None);
+    }
+
+    #[test]
+    fn reorder_plan_is_none_when_dropped_on_its_own_slot() {
+        // The grabbed tab (id 100, position 2) is released within its own block
+        // (columns 8..12). `drag_steps` yields zero hops, so the plan is `None`
+        // — a drag that ends where it started moves nothing.
+        let mut state = State::default();
+        state.tabs = vec![tab(0, 7), tab(1, 8), tab(2, 100), tab(3, 9), tab(4, 10)];
+        state.tab_layout = five_block_layout();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 100,
+            dragging: true,
+        });
+
+        assert_eq!(state.reorder_plan(9), None);
+    }
+
+    #[test]
+    fn reorder_plan_is_none_without_a_drag() {
+        // No press was recorded (e.g. release with no prior grab). `None` drag
+        // → `None` plan, no panic.
+        let mut state = State::default();
+        state.tabs = vec![tab(0, 7)];
+        state.tab_layout = five_block_layout();
+
+        assert_eq!(state.reorder_plan(18), None);
+    }
 
     #[test]
     fn render_clears_tab_layout_when_it_cannot_draw() {

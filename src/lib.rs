@@ -136,39 +136,47 @@ impl ZellijPlugin for State {
             return;
         };
 
-        // Project the active tab's tiled panes into the renderer's rectangles,
-        // then paint its 3-row minimap. The width budget is clamped to a legible
-        // range here, at the render site, while the parser keeps the raw value
-        // (see `config.rs`); §4.4 of the design.
-        let panes = self
-            .panes
-            .panes
-            .get(&active_position)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let width = self.config.active_width.clamp(16, 28).min(cols);
-        let block = minimap::render(
-            &projection::project(panes),
-            &self.palette,
-            width,
-            ROWS,
-            minimap::LabelMode::All,
+        // Pack the whole tab strip into column spans — active centered, the
+        // tabs that don't fit collapsed into `← +N` / `+N →` end markers — then
+        // render each visible tab into its budgeted block. `pack` clamps the
+        // active width into the legible `16..=28` range, so the parser keeps the
+        // raw value (see `config.rs`); §4.3–4.4 of the design.
+        let layout = line::pack(
+            cols,
+            0,
+            self.config.active_width,
+            self.tabs.len(),
+            active_position,
         );
 
-        // Non-active tabs get a minimal `⌘N` placeholder for now; full
-        // width-budgeted multi-tab packing lands in the layout issue (#4).
-        let hints = paint::inactive_hints(
-            self.tabs
-                .iter()
-                .filter(|tab| !tab.active)
-                .map(|tab| tab.position),
-            &self.config.shortcut_prefix,
-        );
+        // Project only the visible tabs' tiled panes (the collapsed ones need no
+        // block). Projection is the one step that touches zellij types, so it
+        // happens here at the render site and `paint::bar` stays pure. Panes are
+        // keyed by `position` so the output never depends on the manifest map's
+        // iteration order.
+        let panes_by_position: BTreeMap<usize, Vec<minimap::PaneRect>> = layout
+            .tabs
+            .iter()
+            .map(|hit| {
+                let panes = self
+                    .panes
+                    .panes
+                    .get(&hit.position)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                (hit.position, projection::project(panes))
+            })
+            .collect();
 
         print!(
-            "{}{}",
-            paint::framed(&block, ROWS),
-            paint::positioned_hints(&hints, width, cols)
+            "{}",
+            paint::bar(
+                ROWS,
+                &layout,
+                &panes_by_position,
+                &self.palette,
+                &self.config.shortcut_prefix,
+            )
         );
     }
 }

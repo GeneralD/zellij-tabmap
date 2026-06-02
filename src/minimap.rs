@@ -74,29 +74,6 @@ fn put_bg(out: &mut String, c: Rgb) {
     out.push_str(&format!("\x1b[48;2;{};{};{}m", c.0, c.1, c.2));
 }
 
-// ---- label summarization ------------------------------------------------
-
-/// Summarize a pane title to at most `max` characters: take the leading
-/// command token, strip any path prefix, and cap with an ellipsis.
-fn summarize(title: &str, max: usize) -> String {
-    let token = title.split_whitespace().next().unwrap_or("");
-    let base = token
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(title);
-    let len = base.chars().count();
-    if len <= max {
-        base.to_string()
-    } else if max == 0 {
-        String::new()
-    } else {
-        let mut s: String = base.chars().take(max - 1).collect();
-        s.push('…');
-        s
-    }
-}
-
 // ---- core renderer ------------------------------------------------------
 
 /// Color of the pixel at `(px, py)` in the pixel grid. `grid` stores the
@@ -193,7 +170,7 @@ pub fn render(
         let cell_text_rows = py1.div_ceil(2).saturating_sub(trow0);
         let inner = cw.saturating_sub(2);
         if labels && cw >= 4 && cell_text_rows >= 1 && inner >= 2 {
-            let label = summarize(&p.title, inner);
+            let label = crate::title::summarize(&p.title, inner, false);
             let label_len = label.chars().count();
             if label_len >= 2 {
                 let row = trow0 + cell_text_rows / 2;
@@ -252,28 +229,6 @@ mod tests {
 
     fn fg(c: Rgb) -> String {
         format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
-    }
-
-    #[test]
-    fn summarize_keeps_short_titles() {
-        assert_eq!(summarize("nvim", 10), "nvim");
-        assert_eq!(summarize("nvim main.rs", 10), "nvim");
-    }
-
-    #[test]
-    fn summarize_strips_path_prefix() {
-        assert_eq!(summarize("/usr/bin/cargo watch", 10), "cargo");
-    }
-
-    #[test]
-    fn summarize_caps_with_ellipsis() {
-        assert_eq!(summarize("verylongcommand", 5), "very…");
-        assert_eq!(summarize("verylongcommand", 0), "");
-    }
-
-    #[test]
-    fn summarize_handles_empty() {
-        assert_eq!(summarize("", 5), "");
     }
 
     fn one_focused() -> Vec<PaneRect> {

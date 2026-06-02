@@ -11,6 +11,7 @@ pub mod line;
 pub mod minimap;
 pub mod paint;
 pub mod projection;
+pub mod title;
 
 use std::collections::BTreeMap;
 use zellij_tile::prelude::*;

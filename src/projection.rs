@@ -35,6 +35,7 @@ pub fn project(panes: &[PaneInfo]) -> Vec<PaneRect> {
         .filter(|pane| !(pane.is_plugin || pane.is_floating || pane.is_suppressed))
         .map(|pane| {
             PaneRect::new(
+                pane.id as usize,
                 pane.pane_x as u32,
                 pane.pane_y as u32,
                 pane.pane_columns as u32,
@@ -64,6 +65,19 @@ mod tests {
             pane_y: y,
             pane_columns: w,
             pane_rows: h,
+            is_focused: focused,
+            title: "sh".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn content_pane_with_id(id: u32, x: usize, focused: bool) -> PaneInfo {
+        PaneInfo {
+            id,
+            pane_x: x,
+            pane_y: 1,
+            pane_columns: 40,
+            pane_rows: 24,
             is_focused: focused,
             title: "sh".to_string(),
             ..Default::default()
@@ -138,6 +152,17 @@ mod tests {
         assert_eq!(rects.len(), 2);
         assert_eq!((rects[0].y, rects[1].y), (1, 13));
         assert_eq!(rects[0].x, rects[1].x);
+    }
+
+    #[test]
+    fn project_carries_pane_id_as_color_key() {
+        // The id must survive projection so the renderer can key colors on
+        // stable identity. Position in the list must not become the id.
+        let rects = project(&[
+            content_pane_with_id(7, 0, true),
+            content_pane_with_id(3, 40, false),
+        ]);
+        assert_eq!((rects[0].id, rects[1].id), (7, 3));
     }
 
     #[test]

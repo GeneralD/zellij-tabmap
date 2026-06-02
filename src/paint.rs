@@ -73,16 +73,19 @@ pub fn bar(
 /// `start` (emitted 1-based); each `(start, text)` in `markers` is a single-line
 /// overflow marker drawn on the middle row only — [`crate::line::pack`]
 /// guarantees a marker span never overlaps a tab span. Every row is first homed
-/// (`\u{1b}[{n};1H`) and cleared to end-of-line (`\u{1b}[0K`) so a previous,
-/// wider frame cannot bleed through when the layout shrinks; no trailing newline
-/// is emitted (a 4th line in a 3-row pane scrolls the block up). Output order
-/// follows `placed` then `markers`, so callers pass blocks left-to-right for
-/// byte-stable output.
+/// (`\u{1b}[{n};1H`), has its SGR attributes reset (`\u{1b}[0m`), then is cleared
+/// to end-of-line (`\u{1b}[0K`). The reset before the erase matters: `0K` clears
+/// using the *current* background (background-color erase), so without it a
+/// prior frame's lingering background would paint the cleared tail. Resetting
+/// first makes the no-bleed guarantee self-contained — it holds even if a block
+/// line ever stops terminating in a reset. No trailing newline is emitted (a 4th
+/// line in a 3-row pane scrolls the block up). Output order follows `placed`
+/// then `markers`, so callers pass blocks left-to-right for byte-stable output.
 pub fn compose(rows: usize, placed: &[(usize, &TabBlock)], markers: &[(usize, &str)]) -> String {
     let middle = rows / 2;
     (0..rows)
         .map(|row| {
-            let cleared = format!("\u{1b}[{n};1H\u{1b}[0K", n = row + 1);
+            let cleared = format!("\u{1b}[{n};1H\u{1b}[0m\u{1b}[0K", n = row + 1);
             let blocks: String = placed
                 .iter()
                 .filter_map(|(start, block)| {
@@ -142,6 +145,22 @@ mod tests {
     fn compose_clears_every_row_to_end_of_line() {
         let b = block(["R0", "R1", "R2"], 2, 0);
         assert_eq!(compose(3, &[(0, &b)], &[]).matches("\u{1b}[0K").count(), 3);
+    }
+
+    #[test]
+    fn compose_resets_sgr_before_clearing_each_row() {
+        // `0K` erases with the current background (background-color erase), so a
+        // reset must precede it or a prior frame's lingering background paints
+        // the cleared tail. Pinning the reset here keeps the no-bleed guarantee
+        // self-contained rather than relying on every block line resetting.
+        let b = block(["R0", "R1", "R2"], 2, 0);
+        let out = compose(3, &[(0, &b)], &[]);
+        for n in 1..=3 {
+            assert!(
+                out.contains(&format!("\u{1b}[{n};1H\u{1b}[0m\u{1b}[0K")),
+                "row {n} resets SGR before erase-to-EOL"
+            );
+        }
     }
 
     #[test]

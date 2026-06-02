@@ -31,7 +31,8 @@ A focused pane is emphasized with a bright outline ring and a more vivid hue; no
 
 - ✅ The minimap renderer ([`src/minimap.rs`](src/minimap.rs)) is complete and unit-tested (HSL palette, half-block grid, focus ring, label degradation). It has **no zellij dependency**, so it runs and is tested on the native host.
 - ✅ The full render pipeline is wired: every tab is projected from zellij's live `PaneManifest`, packed into column spans ([`src/line.rs`](src/line.rs)), assembled into a per-tab block at its budgeted width ([`src/tab_block.rs`](src/tab_block.rs)), and composed into the multi-row bar ([`src/paint.rs`](src/paint.rs)). The active tab is centered; tabs that don't fit collapse into `← +N` / `+N →` end markers.
-- 🔜 Mouse click-to-switch and a published `.wasm` release are the next milestones — tracked in the [issues](https://github.com/GeneralD/zellij-tabmap/issues).
+- ✅ Mouse click-to-switch is wired: a left click anywhere inside a tab's column span focuses that tab. The hit-test ([`src/line.rs`](src/line.rs)) maps the clicked column to the tab drawn there and converts its 0-based position to the 1-based index `switch_tab_to` expects, so it needs the `ChangeApplicationState` permission (see the first-run note below).
+- 🔜 A published `.wasm` release is the next milestone — tracked in the [issues](https://github.com/GeneralD/zellij-tabmap/issues).
 
 The full design — architecture, rendering pipeline, degradation ladder, golden-repo mapping, risks, and test strategy — lives in [`docs/design.md`](docs/design.md).
 

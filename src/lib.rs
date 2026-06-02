@@ -35,6 +35,11 @@ pub struct State {
     /// fallback (see [`color::Palette::default`]) and is refreshed on every
     /// `ModeUpdate`, which is how zellij delivers the active style.
     palette: color::Palette,
+    /// The most recent render's per-tab column spans — the source of truth for
+    /// click hit-testing. Re-recorded on every `render()` (and renders fire on
+    /// each Tab/Pane update), so a click always tests against what is currently
+    /// drawn, never a stale frame. Empty until the first render.
+    tab_layout: Vec<line::TabHit>,
 }
 
 /// Convert a zellij theme color to the renderer's [`color::Rgb`].
@@ -83,10 +88,15 @@ impl ZellijPlugin for State {
         // re-render is when a stale selectable state would surface.
         set_selectable(false);
         self.config = Config::from_configuration(&configuration);
-        // v1 only reads state (to receive Tab/Pane updates). The permission
-        // for tab switching / reordering is requested in the milestone that
-        // actually performs the action, not eagerly here.
-        request_permission(&[PermissionType::ReadApplicationState]);
+        // ReadApplicationState delivers the Tab/Pane/Mode updates we render
+        // from; ChangeApplicationState authorizes `switch_tab_to` for
+        // click-to-switch (#8). A plugin started from `default_tab_template`
+        // cannot show the interactive permission dialog (zellij#4982), so users
+        // pre-grant both in the plugin permission cache and reload.
+        request_permission(&[
+            PermissionType::ReadApplicationState,
+            PermissionType::ChangeApplicationState,
+        ]);
         subscribe(&[
             EventType::PermissionRequestResult,
             EventType::TabUpdate,
@@ -119,10 +129,15 @@ impl ZellijPlugin for State {
                 self.palette = palette_from_style(&mode_info.style);
                 true
             }
-            // Mouse is subscribed in `load()` to establish the event plumbing,
-            // but intentionally not acted on yet: the current render does not
-            // depend on it, so skipping the repaint is correct. Click-to-switch
-            // lands in a later interaction milestone.
+            Event::Mouse(Mouse::LeftClick(_row, column)) => {
+                // A left click anywhere in a tab's column span focuses that tab;
+                // the clicked row is irrelevant. The switch arrives back as a
+                // TabUpdate, which drives the repaint — so this arm requests none.
+                self.switch_to_tab_at(column);
+                false
+            }
+            // Other events — including the non-click Mouse variants reserved for
+            // v2 drag-to-reorder — need no repaint.
             _ => false,
         }
     }
@@ -178,6 +193,25 @@ impl ZellijPlugin for State {
                 &self.config.shortcut_prefix,
             )
         );
+
+        // Record the spans this frame drew so a later click hit-tests against
+        // the current layout. `pack` re-runs every render, so this is always
+        // the live geometry — never a cached copy.
+        self.tab_layout = layout.tabs;
+    }
+}
+
+impl State {
+    /// Focus the tab whose drawn block contains `column`; a click that landed on
+    /// no block (overflow marker, gap, trailing padding) is a no-op. `column` is
+    /// the 0-based click column zellij delivers, and
+    /// [`line::switch_target_at_column`] resolves it to the 1-based index
+    /// `switch_tab_to` expects.
+    fn switch_to_tab_at(&self, column: usize) {
+        let Some(target) = line::switch_target_at_column(&self.tab_layout, column) else {
+            return;
+        };
+        switch_tab_to(target);
     }
 }
 

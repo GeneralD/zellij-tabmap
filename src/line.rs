@@ -57,6 +57,24 @@ pub fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
+/// The 1-based tab index `switch_tab_to` expects for the visible tab whose
+/// drawn column span contains `column`, or `None` when the click missed every
+/// block (an overflow marker, a gap, or trailing padding — a no-op, never a
+/// wrong-tab switch).
+///
+/// `tabs` are the [`TabHit`]s from the most recent [`pack`]; each carries its
+/// 0-based `position` and `[start, start + width)` span in display columns.
+/// zellij's `switch_tab_to` is **1-indexed** while `TabInfo.position` is
+/// 0-indexed, so the matched tab's `position` is returned offset by one. Keeping
+/// the `+ 1` conversion here — in one unit-tested pure function — pins the
+/// off-by-one natively, rather than burying it at the host-calling click site
+/// where no native test can reach it.
+pub fn switch_target_at_column(tabs: &[TabHit], column: usize) -> Option<u32> {
+    tabs.iter()
+        .find(|tab| (tab.start..tab.start + tab.width).contains(&column))
+        .map(|tab| tab.position as u32 + 1)
+}
+
 fn left_marker(hidden: usize) -> String {
     format!("← +{hidden} ")
 }
@@ -533,6 +551,102 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // ---- switch_target_at_column (click hit-test, #8) --------------------
+
+    fn hit(position: usize, start: usize, width: usize, active: bool) -> TabHit {
+        TabHit {
+            position,
+            start,
+            width,
+            active,
+        }
+    }
+
+    #[test]
+    fn click_inside_a_block_resolves_to_its_one_based_index() {
+        // position 0 spans [0, 2); position 1 spans [2, 4). switch_tab_to is
+        // 1-indexed, so position 0 → 1 and position 1 → 2. (A `+ 0` regression
+        // would return 0 / 1 here and fail.)
+        let tabs = vec![hit(0, 0, 2, false), hit(1, 2, 2, true)];
+        assert_eq!(switch_target_at_column(&tabs, 0), Some(1));
+        assert_eq!(switch_target_at_column(&tabs, 2), Some(2));
+    }
+
+    #[test]
+    fn click_covers_first_and_last_column_of_a_block() {
+        // position 2 spans columns 4, 5, 6 (start 4, width 3). Both edges are
+        // inside; the column one past the end (7) belongs to no block.
+        let tabs = vec![hit(2, 4, 3, true)];
+        assert_eq!(switch_target_at_column(&tabs, 4), Some(3), "first column");
+        assert_eq!(switch_target_at_column(&tabs, 6), Some(3), "last column");
+        assert_eq!(switch_target_at_column(&tabs, 7), None, "one past the end");
+    }
+
+    #[test]
+    fn click_left_of_the_first_block_is_a_no_op() {
+        // A left overflow marker occupies columns 0..5; the first tab starts at
+        // 5. Every column the marker covers resolves to nothing.
+        let tabs = vec![hit(3, 5, 2, true), hit(4, 7, 2, false)];
+        for column in 0..5 {
+            assert_eq!(
+                switch_target_at_column(&tabs, column),
+                None,
+                "col {column} is left of every block"
+            );
+        }
+        assert_eq!(switch_target_at_column(&tabs, 5), Some(4));
+    }
+
+    #[test]
+    fn click_in_a_gap_between_blocks_is_a_no_op() {
+        // Non-contiguous blocks (a marker or padding sits between them): the gap
+        // columns 2, 3, 4 resolve to neither tab.
+        let tabs = vec![hit(0, 0, 2, true), hit(1, 5, 2, false)];
+        assert_eq!(switch_target_at_column(&tabs, 1), Some(1));
+        assert_eq!(switch_target_at_column(&tabs, 2), None, "gap");
+        assert_eq!(switch_target_at_column(&tabs, 4), None, "gap");
+        assert_eq!(switch_target_at_column(&tabs, 5), Some(2));
+    }
+
+    #[test]
+    fn click_on_an_empty_layout_is_a_no_op() {
+        assert_eq!(switch_target_at_column(&[], 0), None);
+        assert_eq!(switch_target_at_column(&[], 7), None);
+    }
+
+    #[test]
+    fn hit_test_covers_exactly_the_drawn_tab_columns() {
+        // Sweep a real packed layout (12 tabs in 40 cols → overflow markers at
+        // both ends): every column a tab is drawn on resolves to that tab's
+        // 1-based index, and every column no tab covers (markers / gaps /
+        // padding) resolves to None — so a stray click is never a wrong switch.
+        let cols = 40;
+        let layout = pack(cols, 0, 16, 12, 5);
+        for tab in &layout.tabs {
+            for column in tab.start..tab.start + tab.width {
+                assert_eq!(
+                    switch_target_at_column(&layout.tabs, column),
+                    Some(tab.position as u32 + 1),
+                    "column {column} is drawn on position {}",
+                    tab.position
+                );
+            }
+        }
+        let covered = |c: usize| {
+            layout
+                .tabs
+                .iter()
+                .any(|t| (t.start..t.start + t.width).contains(&c))
+        };
+        for column in (0..cols).filter(|c| !covered(*c)) {
+            assert_eq!(
+                switch_target_at_column(&layout.tabs, column),
+                None,
+                "uncovered column {column}"
+            );
         }
     }
 }

@@ -30,17 +30,14 @@ pub fn framed(body: &str, rows: usize) -> String {
 /// position hints such as `⌘2 ⌘3`.
 ///
 /// `positions` are the 0-based `TabInfo.position`s of the non-active tabs;
-/// `prefix` is the configured shortcut glyph. Hints are shown 1-based to match
-/// `GoToTab N`. Per design §4.5 a tab with no `Super N` binding (the 10th tab
-/// onward, i.e. 1-based ≥ 10) drops the prefix and shows the bare number. Full
-/// width-budgeted multi-tab packing with `+N` overflow lands in the layout
-/// issue (#4); this is deliberately just a non-panicking marker.
+/// `prefix` is the configured shortcut glyph. Each hint comes from
+/// [`crate::tab_block::hint_text`] (the single source of the 1-based / `>= 10`
+/// drops-prefix rule per design §4.5). Full width-budgeted multi-tab packing
+/// with `+N` overflow lands in the layout issue (#4); this is deliberately just
+/// a non-panicking marker.
 pub fn inactive_hints(positions: impl Iterator<Item = usize>, prefix: &str) -> String {
     positions
-        .map(|position| match position + 1 {
-            number if number >= 10 => number.to_string(),
-            number => format!("{prefix}{number}"),
-        })
+        .map(|position| crate::tab_block::hint_text(position, prefix))
         .collect::<Vec<_>>()
         .join(" ")
 }

@@ -11,6 +11,7 @@ pub mod line;
 pub mod minimap;
 pub mod paint;
 pub mod projection;
+pub mod tab_block;
 pub mod title;
 
 use std::collections::BTreeMap;
@@ -151,7 +152,7 @@ impl ZellijPlugin for State {
             &self.palette,
             width,
             ROWS,
-            true,
+            minimap::LabelMode::All,
         );
 
         // Non-active tabs get a minimal `⌘N` placeholder for now; full

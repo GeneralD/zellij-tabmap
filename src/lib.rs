@@ -143,6 +143,11 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, _rows: usize, cols: usize) {
+        // Reset the click geometry up front. If this frame bails out before
+        // drawing — no permission yet, or no active tab mid-transition — a click
+        // must find no spans to resolve against rather than the previous frame's
+        // stale ones. The success path repopulates it at the end.
+        self.tab_layout.clear();
         if !self.permitted {
             return;
         }
@@ -222,3 +227,32 @@ impl State {
 #[cfg(test)]
 #[no_mangle]
 extern "C" fn host_run_plugin_command() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::line::TabHit;
+
+    #[test]
+    fn render_clears_tab_layout_when_it_cannot_draw() {
+        // The bar only draws once permitted, and only repopulates `tab_layout`
+        // on that success path. A frame that bails out earlier must still wipe
+        // the previous frame's spans — otherwise a click would resolve against
+        // geometry no longer on screen. (`permitted` defaults to false, so this
+        // exercises the pre-draw early return.)
+        let mut state = State::default();
+        state.tab_layout = vec![TabHit {
+            position: 3,
+            start: 0,
+            width: 8,
+            active: true,
+        }];
+
+        state.render(ROWS, 80);
+
+        assert!(
+            state.tab_layout.is_empty(),
+            "a frame that cannot draw leaves no stale click geometry"
+        );
+    }
+}

@@ -118,7 +118,7 @@ pub fn pack(
             active,
         )
     } else {
-        packed_with_overflow(cols, prefix_width, total_w, active_w, tab_count, active)
+        packed_with_overflow(prefix_width, total_w, active_w, tab_count, active)
     }
 }
 
@@ -171,7 +171,6 @@ fn packed_centered(
 /// outward from the active tab, balancing the two sides, and collapse the rest
 /// into end markers.
 fn packed_with_overflow(
-    cols: usize,
     prefix_width: usize,
     total_w: usize,
     active_w: usize,
@@ -192,13 +191,13 @@ fn packed_with_overflow(
         "every tab is either visible or collapsed into a marker"
     );
 
-    // Lay out left → right. The active block always fits (`active_w <= total_w`);
-    // markers are best-effort and dropped, rather than pushing a block past the
-    // edge, when a pathologically narrow bar can't hold them too. The left
-    // marker shifts everything right, so it's gated on the whole row fitting;
-    // `grow` only stops short of that when no inactive fits at all, leaving just
-    // the active block — exactly when dropping the marker is correct.
+    // Decide which end markers to draw. The active block always fits
+    // (`active_w <= total_w`); the markers share whatever columns remain. The
+    // two ends are treated symmetrically (see `marker_fit`) so a narrow bar
+    // never suppresses one end while keeping the other — an asymmetric drop
+    // would understate the hidden count and mislead hit-test consumers.
     let content_w = (visible_left + visible_right) * inactive_w + active_w;
+    let slack = total_w.saturating_sub(content_w);
     let left_w = if left_hidden > 0 {
         display_width(&left_marker(left_hidden))
     } else {
@@ -209,17 +208,15 @@ fn packed_with_overflow(
     } else {
         0
     };
+    let (show_left, show_right) = marker_fit(left_hidden, right_hidden, left_w, right_w, slack);
 
-    let left = (left_hidden > 0 && left_w + content_w + right_w <= total_w).then(|| Overflow {
+    let left = show_left.then(|| Overflow {
         hidden: left_hidden,
         start: prefix_width,
         text: left_marker(left_hidden),
     });
 
-    let tabs_start = prefix_width
-        + left
-            .as_ref()
-            .map_or(0, |marker| display_width(&marker.text));
+    let tabs_start = prefix_width + if show_left { left_w } else { 0 };
 
     let tabs: Vec<TabHit> = (active - visible_left..=active + visible_right)
         .scan(tabs_start, |col, position| {
@@ -240,13 +237,38 @@ fn packed_with_overflow(
         .collect();
 
     let right_start = tabs.last().map_or(tabs_start, |tab| tab.start + tab.width);
-    let right = (right_hidden > 0 && right_start + right_w <= cols).then(|| Overflow {
+    let right = show_right.then(|| Overflow {
         hidden: right_hidden,
         start: right_start,
         text: right_marker(right_hidden),
     });
 
     LineLayout { tabs, left, right }
+}
+
+/// Choose which overflow markers fit in `slack` columns, treating both ends
+/// symmetrically. Prefer showing both; when only one fits, surface the side
+/// hiding more tabs (ties → left, reading order) so the larger hidden count is
+/// never the one that gets dropped.
+fn marker_fit(
+    left_hidden: usize,
+    right_hidden: usize,
+    left_w: usize,
+    right_w: usize,
+    slack: usize,
+) -> (bool, bool) {
+    let want_left = left_hidden > 0;
+    let want_right = right_hidden > 0;
+    if want_left && want_right && left_w + right_w <= slack {
+        return (true, true);
+    }
+    let left_fits = want_left && left_w <= slack;
+    let right_fits = want_right && right_w <= slack;
+    if left_fits && right_fits {
+        // Each fits alone but not together: keep the marker standing in for more.
+        return (left_hidden >= right_hidden, left_hidden < right_hidden);
+    }
+    (left_fits, right_fits)
 }
 
 /// Greedily grow the visible window outward from the active tab, always adding
@@ -449,6 +471,17 @@ mod tests {
             layout.tabs.len() + hidden(&layout.left) + hidden(&layout.right),
             20
         );
+    }
+
+    #[test]
+    fn overflow_surfaces_the_larger_hidden_side_when_only_one_marker_fits() {
+        // 23 cols only hold the active block (16) plus one marker, not both, yet
+        // both sides hide tabs (10 left, 9 right). The larger-count side wins —
+        // never an arbitrary end — and nothing spills past the bar.
+        let layout = pack(23, 0, 16, 20, 10);
+        assert_eq!(layout.left.as_ref().map(|o| o.hidden), Some(10));
+        assert!(layout.right.is_none(), "the smaller (right) side yields");
+        assert!(within_bounds(&layout, 23));
     }
 
     #[test]

@@ -150,8 +150,10 @@ TabInfo + panes[pos]
   ▼ 色割当: ペインに安定色(パレット循環)、focused は accent
   ▼ ピクセル塗り: 各セル = ▀(fg=上px色, bg=下px色)。境界は色変化で表現
   ▼ ラベル重畳: 面積が閾値以上のペインに要約タイトル(focused 優先)
-  ▼ = TabBlock { lines: [StyledLine; 3], width, position, tab_id }
+  ▼ = TabBlock { lines: [StyledLine; 3], width, position }
 ```
+
+> **タブの identity は `position`(zellij `TabInfo.position`、`switch_tab_to` が消費する 0-based 値)に一本化する。** ペインと違いタブには安定 id が無く、別個の `tab_id` を持つと §4.3 の「段は幅のみで決まる」純関数と矛盾するため持たない。クリック切替 / 並べ替えのヒットテストも同じ `position` を使う(§8, §11)。
 
 > **座標原点(要実機検証)**: `pane_x/pane_y` は端末左上原点の絶対セル座標と server ソース(`pane_info_for_pane`)から論理確定。ただし doc 明記なし。bounding-box 正規化はタブ内トポロジのみ依存で原点ずれに頑健だが、着手前にスパイクで裏取りする(§9)。
 
@@ -346,7 +348,7 @@ pub extern "C" fn host_run_plugin_command() {}
 ### v2 — ドラッグ&ドロップ並べ替え
 - `RunActionsAsUser` 権限追加
 - ドラッグ状態機械: LeftClick(掴む)→ Hold(追従)→ Release(確定)
-- 列→tab_id ヒットテスト(`tab_layout`)
+- 列→position ヒットテスト(`line::TabHit` のスパン)
 - `run_action(Action::MoveTabByTabId { id, direction })` を差分回数ぶん発行
 - ドラッグ中のゴースト表示 / ドロップ位置インジケータ
 
@@ -398,7 +400,7 @@ pub extern "C" fn host_run_plugin_command() {}
 - `title.rs`: コマンド名抽出 / アイコン写像 / 切詰
 - `color.rs`: パレット循環の安定性(同 id → 同色)、focus 強調
 - `line.rs`: 幅予算配分、active 中央寄せ、`+N` オーバーフロー
-- ヒットテスト: 列 → tab_id(1-indexed オフバイワン回避)
+- ヒットテスト: 列 → position(`line::TabHit`; 0-based、表示は +1 でオフバイワン回避)
 
 ```rust
 #[test]

@@ -61,6 +61,11 @@ impl ZellijPlugin for State {
                 self.panes = panes;
                 true
             }
+            // ModeUpdate and Mouse are subscribed in `load()` to establish the
+            // event plumbing, but intentionally not acted on yet: the current
+            // render depends on neither, so skipping the repaint is correct.
+            // Acting on them — mode-dependent switch hints and click-to-switch
+            // — lands in later rendering/interaction milestones.
             _ => false,
         }
     }

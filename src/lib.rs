@@ -40,6 +40,22 @@ pub struct State {
     /// each Tab/Pane update), so a click always tests against what is currently
     /// drawn, never a stale frame. Empty until the first render.
     tab_layout: Vec<line::TabHit>,
+    /// The in-progress tab drag, if any. Set when a press lands on a tab,
+    /// resolved (and cleared) on release. `None` whenever no drag is underway.
+    /// v2 drag-to-reorder (#10).
+    drag: Option<DragState>,
+}
+
+/// An in-progress tab drag. Recorded from the `LeftClick` that begins a press
+/// and resolved on `Release`; `dragging` flips only once a `Hold` arrives, so a
+/// plain click (press + release, no motion) never reorders. The grabbed tab is
+/// tracked by its **stable** `tab_id`, never its position — focus (the same
+/// click also switches) and every reorder hop reshuffle positions, but the id
+/// is invariant, so on release the tab's current slot is re-derived from it.
+#[derive(Clone, Copy)]
+struct DragState {
+    grabbed_tab_id: usize,
+    dragging: bool,
 }
 
 /// Convert a zellij theme color to the renderer's [`color::Rgb`].
@@ -90,12 +106,32 @@ impl ZellijPlugin for State {
         self.config = Config::from_configuration(&configuration);
         // ReadApplicationState delivers the Tab/Pane/Mode updates we render
         // from; ChangeApplicationState authorizes `switch_tab_to` for
-        // click-to-switch (#8). A plugin started from `default_tab_template`
-        // cannot show the interactive permission dialog (zellij#4982), so users
-        // pre-grant both in the plugin permission cache and reload.
+        // click-to-switch (#8); RunActionsAsUser authorizes the
+        // `MoveTabByTabId` run_action behind drag-to-reorder (#10). A plugin
+        // started from `default_tab_template` cannot show the interactive
+        // permission dialog (zellij#4982), so users pre-grant these in the
+        // plugin permission cache and reload.
+        //
+        // ── FORK POINT (#10) ──────────────────────────────────────────────
+        // The third permission is requested UNCONDITIONALLY here (provisional,
+        // so live-verify can exercise reorder). The final shape is a product
+        // decision still open:
+        //   A) keep this unconditional 3-permission request — reorder is on by
+        //      default, but existing v0.1.0 users (who cached only Read+Change)
+        //      get a *frozen, dark* bar on auto-update via the `releases/latest`
+        //      URL until they add RunActionsAsUser. Mitigate with a 0.2.0
+        //      "ACTION REQUIRED" release note.
+        //   B) gate the third permission behind a `reorder` config flag
+        //      (default off → request only Read+Change → no regression; on →
+        //      request all three). Ships #10's headline feature off by default.
+        // Granting is all-or-nothing for tab-template plugins (the request
+        // freezes event delivery until every requested permission is cached;
+        // see zellij#4982), so a graceful partial grant is impossible either way.
+        // ──────────────────────────────────────────────────────────────────
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
+            PermissionType::RunActionsAsUser,
         ]);
         subscribe(&[
             EventType::PermissionRequestResult,
@@ -130,14 +166,32 @@ impl ZellijPlugin for State {
                 true
             }
             Event::Mouse(Mouse::LeftClick(_row, column)) => {
-                // A left click anywhere in a tab's column span focuses that tab;
-                // the clicked row is irrelevant. The switch arrives back as a
-                // TabUpdate, which drives the repaint — so this arm requests none.
+                // A left click anywhere in a tab's column span focuses that tab
+                // (#8); the clicked row is irrelevant. The switch arrives back as
+                // a TabUpdate, which drives the repaint — so this arm requests
+                // none. It also records the press as a *potential* drag (#10):
+                // if the pointer then holds and releases elsewhere, the tab is
+                // reordered; a plain click never sets `dragging`, so it is a
+                // pure switch. Press on no tab clears any stale drag.
                 self.switch_to_tab_at(column);
+                self.drag = self.grab_at(column);
                 false
             }
-            // Other events — including the non-click Mouse variants reserved for
-            // v2 drag-to-reorder — need no repaint.
+            Event::Mouse(Mouse::Hold(..)) => {
+                // The pointer moved while pressed → the press is a real drag.
+                // Only the fact matters here, not the column; the drop column is
+                // read from the Release. (#10)
+                self.mark_dragging()
+            }
+            Event::Mouse(Mouse::Release(_row, column)) => {
+                // Release ends the gesture: reorder the grabbed tab to the drop
+                // column (no-op unless it was actually dragging), then clear the
+                // drag regardless. (#10)
+                let moved = self.commit_drag_at(column);
+                self.drag = None;
+                moved
+            }
+            // Remaining events need no repaint.
             _ => false,
         }
     }
@@ -217,6 +271,80 @@ impl State {
             return;
         };
         switch_tab_to(target);
+    }
+
+    /// Record a potential drag for the tab drawn at `column`. `None` when the
+    /// press landed on no tab (overflow marker, gap, padding) — nothing to drag.
+    /// The tab is captured by its stable `tab_id` (resolved from the current
+    /// layout's position) so the release can find it after any position shift.
+    fn grab_at(&self, column: usize) -> Option<DragState> {
+        let position = line::position_at_column(&self.tab_layout, column)?;
+        let grabbed_tab_id = self
+            .tabs
+            .iter()
+            .find(|tab| tab.position == position)?
+            .tab_id;
+        Some(DragState {
+            grabbed_tab_id,
+            dragging: false,
+        })
+    }
+
+    /// Promote the in-progress drag to actually dragging (a `Hold` arrived).
+    /// No-op when nothing was grabbed. Returns `false`: the drag has no visual
+    /// yet, so no repaint is warranted (a drop indicator is deferred to a
+    /// follow-up — see the PR notes).
+    fn mark_dragging(&mut self) -> bool {
+        let Some(drag) = self.drag.as_mut() else {
+            return false;
+        };
+        drag.dragging = true;
+        false
+    }
+
+    /// On release, reorder the grabbed tab to the drop `column`. No-op unless a
+    /// drag was actually in motion. The grabbed tab's *current* position is
+    /// re-derived from its stable id (focus and prior hops may have shifted it),
+    /// then [`line::drag_steps`] gives the direction and neighbour count. Returns
+    /// whether anything moved.
+    fn commit_drag_at(&self, column: usize) -> bool {
+        let Some(drag) = self.drag.filter(|drag| drag.dragging) else {
+            return false;
+        };
+        let Some(from) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.tab_id == drag.grabbed_tab_id)
+            .map(|tab| tab.position)
+        else {
+            return false;
+        };
+        let Some((shift, steps)) = line::drag_steps(&self.tab_layout, from, column) else {
+            return false;
+        };
+        self.reorder(drag.grabbed_tab_id, shift, steps);
+        true
+    }
+
+    /// Emit one `MoveTabByTabId` per step. The action shifts a tab a single
+    /// neighbour per call and targets the **stable** id, so emitting it `steps`
+    /// times walks that tab that many slots in `shift`'s direction — immune to
+    /// the positions reshuffling under each hop. Needs the `RunActionsAsUser`
+    /// permission; without it the host drops the action and reorder is inert.
+    fn reorder(&self, tab_id: usize, shift: line::Shift, steps: usize) {
+        let direction = match shift {
+            line::Shift::Left => Direction::Left,
+            line::Shift::Right => Direction::Right,
+        };
+        (0..steps).for_each(|_| {
+            run_action(
+                actions::Action::MoveTabByTabId {
+                    id: tab_id as u64,
+                    direction,
+                },
+                BTreeMap::new(),
+            );
+        });
     }
 }
 

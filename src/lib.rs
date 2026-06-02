@@ -6,6 +6,7 @@
 //! dependency-free [`minimap`] module so it can be unit-tested off-wasm.
 
 pub mod config;
+pub mod line;
 pub mod minimap;
 pub mod paint;
 pub mod projection;

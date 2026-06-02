@@ -111,7 +111,7 @@ impl ZellijPlugin for State {
         print!(
             "{}{}",
             paint::framed(&block, ROWS),
-            paint::positioned_hints(&hints, width)
+            paint::positioned_hints(&hints, width, cols)
         );
     }
 }

@@ -46,14 +46,25 @@ pub fn inactive_hints(positions: impl Iterator<Item = usize>, prefix: &str) -> S
 }
 
 /// Place the non-active hint string just to the right of the active block, or
-/// emit nothing when there are no other tabs. Row 2 keeps it vertically centered
-/// in the 3-row bar; `block_width` is the active block's column budget, and the
-/// `+ 2` leaves a one-column gap after it.
-pub fn positioned_hints(hints: &str, block_width: usize) -> String {
+/// emit nothing when there are no other tabs — or when the hints would not fit
+/// within `cols` to the right of the block. Printing past the pane's last column
+/// wraps into the next row and corrupts the 3-row block, so an overflowing hint
+/// is dropped rather than truncated (full width-budgeted packing is #4). Row 2
+/// keeps it vertically centered in the 3-row bar; `block_width` is the active
+/// block's column budget, and the `+ 2` leaves a one-column gap after it.
+pub fn positioned_hints(hints: &str, block_width: usize, cols: usize) -> String {
     if hints.is_empty() {
         return String::new();
     }
-    format!("\u{1b}[2;{column}H{hints}", column = block_width + 2)
+    // 1-based start column; the hints span `column ..= column + width - 1`.
+    // `chars().count()` is the display width here (every hint glyph — `⌘`,
+    // digits, spaces — is one cell). If the last column exceeds `cols`, the
+    // text would wrap past the pane edge, so drop it entirely.
+    let column = block_width + 2;
+    if column + hints.chars().count() - 1 > cols {
+        return String::new();
+    }
+    format!("\u{1b}[2;{column}H{hints}")
 }
 
 #[cfg(test)]
@@ -115,12 +126,32 @@ mod tests {
 
     #[test]
     fn positioned_hints_places_after_the_block() {
-        // Block width 24 → hints start at column 26 (one-column gap), row 2.
-        assert_eq!(positioned_hints("⌘2", 24), "\u{1b}[2;26H⌘2");
+        // Block width 24 → hints start at column 26 (one-column gap), row 2;
+        // a wide pane (120) easily fits "⌘2" (columns 26–27).
+        assert_eq!(positioned_hints("⌘2", 24, 120), "\u{1b}[2;26H⌘2");
     }
 
     #[test]
     fn positioned_hints_empty_when_no_hints() {
-        assert_eq!(positioned_hints("", 24), "");
+        assert_eq!(positioned_hints("", 24, 120), "");
+    }
+
+    #[test]
+    fn positioned_hints_emits_at_the_exact_fit() {
+        // "⌘2" spans columns 26–27; cols 27 is the tightest pane that still fits.
+        assert_eq!(positioned_hints("⌘2", 24, 27), "\u{1b}[2;26H⌘2");
+    }
+
+    #[test]
+    fn positioned_hints_skips_when_one_column_short() {
+        // cols 26 leaves no room for the second hint cell at column 27 — dropping
+        // the hint avoids wrapping into the next row and corrupting the block.
+        assert_eq!(positioned_hints("⌘2", 24, 26), "");
+    }
+
+    #[test]
+    fn positioned_hints_skips_when_block_fills_the_pane() {
+        // width == cols: there is no column to the right of the block at all.
+        assert_eq!(positioned_hints("⌘2", 28, 28), "");
     }
 }

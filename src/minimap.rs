@@ -172,7 +172,12 @@ pub fn render(
         if labels && cw >= 4 && cell_text_rows >= 1 && inner >= 2 {
             let label = crate::title::summarize(&p.title, inner, false);
             let label_len = label.chars().count();
-            if label_len >= 2 {
+            // Placement below is char-indexed (one cell per char), correct only
+            // when every char occupies one display column. `summarize` is
+            // width-aware and can return wider glyphs (CJK renames now, icons in
+            // #7) — drop those rather than corrupt the row; width-aware placement
+            // lands in #7.
+            if label_len >= 2 && crate::title::is_single_column(&label) {
                 let row = trow0 + cell_text_rows / 2;
                 let start = px0 + 1 + (inner - label_len) / 2;
                 for (k, ch) in label.chars().enumerate() {
@@ -322,5 +327,19 @@ mod tests {
         // Too narrow (cw < 4 after normalization): no label, only block glyphs.
         let narrow = render(&panes, &test_palette(), 3, 3, true);
         assert!(!narrow.contains('c'), "narrow block should drop the label");
+    }
+
+    #[test]
+    fn labels_with_wide_glyphs_are_dropped_not_corrupted() {
+        // A CJK rename summarizes to multi-column chars. The char-indexed
+        // overlay would advance the cursor one cell per char while the terminal
+        // advances two, mis-centering the label and corrupting the next cell.
+        // Such labels must be dropped wholesale until width-aware placement (#7).
+        let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "実装中", false)];
+        let out = render(&panes, &test_palette(), 12, 3, true);
+        assert!(
+            !out.contains('実'),
+            "wide-glyph label must be dropped, not placed"
+        );
     }
 }

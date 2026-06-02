@@ -1,4 +1,4 @@
-//! Dependency-free pane-title summarization.
+//! Pane-title summarization — pure logic with no zellij dependency.
 //!
 //! A pane's raw title is whatever zellij reports — usually the running
 //! command line (`/usr/bin/cargo watch`, `nvim main.rs`) but sometimes a
@@ -101,11 +101,12 @@ fn is_command_title(title: &str) -> bool {
 /// Truncate `s` to at most `available` display columns.
 ///
 /// When the full string fits, it is returned unchanged. Otherwise, with
-/// `available >= 4` columns we keep `available - 1` columns of content and
-/// append a 1-column ellipsis (guaranteeing at least 3 content columns before
-/// the `…`); with fewer columns there is no room for a meaningful ellipsis, so
-/// content is hard-truncated without one. Width is accumulated per character
-/// so a wide (2-column) glyph is never split across the budget.
+/// `available >= 4` columns we reserve one column for a trailing `…` and fill
+/// the remaining `available - 1` columns with whole characters; with fewer
+/// columns there is no room for a meaningful ellipsis, so content is
+/// hard-truncated without one. Width is accumulated per character and a wide
+/// (2-column) glyph is never split, so the kept content can fall a column short
+/// of the budget — e.g. `"あ…"` uses only 3 of a 4-column budget.
 fn truncated_to_width(s: &str, available: usize) -> String {
     if UnicodeWidthStr::width(s) <= available {
         return s.to_string();
@@ -126,6 +127,18 @@ fn truncated_to_width(s: &str, available: usize) -> String {
         })
         .collect::<String>();
     format!("{kept}{ellipsis}")
+}
+
+/// Whether `label` is safe for a char-indexed (one-cell-per-char) overlay —
+/// every character occupies exactly one display column.
+///
+/// The minimap places labels by character index (one terminal cell per char),
+/// which is only correct when each char is a single column. A summarized label
+/// can still be wider than one column per char (a CJK rename, or an icon glyph
+/// once `icons` is enabled), so the renderer uses this to drop such labels
+/// rather than corrupt the row until width-aware placement lands.
+pub fn is_single_column(label: &str) -> bool {
+    label.chars().all(|c| UnicodeWidthChar::width(c) == Some(1))
 }
 
 #[cfg(test)]
@@ -199,5 +212,15 @@ mod tests {
         assert_eq!(summarize("cargo build", 4, true), "\u{f1617}");
         // Same input with icons off falls back to width-truncated text.
         assert_eq!(summarize("cargo build", 4, false), "car…");
+    }
+
+    #[test]
+    fn is_single_column_flags_wide_glyphs() {
+        // ASCII and the 1-column ellipsis are safe for char-indexed placement.
+        assert!(is_single_column("cargo"));
+        assert!(is_single_column("car…"));
+        assert!(is_single_column(""));
+        // A CJK title occupies two columns per char — unsafe for that path.
+        assert!(!is_single_column("実装中"));
     }
 }

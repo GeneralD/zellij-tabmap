@@ -7,11 +7,17 @@
 
 pub mod config;
 pub mod minimap;
+pub mod paint;
+pub mod projection;
 
 use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
 use config::Config;
+
+/// Text-row height of the bar. The layout pins the plugin pane to `size=3`, and
+/// the minimap renders 2 vertical pixels per text row → a 6px-tall canvas.
+const ROWS: usize = 3;
 
 /// Plugin state: parsed configuration plus the most recent tab and pane
 /// snapshots from zellij.
@@ -70,18 +76,42 @@ impl ZellijPlugin for State {
         }
     }
 
-    fn render(&mut self, _rows: usize, _cols: usize) {
+    fn render(&mut self, _rows: usize, cols: usize) {
         if !self.permitted {
             return;
         }
-        // Placeholder until #1 wires the minimap: project each tab's
-        // PaneManifest entry into `minimap::PaneRect`s and print
-        // `minimap::render(...)`, packing the blocks across the columns.
-        // The renderer it will call is already complete and unit-tested.
+        let Some(active_position) = projection::active_tab(&self.tabs).map(|tab| tab.position)
+        else {
+            return;
+        };
+
+        // Project the active tab's tiled panes into the renderer's rectangles,
+        // then paint its 3-row minimap. The width budget is clamped to a legible
+        // range here, at the render site, while the parser keeps the raw value
+        // (see `config.rs`); §4.4 of the design.
+        let panes = self
+            .panes
+            .panes
+            .get(&active_position)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let width = self.config.active_width.clamp(16, 28).min(cols);
+        let block = minimap::render(&projection::project(panes), width, ROWS, true);
+
+        // Non-active tabs get a minimal `⌘N` placeholder for now; full
+        // width-budgeted multi-tab packing lands in the layout issue (#4).
+        let hints = paint::inactive_hints(
+            self.tabs
+                .iter()
+                .filter(|tab| !tab.active)
+                .map(|tab| tab.position),
+            &self.config.shortcut_prefix,
+        );
+
         print!(
-            "zellij-tabmap: {} tab(s), {} pane group(s) — minimap pending (#1)",
-            self.tabs.len(),
-            self.panes.panes.len()
+            "{}{}",
+            paint::framed(&block, ROWS),
+            paint::positioned_hints(&hints, width)
         );
     }
 }

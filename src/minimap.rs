@@ -17,12 +17,13 @@ use crate::color::Palette;
 // canonical definition lives in `crate::color`).
 pub use crate::color::Rgb;
 
-/// Tokyonight background (`#1a1b26`) — painted on empty space.
-const BG: Rgb = (26, 27, 38);
+/// Tokyonight background (`#1a1b26`) — painted on empty space. Shared with
+/// [`crate::tab_block`], which paints its glyph/hint rungs on the same canvas.
+pub(crate) const BG: Rgb = (26, 27, 38);
 /// Dark text color for labels drawn over a (light) pane fill.
 const LABEL_FG: Rgb = (16, 17, 26);
 
-const RESET: &str = "\x1b[0m";
+pub(crate) const RESET: &str = "\x1b[0m";
 
 /// A pane's position and size in terminal cells, plus display metadata.
 ///
@@ -66,12 +67,27 @@ impl PaneRect {
 
 // ---- ANSI emission ------------------------------------------------------
 
-fn put_fg(out: &mut String, c: Rgb) {
+pub(crate) fn put_fg(out: &mut String, c: Rgb) {
     out.push_str(&format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2));
 }
 
-fn put_bg(out: &mut String, c: Rgb) {
+pub(crate) fn put_bg(out: &mut String, c: Rgb) {
     out.push_str(&format!("\x1b[48;2;{};{};{}m", c.0, c.1, c.2));
+}
+
+/// Which pane titles to overlay as labels — the ladder's per-rung label policy.
+///
+/// The L0–L4 degradation ladder (see [`crate::tab_block`]) selects one of these
+/// per tab from its budgeted width: `All` for a wide active tab, `Focused` for a
+/// medium one, `None` once the block is too narrow for readable text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabelMode {
+    /// Overlay no labels — render the color grid only.
+    None,
+    /// Overlay only the focused pane's label.
+    Focused,
+    /// Overlay every pane's label where width and height allow.
+    All,
 }
 
 // ---- core renderer ------------------------------------------------------
@@ -98,15 +114,15 @@ fn pixel_color(
 /// Render `panes` into a `cols` × `text_rows` block (pixel rows = `2*text_rows`).
 ///
 /// Colors come from `palette`, keyed on each pane's stable id. Returns an ANSI
-/// string of `text_rows` lines, each terminated by a reset and newline. When
-/// `labels` is true, summarized pane titles are overlaid where width allows.
-/// Empty input yields an all-background block.
+/// string of `text_rows` lines, each terminated by a reset and newline. `mode`
+/// selects which summarized pane titles are overlaid where width allows (see
+/// [`LabelMode`]). Empty input yields an all-background block.
 pub fn render(
     panes: &[PaneRect],
     palette: &Palette,
     cols: usize,
     text_rows: usize,
-    labels: bool,
+    mode: LabelMode,
 ) -> String {
     let pw = cols;
     let ph = text_rows * 2;
@@ -163,13 +179,25 @@ pub fn render(
             }
         }
 
-        // Label degradation: require ≥4 cols and ≥1 text row, reserving a 1-col
-        // margin each side so adjacent panes' labels never run together. If the
-        // summarized title is shorter than 2 chars, drop it.
+        // Label degradation: require ≥4 cols and ≥2 text rows, reserving a 1-col
+        // margin each side so adjacent panes' labels never run together. A label
+        // occupies one text row, so a region only one text row tall would have
+        // its entire colored span overwritten with text — losing the pane's
+        // identity. Requiring two rows keeps at least one row of pure color.
+        // This height gate is *per region*, not per tab: it drops the label on
+        // any pane that projects to a single text row — every pane of a deep
+        // (≥3) vertical stack, AND the shorter side of an asymmetric two-way
+        // vertical split, while the taller side (≥2 text rows) keeps its label.
+        // If the summarized title is shorter than 2 chars, drop it.
         let trow0 = py0 / 2;
         let cell_text_rows = py1.div_ceil(2).saturating_sub(trow0);
         let inner = cw.saturating_sub(2);
-        if labels && cw >= 4 && cell_text_rows >= 1 && inner >= 2 {
+        let want_label = match mode {
+            LabelMode::None => false,
+            LabelMode::Focused => p.focused,
+            LabelMode::All => true,
+        };
+        if want_label && cw >= 4 && cell_text_rows >= 2 && inner >= 2 {
             let label = crate::title::summarize(&p.title, inner, false);
             let label_len = label.chars().count();
             // Placement below is char-indexed (one cell per char), correct only
@@ -242,13 +270,13 @@ mod tests {
 
     #[test]
     fn render_emits_requested_row_count() {
-        let out = render(&one_focused(), &test_palette(), 10, 3, false);
+        let out = render(&one_focused(), &test_palette(), 10, 3, LabelMode::None);
         assert_eq!(out.lines().count(), 3);
     }
 
     #[test]
     fn render_uses_truecolor_and_halfblock() {
-        let out = render(&one_focused(), &test_palette(), 10, 3, false);
+        let out = render(&one_focused(), &test_palette(), 10, 3, LabelMode::None);
         assert!(out.contains("\x1b[38;2;"), "expected a truecolor fg escape");
         assert!(out.contains("\x1b[48;2;"), "expected a truecolor bg escape");
         assert!(out.contains('▀'), "expected the upper-half-block glyph");
@@ -257,7 +285,7 @@ mod tests {
     #[test]
     fn render_draws_focus_ring_for_large_pane() {
         let palette = test_palette();
-        let out = render(&one_focused(), &palette, 10, 3, false);
+        let out = render(&one_focused(), &palette, 10, 3, LabelMode::None);
         assert!(
             out.contains(&fg(palette.ring())),
             "focused pane should show its ring color"
@@ -279,7 +307,7 @@ mod tests {
                 &palette,
                 12,
                 3,
-                false,
+                LabelMode::None,
             )
         };
         let id1 = fg(palette.color_for(1));
@@ -302,13 +330,13 @@ mod tests {
 
     #[test]
     fn render_zero_size_is_empty() {
-        assert!(render(&one_focused(), &test_palette(), 0, 3, false).is_empty());
-        assert!(render(&one_focused(), &test_palette(), 10, 0, false).is_empty());
+        assert!(render(&one_focused(), &test_palette(), 0, 3, LabelMode::None).is_empty());
+        assert!(render(&one_focused(), &test_palette(), 10, 0, LabelMode::None).is_empty());
     }
 
     #[test]
     fn render_empty_panes_is_all_background() {
-        let out = render(&[], &test_palette(), 4, 2, false);
+        let out = render(&[], &test_palette(), 4, 2, LabelMode::None);
         assert_eq!(out.lines().count(), 2);
         let (r, g, b) = BG;
         let bg = format!("\x1b[48;2;{};{};{}m", r, g, b);
@@ -322,11 +350,53 @@ mod tests {
     fn labels_appear_when_wide_and_drop_when_narrow() {
         let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "cargo", false)];
         // Wide enough: the label's leading char should be overlaid (dark text fg).
-        let wide = render(&panes, &test_palette(), 12, 3, true);
+        let wide = render(&panes, &test_palette(), 12, 3, LabelMode::All);
         assert!(wide.contains('c'), "expected label text in a wide block");
         // Too narrow (cw < 4 after normalization): no label, only block glyphs.
-        let narrow = render(&panes, &test_palette(), 3, 3, true);
+        let narrow = render(&panes, &test_palette(), 3, 3, LabelMode::All);
         assert!(!narrow.contains('c'), "narrow block should drop the label");
+    }
+
+    #[test]
+    fn deep_vertical_stack_drops_labels() {
+        // Three panes stacked in a 6px-tall canvas leave each region only one
+        // text row. A label there would replace the pane's entire colored span
+        // with text, erasing its identity — so labels degrade to color-only for
+        // a stack this deep, even at a width that would otherwise label.
+        let panes = vec![
+            PaneRect::new(0, 0, 0, 100, 10, "aaa", false),
+            PaneRect::new(1, 0, 10, 100, 10, "bbb", false),
+            PaneRect::new(2, 0, 20, 100, 10, "ccc", false),
+        ];
+        let out = render(&panes, &test_palette(), 16, 3, LabelMode::All);
+        for ch in ['a', 'b', 'c'] {
+            assert!(
+                !out.contains(ch),
+                "deep vertical stack must render color-only, found label char {ch:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn asymmetric_vertical_split_labels_only_the_taller_pane() {
+        // Two stacked panes split 24/16 of a 40-tall group. Projected into the
+        // 6px canvas the top spans pixel rows 0..4 (2 text rows → labeled) while
+        // the bottom spans 4..6 (1 text row → color-only). The height gate is
+        // per region, so the taller pane keeps its label and the shorter loses
+        // it — not an all-or-nothing per-tab decision.
+        let panes = vec![
+            PaneRect::new(0, 0, 0, 100, 24, "zsh", false),
+            PaneRect::new(1, 0, 24, 100, 16, "vim", true),
+        ];
+        let out = render(&panes, &test_palette(), 16, 3, LabelMode::All);
+        assert!(
+            out.contains('z'),
+            "the taller pane (2 text rows) keeps its label"
+        );
+        assert!(
+            !out.contains('v'),
+            "the shorter pane (1 text row) drops its label"
+        );
     }
 
     #[test]
@@ -336,7 +406,7 @@ mod tests {
         // advances two, mis-centering the label and corrupting the next cell.
         // Such labels must be dropped wholesale until width-aware placement (#7).
         let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "実装中", false)];
-        let out = render(&panes, &test_palette(), 12, 3, true);
+        let out = render(&panes, &test_palette(), 12, 3, LabelMode::All);
         assert!(
             !out.contains('実'),
             "wide-glyph label must be dropped, not placed"

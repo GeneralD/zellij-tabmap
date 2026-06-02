@@ -61,7 +61,7 @@ default_tab_template {
 }
 ```
 
-The `releases/latest/download/...` URL always tracks the newest release; pin a specific version with `releases/download/v0.1.0/...` when you prefer a fixed one.
+The hosted URL above always tracks the newest release. To pin a specific version instead, swap it for the per-tag form — e.g. `https://github.com/GeneralD/zellij-tabmap/releases/download/v0.1.0/zellij-tabmap.wasm`.
 
 Contributors hacking on the plugin can [build from source](#build-from-source) and point at the local artifact instead:
 

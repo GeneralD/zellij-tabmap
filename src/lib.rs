@@ -573,10 +573,12 @@ mod tests {
         state.tabs = vec![tab(0, 7), tab(1, 8), tab(2, 100), tab(3, 9), tab(4, 10)];
         state.tab_layout = five_block_layout();
 
-        assert!(
-            state
-                .grab_at(9)
-                .is_some_and(|drag| drag.grabbed_tab_id == 100 && !drag.dragging)
-        );
+        assert!(matches!(
+            state.grab_at(9),
+            Some(DragState {
+                grabbed_tab_id: 100,
+                dragging: false
+            })
+        ));
     }
 }

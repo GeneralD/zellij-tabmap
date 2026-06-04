@@ -104,35 +104,15 @@ impl ZellijPlugin for State {
         // re-render is when a stale selectable state would surface.
         set_selectable(false);
         self.config = Config::from_configuration(&configuration);
-        // ReadApplicationState delivers the Tab/Pane/Mode updates we render
-        // from; ChangeApplicationState authorizes `switch_tab_to` for
-        // click-to-switch (#8); RunActionsAsUser authorizes the
-        // `MoveTabByTabId` run_action behind drag-to-reorder (#10). A plugin
-        // started from `default_tab_template` cannot show the interactive
-        // permission dialog (zellij#4982), so users pre-grant these in the
-        // plugin permission cache and reload.
-        //
-        // ── FORK POINT (#10) ──────────────────────────────────────────────
-        // The third permission is requested UNCONDITIONALLY here (provisional,
-        // so live-verify can exercise reorder). The final shape is a product
-        // decision still open:
-        //   A) keep this unconditional 3-permission request — reorder is on by
-        //      default, but existing v0.1.0 users (who cached only Read+Change)
-        //      get a *frozen, dark* bar on auto-update via the `releases/latest`
-        //      URL until they add RunActionsAsUser. Mitigate with a 0.2.0
-        //      "ACTION REQUIRED" release note.
-        //   B) gate the third permission behind a `reorder` config flag
-        //      (default off → request only Read+Change → no regression; on →
-        //      request all three). Ships #10's headline feature off by default.
-        // Granting is all-or-nothing for tab-template plugins (the request
-        // freezes event delivery until every requested permission is cached;
-        // see zellij#4982), so a graceful partial grant is impossible either way.
-        // ──────────────────────────────────────────────────────────────────
-        request_permission(&[
-            PermissionType::ReadApplicationState,
-            PermissionType::ChangeApplicationState,
-            PermissionType::RunActionsAsUser,
-        ]);
+        // Request exactly the permissions the active config needs — see
+        // [`Self::permissions`]. A plugin started from `default_tab_template`
+        // cannot show the interactive permission dialog (zellij#4982), so users
+        // pre-grant the set in the plugin permission cache and reload; granting
+        // is all-or-nothing (event delivery freezes until every requested
+        // permission is cached), which is exactly why the set must stay minimal
+        // by default (#23): an existing v0.1.0 user who cached only Read+Change
+        // must not hit a third-permission cache miss on auto-update.
+        request_permission(&Self::permissions(&self.config));
         subscribe(&[
             EventType::PermissionRequestResult,
             EventType::TabUpdate,
@@ -261,6 +241,25 @@ impl ZellijPlugin for State {
 }
 
 impl State {
+    /// The permission set this config requires. `ReadApplicationState` (Tab/
+    /// Pane/Mode updates) and `ChangeApplicationState` (`switch_tab_to` for
+    /// click-to-switch, #8) are always needed. `RunActionsAsUser` (the
+    /// `MoveTabByTabId` run_action behind drag-to-reorder, #10) is added **only
+    /// when `reorder` is enabled** (#23) — so the default request matches the
+    /// v0.1.0 two-permission set and existing auto-updaters never freeze on a
+    /// cache miss (zellij#4982). Pure, so the gating is unit-tested directly
+    /// (host imports are stubbed off-wasm, so what `load` requests is otherwise
+    /// unobservable).
+    fn permissions(config: &Config) -> Vec<PermissionType> {
+        [
+            PermissionType::ReadApplicationState,
+            PermissionType::ChangeApplicationState,
+        ]
+        .into_iter()
+        .chain(config.reorder.then_some(PermissionType::RunActionsAsUser))
+        .collect()
+    }
+
     /// Focus the tab whose drawn block contains `column`; a click that landed on
     /// no block (overflow marker, gap, trailing padding) is a no-op. `column` is
     /// the 0-based click column zellij delivers, and
@@ -277,7 +276,15 @@ impl State {
     /// press landed on no tab (overflow marker, gap, padding) — nothing to drag.
     /// The tab is captured by its stable `tab_id` (resolved from the current
     /// layout's position) so the release can find it after any position shift.
+    ///
+    /// Short-circuits to `None` when `reorder` is disabled (#23): without it the
+    /// plugin lacks `RunActionsAsUser`, so arming a drag would only leave the
+    /// gesture "armed but inert" — its `MoveTabByTabId` silently dropped at the
+    /// host boundary. Refusing to arm keeps a press a clean switch-only no-op.
     fn grab_at(&self, column: usize) -> Option<DragState> {
+        if !self.config.reorder {
+            return None;
+        }
         let position = line::position_at_column(&self.tab_layout, column)?;
         let grabbed_tab_id = self
             .tabs
@@ -498,6 +505,78 @@ mod tests {
         assert!(
             state.tab_layout.is_empty(),
             "a frame that cannot draw leaves no stale click geometry"
+        );
+    }
+
+    #[test]
+    fn permissions_exclude_run_actions_when_reorder_off() {
+        // The default (reorder off) requests exactly the v0.1.0 two-permission
+        // set, so an existing user who cached only Read+Change keeps working on
+        // auto-update — no `RunActionsAsUser` cache miss, no frozen bar
+        // (zellij#4982).
+        let config = Config {
+            reorder: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            State::permissions(&config),
+            vec![
+                PermissionType::ReadApplicationState,
+                PermissionType::ChangeApplicationState,
+            ]
+        );
+    }
+
+    #[test]
+    fn permissions_include_run_actions_when_reorder_on() {
+        // Opting into reorder adds the third permission `MoveTabByTabId` needs.
+        let config = Config {
+            reorder: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            State::permissions(&config),
+            vec![
+                PermissionType::ReadApplicationState,
+                PermissionType::ChangeApplicationState,
+                PermissionType::RunActionsAsUser,
+            ]
+        );
+    }
+
+    #[test]
+    fn grab_is_inert_when_reorder_off() {
+        // With reorder off the plugin never even arms a drag: a press over a tab
+        // records no `DragState`, so the gesture is a clean no-op rather than an
+        // "armed but inert" drag whose `MoveTabByTabId` is silently dropped at
+        // the host boundary for lack of `RunActionsAsUser`.
+        let mut state = State::default();
+        state.config = Config {
+            reorder: false,
+            ..Default::default()
+        };
+        state.tabs = vec![tab(0, 7), tab(1, 8), tab(2, 100), tab(3, 9), tab(4, 10)];
+        state.tab_layout = five_block_layout();
+
+        assert!(state.grab_at(9).is_none());
+    }
+
+    #[test]
+    fn grab_arms_a_drag_when_reorder_on() {
+        // With reorder on, a press over position 2's block (columns 8..12) arms a
+        // drag on that tab's stable id (100), not yet dragging.
+        let mut state = State::default();
+        state.config = Config {
+            reorder: true,
+            ..Default::default()
+        };
+        state.tabs = vec![tab(0, 7), tab(1, 8), tab(2, 100), tab(3, 9), tab(4, 10)];
+        state.tab_layout = five_block_layout();
+
+        assert!(
+            state
+                .grab_at(9)
+                .is_some_and(|drag| drag.grabbed_tab_id == 100 && !drag.dragging)
         );
     }
 }

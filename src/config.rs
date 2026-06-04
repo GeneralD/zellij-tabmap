@@ -18,6 +18,12 @@ pub struct Config {
     pub active_width: usize,
     /// Whether to draw a 1px dark separator between adjacent panes.
     pub gutter: bool,
+    /// Whether drag-to-reorder is enabled. Off by default: the plugin then
+    /// requests only the v0.1.0 permission set (`ReadApplicationState` +
+    /// `ChangeApplicationState`), so existing users do not hit a
+    /// `RunActionsAsUser` cache miss on auto-update (zellij#4982). On → the
+    /// third permission is requested and a tab drag reorders.
+    pub reorder: bool,
 }
 
 impl Config {
@@ -27,6 +33,8 @@ impl Config {
     pub const DEFAULT_ACTIVE_WIDTH: usize = 24;
     /// Default gutter state — no separator.
     pub const DEFAULT_GUTTER: bool = false;
+    /// Default reorder state — off, preserving the v0.1.0 permission posture.
+    pub const DEFAULT_REORDER: bool = false;
 
     /// Parse the configuration map, falling back to a default for any missing or
     /// malformed value. Total: never panics on bad input.
@@ -44,6 +52,10 @@ impl Config {
                 .get("gutter")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_GUTTER),
+            reorder: configuration
+                .get("reorder")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_REORDER),
         }
     }
 }
@@ -74,6 +86,7 @@ mod tests {
         assert_eq!(config.shortcut_prefix, "⌘");
         assert_eq!(config.active_width, 24);
         assert!(!config.gutter);
+        assert!(!config.reorder);
     }
 
     #[test]
@@ -82,10 +95,12 @@ mod tests {
             ("shortcut_prefix", "C-"),
             ("active_width", "30"),
             ("gutter", "true"),
+            ("reorder", "true"),
         ]);
         assert_eq!(config.shortcut_prefix, "C-");
         assert_eq!(config.active_width, 30);
         assert!(config.gutter);
+        assert!(config.reorder);
     }
 
     #[test]
@@ -100,10 +115,17 @@ mod tests {
     }
 
     #[test]
+    fn malformed_reorder_falls_back() {
+        assert!(!config_from(&[("reorder", "yes")]).reorder);
+        assert!(!config_from(&[("reorder", "")]).reorder);
+    }
+
+    #[test]
     fn partial_config_keeps_other_defaults() {
         let config = config_from(&[("active_width", "18")]);
         assert_eq!(config.active_width, 18);
         assert_eq!(config.shortcut_prefix, "⌘");
         assert!(!config.gutter);
+        assert!(!config.reorder);
     }
 }

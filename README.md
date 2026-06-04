@@ -54,6 +54,7 @@ default_tab_template {
         plugin location="https://github.com/GeneralD/zellij-tabmap/releases/latest/download/zellij-tabmap.wasm" {
             shortcut_prefix "⌘"
             active_width "24"
+            reorder "false"                             // drag a tab to reorder; "true" also needs RunActionsAsUser
         }
     }
     children
@@ -70,6 +71,8 @@ plugin location="file:/absolute/path/to/zellij-tabmap.wasm"
 ```
 
 > **First-run permission note** ([zellij#4982](https://github.com/zellij-org/zellij/issues/4982)): plugins started from `default_tab_template` cannot show the interactive permission dialog. If the plugin appears inert on first launch, grant it `ReadApplicationState` / `ChangeApplicationState` in zellij's plugin permission cache (`permissions` under the plugin cache) and reload.
+>
+> **Enabling `reorder`** requests a third permission, `RunActionsAsUser` (for the `MoveTabByTabId` action a tab drag performs). Granting is all-or-nothing for tab-template plugins, so when you set `reorder "true"` you must grant all three permissions and reload — otherwise the bar freezes with no prompt. Left at the default (`false`), the plugin requests only the two permissions above, so an existing install keeps working unchanged across updates.
 
 ## Development
 

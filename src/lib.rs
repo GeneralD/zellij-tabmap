@@ -190,17 +190,19 @@ impl ZellijPlugin for State {
             return;
         };
 
-        // Pack the whole tab strip into column spans — active centered, the
-        // tabs that don't fit collapsed into `← +N` / `+N →` end markers — then
-        // render each visible tab into its budgeted block. `pack` clamps the
-        // active width into the legible `16..=28` range, so the parser keeps the
-        // raw value (see `config.rs`); §4.3–4.4 of the design.
+        // Pack the whole tab strip into column spans — active block anchored per
+        // `config.align` (centered → the strip slides to follow focus; left →
+        // pinned at column 0), the tabs that don't fit collapsed into `← +N` /
+        // `+N →` end markers — then render each visible tab into its budgeted
+        // block. `pack` clamps the active width into the legible `16..=28` range,
+        // so the parser keeps the raw value (see `config.rs`); §4.3–4.4 of the design.
         let layout = line::pack(
             cols,
             0,
             self.config.active_width,
             self.tabs.len(),
             active_position,
+            self.config.align,
         );
 
         // Project only the visible tabs' tiled panes (the collapsed ones need no

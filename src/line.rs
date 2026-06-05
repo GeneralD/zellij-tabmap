@@ -61,6 +61,41 @@ pub enum Shift {
     Right,
 }
 
+/// How the all-fit tab row is anchored horizontally (config key `align`).
+///
+/// Governs **only** the branch where every tab fits: `Center` re-centers the
+/// active block on each focus change, so the whole strip slides; `Left` pins the
+/// row's left edge at the start of the tab area — `prefix_width` (column 0 when
+/// no prefix is reserved) — removing the whole-strip slide. `Left` does *not*
+/// freeze every tab's column: the active block is still drawn wider than the
+/// inactives, so the tabs after it shift right as focus crosses them — only the
+/// leftmost tab is truly pinned. When tabs overflow, the layout always follows
+/// the active tab regardless of this — see [`pack`] — because the active block
+/// must stay on screen to be usable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Alignment {
+    /// Pin the row's left edge at the start of the tab area (just after any
+    /// reserved prefix); the strip no longer slides as a whole on focus change
+    /// (tabs after the wider active block still reflow).
+    Left,
+    /// Center the active block; the strip slides to keep it centered.
+    Center,
+}
+
+impl std::str::FromStr for Alignment {
+    type Err = ();
+
+    /// `"left"` / `"center"` (exact match); any other value is an error so the
+    /// config parser falls back to the documented default rather than panicking.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "left" => Ok(Self::Left),
+            "center" => Ok(Self::Center),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Display width of a string in terminal cells — icons and CJK count as their
 /// real width, not their `char` count — via the Unicode width tables.
 pub fn display_width(text: &str) -> usize {
@@ -148,20 +183,23 @@ fn right_marker(hidden: usize) -> String {
     format!(" +{hidden} →")
 }
 
-/// Pack `tab_count` tabs into `cols` columns with the active tab centered.
+/// Pack `tab_count` tabs into `cols` columns, anchoring the all-fit row per
+/// `align` (centered active block, or left-pinned — see [`Alignment`]).
 ///
 /// `prefix_width` reserves leading columns (e.g. a logo); `active_desired` is
 /// the active block's requested width before the `16..=28` clamp. Inactive tabs
 /// share the remainder evenly down to a 2-column floor, capped at the active
 /// width so the active stays the prominent block and genuine slack remains to
-/// center it. When even the floors do not all fit, the tabs farthest from the
-/// active collapse into end markers.
+/// position it. When even the floors do not all fit, the tabs farthest from the
+/// active collapse into end markers and the window follows the active tab —
+/// `align` does not apply, since the active must stay on screen.
 pub fn pack(
     cols: usize,
     prefix_width: usize,
     active_desired: usize,
     tab_count: usize,
     active: usize,
+    align: Alignment,
 ) -> LineLayout {
     let total_w = cols.saturating_sub(prefix_width);
     if tab_count == 0 || total_w == 0 {
@@ -171,7 +209,10 @@ pub fn pack(
     let active_w = active_desired.clamp(ACTIVE_MIN, ACTIVE_MAX).min(total_w);
 
     if tab_count == 1 {
-        let start = prefix_width + (total_w - active_w) / 2;
+        let start = match align {
+            Alignment::Left => prefix_width,
+            Alignment::Center => prefix_width + (total_w - active_w) / 2,
+        };
         return LineLayout {
             tabs: vec![TabHit {
                 position: active,
@@ -192,38 +233,49 @@ pub fn pack(
         (total_w.saturating_sub(active_w) / inactives).clamp(INACTIVE_MIN, inactive_cap);
 
     if active_w + inactives * inactive_w <= total_w {
-        packed_centered(
+        packed_aligned(
             prefix_width,
             total_w,
             active_w,
             inactive_w,
             tab_count,
             active,
+            align,
         )
     } else {
         packed_with_overflow(prefix_width, total_w, active_w, tab_count, active)
     }
 }
 
-/// Every tab fits: lay them out in order and slide the row so the active block
-/// is centered, clamped into the leftover slack so nothing spills off an edge.
-fn packed_centered(
+/// Every tab fits: lay them out in order, anchoring the row per `align`. `Center`
+/// slides the row so the active block is centered (clamped into the leftover
+/// slack so nothing spills off an edge); `Left` zeroes the in-row offset so the
+/// row begins right at `prefix_width` (column 0 when no prefix), and the strip no
+/// longer slides as a whole on a focus change (the wider active block still
+/// pushes the tabs drawn after it to the right).
+fn packed_aligned(
     prefix_width: usize,
     total_w: usize,
     active_w: usize,
     inactive_w: usize,
     tab_count: usize,
     active: usize,
+    align: Alignment,
 ) -> LineLayout {
     let content = active_w + (tab_count - 1) * inactive_w;
     let slack = total_w - content;
-    let active_centered = (total_w - active_w) / 2;
-    // Shift so the blocks before the active one end at the bar's center; clamp
-    // into `0..=slack` so a far-left / far-right active just butts against its
-    // edge instead of dragging tabs out of view.
-    let row_start = active_centered
-        .saturating_sub(active * inactive_w)
-        .min(slack);
+    let row_start = match align {
+        // Left-anchored: the row always starts at the prefix, so the left edge
+        // stays put and the whole-strip slide is gone. (The wider active block
+        // still reflows the tabs drawn after it; only the leftmost is pinned.)
+        Alignment::Left => 0,
+        // Active-centered: shift so the blocks before the active one end at the
+        // bar's center; clamp into `0..=slack` so a far-left / far-right active
+        // just butts against its edge instead of dragging tabs out of view.
+        Alignment::Center => ((total_w - active_w) / 2)
+            .saturating_sub(active * inactive_w)
+            .min(slack),
+    };
 
     let tabs = (0..tab_count)
         .scan(prefix_width + row_start, |col, position| {
@@ -456,7 +508,10 @@ mod tests {
     fn active_clamped_up_to_minimum() {
         // Requesting 8 (< 16) yields a 16-column active block.
         assert_eq!(
-            pack(120, 0, 8, 1, 0).tabs.first().map(|t| t.width),
+            pack(120, 0, 8, 1, 0, Alignment::Center)
+                .tabs
+                .first()
+                .map(|t| t.width),
             Some(ACTIVE_MIN)
         );
     }
@@ -465,7 +520,10 @@ mod tests {
     fn active_clamped_down_to_maximum() {
         // Requesting 40 (> 28) yields a 28-column active block.
         assert_eq!(
-            pack(120, 0, 40, 1, 0).tabs.first().map(|t| t.width),
+            pack(120, 0, 40, 1, 0, Alignment::Center)
+                .tabs
+                .first()
+                .map(|t| t.width),
             Some(ACTIVE_MAX)
         );
     }
@@ -473,27 +531,25 @@ mod tests {
     #[test]
     fn inactive_blocks_keep_a_two_column_floor() {
         // Many tabs in a narrow bar: every shown inactive block is >= 2 wide.
-        let layout = pack(40, 0, 16, 12, 0);
-        assert!(
-            layout
-                .tabs
-                .iter()
-                .filter(|t| !t.active)
-                .all(|t| t.width >= INACTIVE_MIN)
-        );
+        let layout = pack(40, 0, 16, 12, 0, Alignment::Center);
+        assert!(layout
+            .tabs
+            .iter()
+            .filter(|t| !t.active)
+            .all(|t| t.width >= INACTIVE_MIN));
     }
 
     #[test]
     fn packed_width_never_exceeds_cols() {
         // The remainder splits across inactives without the row exceeding cols.
-        let layout = pack(100, 0, 20, 6, 2);
+        let layout = pack(100, 0, 20, 6, 2, Alignment::Center);
         assert!(within_bounds(&layout, 100));
         assert_eq!(layout.tabs.len(), 6);
     }
 
     #[test]
     fn active_block_is_centered_for_odd_tab_count() {
-        let layout = pack(120, 0, 20, 3, 1);
+        let layout = pack(120, 0, 20, 3, 1, Alignment::Center);
         let margins = active_margins(&layout, 120, 0);
         assert!(
             matches!(margins, Some((l, r)) if l.abs_diff(r) <= 1),
@@ -503,7 +559,7 @@ mod tests {
 
     #[test]
     fn active_block_is_centered_for_even_tab_count() {
-        let layout = pack(120, 0, 20, 4, 1);
+        let layout = pack(120, 0, 20, 4, 1, Alignment::Center);
         let margins = active_margins(&layout, 120, 0);
         assert!(
             matches!(margins, Some((l, r)) if l.abs_diff(r) <= 1),
@@ -513,14 +569,94 @@ mod tests {
 
     #[test]
     fn no_overflow_markers_when_every_tab_fits() {
-        let layout = pack(120, 0, 20, 4, 1);
+        let layout = pack(120, 0, 20, 4, 1, Alignment::Center);
         assert!(layout.left.is_none() && layout.right.is_none());
         assert_eq!(layout.tabs.len(), 4);
     }
 
+    fn span_of(layout: &LineLayout, position: usize) -> Option<(usize, usize)> {
+        layout
+            .tabs
+            .iter()
+            .find(|t| t.position == position)
+            .map(|t| (t.start, t.width))
+    }
+
+    #[test]
+    fn left_align_pins_the_left_edge_across_focus_changes() {
+        // Non-degenerate widths so the test means something: active_w = 24,
+        // inactive_w = (120 - 24) / 7 = 13, so the active block is genuinely
+        // wider than an inactive one. Under `Left` the row's left edge is pinned
+        // at column 0 for *every* focus position — the whole-strip slide that
+        // `Center` does is gone. This is the regression this option exists to
+        // prevent; the earlier `active_w == inactive_w` form passed trivially
+        // because nothing could reflow.
+        // prefix = 0 here, so the pinned left edge is absolute column 0.
+        let left_edge = |active| pack(120, 0, 24, 8, active, Alignment::Left).tabs[0].start;
+        assert!(
+            (0..8).all(|active| left_edge(active) == 0),
+            "left edge pinned at 0 for every focus: {:?}",
+            (0..8).map(left_edge).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn left_align_anchors_the_row_at_the_prefix_not_absolute_column_zero() {
+        // With a reserved prefix the pinned edge is `prefix_width`, not absolute
+        // column 0: `Left` zeroes the *in-row* offset, and tabs are laid out from
+        // `prefix_width + 0`. Guards the doc claim against the general
+        // `pack(.., prefix_width, ..)` API, not just the live `prefix == 0` caller.
+        let prefix = 4;
+        let left_edge = |active| pack(120, prefix, 24, 8, active, Alignment::Left).tabs[0].start;
+        assert!(
+            (0..8).all(|active| left_edge(active) == prefix),
+            "left edge pinned at the prefix ({prefix}) for every focus: {:?}",
+            (0..8).map(left_edge).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn left_align_still_reflows_tabs_after_the_active() {
+        // Honesty test: `Left` pins the *left edge*, not every tab's column. The
+        // active block is wider than the inactives, so a tab drawn after it shifts
+        // when focus crosses it. Position 3 sits right of active 2 (so the wide
+        // block precedes it) but left of active 5 (so it does not) — its start
+        // differs between the two. Documents the limitation so a future change
+        // can't quietly over-promise full rigidity.
+        let active_left = pack(120, 0, 24, 8, 2, Alignment::Left);
+        let active_right = pack(120, 0, 24, 8, 5, Alignment::Left);
+        assert_ne!(
+            span_of(&active_left, 3),
+            span_of(&active_right, 3),
+            "a tab after the active reflows as the wide block moves past it"
+        );
+    }
+
+    #[test]
+    fn center_align_slides_the_left_edge_when_the_active_changes() {
+        // The contrast to `Left`, with the same non-degenerate widths: `Center`
+        // re-centers the active block, so the row's left edge shifts with focus.
+        // If this ever stopped differing, `Center` would have silently collapsed
+        // into `Left`.
+        let focus_low = pack(120, 0, 24, 8, 0, Alignment::Center);
+        let focus_high = pack(120, 0, 24, 8, 7, Alignment::Center);
+        assert_ne!(
+            focus_low.tabs[0].start, focus_high.tabs[0].start,
+            "the centered row's left edge slides when the active tab changes"
+        );
+    }
+
+    #[test]
+    fn left_align_single_tab_anchors_at_the_prefix() {
+        // The lone-tab fast path honors `align` too: `Left` starts it at the
+        // prefix instead of centering it.
+        let layout = pack(120, 4, 20, 1, 0, Alignment::Left);
+        assert_eq!(span_of(&layout, 0), Some((4, 20)));
+    }
+
     #[test]
     fn right_overflow_marks_the_tail_when_active_is_first() {
-        let layout = pack(40, 0, 16, 20, 0);
+        let layout = pack(40, 0, 16, 20, 0, Alignment::Center);
         assert!(
             layout.left.is_none(),
             "no left marker when active is the first tab"
@@ -535,7 +671,7 @@ mod tests {
 
     #[test]
     fn left_overflow_marks_the_head_when_active_is_last() {
-        let layout = pack(40, 0, 16, 20, 19);
+        let layout = pack(40, 0, 16, 20, 19, Alignment::Center);
         assert!(
             layout.right.is_none(),
             "no right marker when active is the last tab"
@@ -546,7 +682,7 @@ mod tests {
 
     #[test]
     fn both_ends_overflow_and_counts_sum_to_the_hidden_total() {
-        let layout = pack(40, 0, 16, 20, 10);
+        let layout = pack(40, 0, 16, 20, 10, Alignment::Center);
         assert!(
             hidden(&layout.left) >= 1 && hidden(&layout.right) >= 1,
             "both ends collapse"
@@ -563,7 +699,7 @@ mod tests {
         // 23 cols only hold the active block (16) plus one marker, not both, yet
         // both sides hide tabs (10 left, 9 right). The larger-count side wins —
         // never an arbitrary end — and nothing spills past the bar.
-        let layout = pack(23, 0, 16, 20, 10);
+        let layout = pack(23, 0, 16, 20, 10, Alignment::Center);
         assert_eq!(layout.left.as_ref().map(|o| o.hidden), Some(10));
         assert!(layout.right.is_none(), "the smaller (right) side yields");
         assert!(within_bounds(&layout, 23));
@@ -572,7 +708,7 @@ mod tests {
     #[test]
     fn tab_ranges_are_ordered_in_bounds_and_contiguous() {
         // prefix_width 4 exercises the leading offset.
-        let layout = pack(80, 4, 20, 8, 3);
+        let layout = pack(80, 4, 20, 8, 3, Alignment::Center);
         assert!(within_bounds(&layout, 80));
         assert!(ordered_non_overlapping(&layout));
         assert!(
@@ -598,24 +734,29 @@ mod tests {
         // (every subtraction / clamp stays valid), spans stay ordered and in
         // bounds, and the active tab is always visible. The conservation law is
         // enforced by the debug_assert in `packed_with_overflow`, which runs in
-        // these (debug) test builds.
-        for cols in (0..=160).step_by(3) {
-            for tab_count in 1..=40 {
-                for active in 0..tab_count {
-                    let layout = pack(cols, 0, 20, tab_count, active);
-                    assert!(
-                        within_bounds(&layout, cols),
-                        "bounds: cols={cols} n={tab_count} a={active}"
-                    );
-                    assert!(
-                        ordered_non_overlapping(&layout),
-                        "order: cols={cols} n={tab_count} a={active}"
-                    );
-                    let has_active = layout.tabs.iter().any(|t| t.active && t.position == active);
-                    assert!(
-                        has_active || cols == 0,
-                        "active visible unless the bar is empty: cols={cols} n={tab_count} a={active}"
-                    );
+        // these (debug) test builds. Both alignments are swept — the row anchor
+        // must never violate these invariants, in either the all-fit or the
+        // overflow branch.
+        for align in [Alignment::Left, Alignment::Center] {
+            for cols in (0..=160).step_by(3) {
+                for tab_count in 1..=40 {
+                    for active in 0..tab_count {
+                        let layout = pack(cols, 0, 20, tab_count, active, align);
+                        assert!(
+                            within_bounds(&layout, cols),
+                            "bounds: align={align:?} cols={cols} n={tab_count} a={active}"
+                        );
+                        assert!(
+                            ordered_non_overlapping(&layout),
+                            "order: align={align:?} cols={cols} n={tab_count} a={active}"
+                        );
+                        let has_active =
+                            layout.tabs.iter().any(|t| t.active && t.position == active);
+                        assert!(
+                            has_active || cols == 0,
+                            "active visible unless empty: align={align:?} cols={cols} n={tab_count} a={active}"
+                        );
+                    }
                 }
             }
         }
@@ -691,7 +832,7 @@ mod tests {
         // 1-based index, and every column no tab covers (markers / gaps /
         // padding) resolves to None — so a stray click is never a wrong switch.
         let cols = 40;
-        let layout = pack(cols, 0, 16, 12, 5);
+        let layout = pack(cols, 0, 16, 12, 5, Alignment::Center);
         for tab in &layout.tabs {
             for column in tab.start..tab.start + tab.width {
                 assert_eq!(

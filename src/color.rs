@@ -14,6 +14,12 @@
 /// 24-bit color. Canonical home — [`crate::minimap`] re-exports this alias.
 pub type Rgb = (u8, u8, u8);
 
+/// The sentinel an *unset* theme color collapses to. zellij encodes a missing
+/// color as `Rgb((0, 0, 0))`, `EightBit(0)`, or `EightBit(16)`, all of which
+/// `rgb()` resolves to exactly this — so it doubles as the "invisible fill"
+/// marker [`Palette::new`] drops from the slot cycle (issue #27).
+const BLACK: Rgb = (0, 0, 0);
+
 /// Convert an xterm-256 palette index to RGB.
 ///
 /// Mirrors zellij's own `eightbit_to_rgb`, which is not re-exported to
@@ -95,13 +101,19 @@ impl Default for Palette {
 }
 
 impl Palette {
-    /// Build a palette from theme colors. Empty `slots` falls back to
-    /// `[accent]` so [`color_for`](Self::color_for) never divides by zero.
+    /// Build a palette from theme colors. Drops the [`BLACK`] sentinel that
+    /// unset theme colors collapse to, so it never cycles in as an invisible
+    /// pane fill (issue #27). If no slot survives — empty input, or a list that
+    /// was entirely the sentinel — falls back to `[accent]` so
+    /// [`color_for`](Self::color_for) never divides by zero. (The fallback
+    /// guards the modulo, not visibility: a sentinel `accent` — an unset
+    /// `frame_highlight.base` — is tracked separately in issue #29.)
     pub fn new(slots: Vec<Rgb>, accent: Rgb, ring: Rgb) -> Self {
-        let slots = if slots.is_empty() {
+        let visible: Vec<Rgb> = slots.into_iter().filter(|&c| c != BLACK).collect();
+        let slots = if visible.is_empty() {
             vec![accent]
         } else {
-            slots
+            visible
         };
         Self {
             slots,
@@ -194,6 +206,34 @@ mod tests {
     fn empty_slots_fall_back_to_accent() -> R {
         let p = Palette::new(vec![], (1, 2, 3), (4, 5, 6));
         // No division by zero, and every id resolves to the accent.
+        assert_eq!(p.color_for(0), (1, 2, 3));
+        assert_eq!(p.color_for(99), (1, 2, 3));
+        Ok(())
+    }
+
+    #[test]
+    fn black_sentinel_slots_are_dropped() -> R {
+        // Unset theme colors collapse to (0, 0, 0); that sentinel must never
+        // become a pane fill, or the pane is invisible on the dark canvas.
+        let p = Palette::new(
+            vec![(0, 0, 0), (10, 20, 30), (0, 0, 0), (40, 50, 60)],
+            (200, 100, 50),
+            (250, 250, 250),
+        );
+        // Only the two visible colors remain, cycled in order.
+        assert_eq!(p.color_for(0), (10, 20, 30));
+        assert_eq!(p.color_for(1), (40, 50, 60));
+        assert_eq!(p.color_for(2), (10, 20, 30));
+        // No id ever resolves to the black sentinel.
+        assert!((0..32).all(|id| p.color_for(id) != (0, 0, 0)));
+        Ok(())
+    }
+
+    #[test]
+    fn all_black_slots_fall_back_to_accent() -> R {
+        // A theme that leaves every emphasis color unset yields an all-black
+        // slot list; after dropping the sentinels the modulo guard kicks in.
+        let p = Palette::new(vec![(0, 0, 0), (0, 0, 0)], (1, 2, 3), (4, 5, 6));
         assert_eq!(p.color_for(0), (1, 2, 3));
         assert_eq!(p.color_for(99), (1, 2, 3));
         Ok(())

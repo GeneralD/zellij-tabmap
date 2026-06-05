@@ -65,12 +65,16 @@ pub enum Shift {
 ///
 /// Governs **only** the branch where every tab fits: `Center` re-centers the
 /// active block on each focus change, so the whole strip slides; `Left` pins the
-/// row at column 0, so a tab keeps its place when focus moves. When tabs
-/// overflow, the layout always follows the active tab regardless of this — see
-/// [`pack`] — because the active block must stay on screen to be usable.
+/// row's left edge at column 0, removing the whole-strip slide. `Left` does *not*
+/// freeze every tab's column: the active block is still drawn wider than the
+/// inactives, so the tabs after it shift right as focus crosses them — only the
+/// leftmost tab is truly pinned. When tabs overflow, the layout always follows
+/// the active tab regardless of this — see [`pack`] — because the active block
+/// must stay on screen to be usable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Alignment {
-    /// Anchor the row at the left edge; the strip does not slide on focus change.
+    /// Pin the row's left edge at column 0; the strip no longer slides as a
+    /// whole on focus change (tabs after the wider active block still reflow).
     Left,
     /// Center the active block; the strip slides to keep it centered.
     Center,
@@ -243,8 +247,9 @@ pub fn pack(
 
 /// Every tab fits: lay them out in order, anchoring the row per `align`. `Center`
 /// slides the row so the active block is centered (clamped into the leftover
-/// slack so nothing spills off an edge); `Left` pins the row at column 0, so a
-/// focus change never shifts a tab's position.
+/// slack so nothing spills off an edge); `Left` pins the row's left edge at
+/// column 0, so the strip no longer slides as a whole on a focus change (the
+/// wider active block still pushes the tabs drawn after it to the right).
 fn packed_aligned(
     prefix_width: usize,
     total_w: usize,
@@ -257,8 +262,9 @@ fn packed_aligned(
     let content = active_w + (tab_count - 1) * inactive_w;
     let slack = total_w - content;
     let row_start = match align {
-        // Left-anchored: the row always starts at the prefix, so a tab keeps its
-        // column no matter which one is active — the strip stays put.
+        // Left-anchored: the row always starts at the prefix, so the left edge
+        // stays put and the whole-strip slide is gone. (The wider active block
+        // still reflows the tabs drawn after it; only the leftmost is pinned.)
         Alignment::Left => 0,
         // Active-centered: shift so the blocks before the active one end at the
         // bar's center; clamp into `0..=slack` so a far-left / far-right active
@@ -574,32 +580,50 @@ mod tests {
     }
 
     #[test]
-    fn left_align_does_not_slide_the_row_when_the_active_changes() {
-        // All five tabs fit, so `align` governs. Under `Left` the row is pinned
-        // at column 0: a tab that is inactive in two different focus states keeps
-        // the exact same span — the strip does not slide as focus moves. This is
-        // the regression this option exists to prevent.
-        let focus_low = pack(120, 0, 20, 5, 1, Alignment::Left);
-        let focus_high = pack(120, 0, 20, 5, 3, Alignment::Left);
-        assert_eq!(span_of(&focus_low, 0), Some((0, 20)), "row anchored at 0");
-        assert_eq!(
-            span_of(&focus_low, 0),
-            span_of(&focus_high, 0),
-            "position 0 keeps its span across a focus change"
+    fn left_align_pins_the_left_edge_across_focus_changes() {
+        // Non-degenerate widths so the test means something: active_w = 24,
+        // inactive_w = (120 - 24) / 7 = 13, so the active block is genuinely
+        // wider than an inactive one. Under `Left` the row's left edge is pinned
+        // at column 0 for *every* focus position — the whole-strip slide that
+        // `Center` does is gone. This is the regression this option exists to
+        // prevent; the earlier `active_w == inactive_w` form passed trivially
+        // because nothing could reflow.
+        let left_edge = |active| pack(120, 0, 24, 8, active, Alignment::Left).tabs[0].start;
+        assert!(
+            (0..8).all(|active| left_edge(active) == 0),
+            "left edge pinned at 0 for every focus: {:?}",
+            (0..8).map(left_edge).collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn center_align_slides_the_row_when_the_active_changes() {
-        // The contrast to `Left`: `Center` re-centers the active block, so the
-        // row's left edge shifts with focus. If this ever stopped differing,
-        // `Center` would have silently collapsed into `Left`.
-        let focus_low = pack(120, 0, 20, 5, 1, Alignment::Center);
-        let focus_high = pack(120, 0, 20, 5, 3, Alignment::Center);
+    fn left_align_still_reflows_tabs_after_the_active() {
+        // Honesty test: `Left` pins the *left edge*, not every tab's column. The
+        // active block is wider than the inactives, so a tab drawn after it shifts
+        // when focus crosses it. Position 3 sits right of active 2 (so the wide
+        // block precedes it) but left of active 5 (so it does not) — its start
+        // differs between the two. Documents the limitation so a future change
+        // can't quietly over-promise full rigidity.
+        let active_left = pack(120, 0, 24, 8, 2, Alignment::Left);
+        let active_right = pack(120, 0, 24, 8, 5, Alignment::Left);
         assert_ne!(
-            span_of(&focus_low, 0),
-            span_of(&focus_high, 0),
-            "the centered row slides when the active tab changes"
+            span_of(&active_left, 3),
+            span_of(&active_right, 3),
+            "a tab after the active reflows as the wide block moves past it"
+        );
+    }
+
+    #[test]
+    fn center_align_slides_the_left_edge_when_the_active_changes() {
+        // The contrast to `Left`, with the same non-degenerate widths: `Center`
+        // re-centers the active block, so the row's left edge shifts with focus.
+        // If this ever stopped differing, `Center` would have silently collapsed
+        // into `Left`.
+        let focus_low = pack(120, 0, 24, 8, 0, Alignment::Center);
+        let focus_high = pack(120, 0, 24, 8, 7, Alignment::Center);
+        assert_ne!(
+            focus_low.tabs[0].start, focus_high.tabs[0].start,
+            "the centered row's left edge slides when the active tab changes"
         );
     }
 

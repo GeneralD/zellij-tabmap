@@ -19,9 +19,9 @@ pub struct Config {
     /// Column budget for the focused tab's detailed minimap.
     pub active_width: usize,
     /// How the all-fit tab row is anchored: `Center` re-centers the active block
-    /// on each focus change (the strip slides), `Left` pins the row at column 0
-    /// (no slide). Governs the all-fit case only — an overflowing strip always
-    /// follows the active tab. See [`Alignment`].
+    /// on each focus change (the strip slides), `Left` pins the row's left edge
+    /// at column 0 (no whole-strip slide). Governs the all-fit case only — an
+    /// overflowing strip always follows the active tab. See [`Alignment`].
     pub align: Alignment,
     /// Whether to draw a 1px dark separator between adjacent panes.
     pub gutter: bool,

@@ -106,7 +106,8 @@ impl Palette {
     /// pane fill (issue #27). If no slot survives — empty input, or a list that
     /// was entirely the sentinel — falls back to `[accent]` so
     /// [`color_for`](Self::color_for) never divides by zero. (The fallback
-    /// guards the modulo, not visibility: a sentinel `accent` is out of scope.)
+    /// guards the modulo, not visibility: a sentinel `accent` — an unset
+    /// `frame_highlight.base` — is tracked separately in issue #29.)
     pub fn new(slots: Vec<Rgb>, accent: Rgb, ring: Rgb) -> Self {
         let visible: Vec<Rgb> = slots.into_iter().filter(|&c| c != BLACK).collect();
         let slots = if visible.is_empty() {

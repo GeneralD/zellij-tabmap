@@ -30,7 +30,7 @@ A focused pane is emphasized with a bright outline ring and a more vivid hue; no
 🚧 **Early development.**
 
 - ✅ The minimap renderer ([`src/minimap.rs`](src/minimap.rs)) is complete and unit-tested (HSL palette, half-block grid, focus ring, label degradation). It has **no zellij dependency**, so it runs and is tested on the native host.
-- ✅ The full render pipeline is wired: every tab is projected from zellij's live `PaneManifest`, packed into column spans ([`src/line.rs`](src/line.rs)), assembled into a per-tab block at its budgeted width ([`src/tab_block.rs`](src/tab_block.rs)), and composed into the multi-row bar ([`src/paint.rs`](src/paint.rs)). The active tab is centered; tabs that don't fit collapse into `← +N` / `+N →` end markers.
+- ✅ The full render pipeline is wired: every tab is projected from zellij's live `PaneManifest`, packed into column spans ([`src/line.rs`](src/line.rs)), assembled into a per-tab block at its budgeted width ([`src/tab_block.rs`](src/tab_block.rs)), and composed into the multi-row bar ([`src/paint.rs`](src/paint.rs)). By default the active tab is centered, so the strip slides to follow focus; set `align "left"` to anchor the row instead. Tabs that don't fit collapse into `← +N` / `+N →` end markers.
 - ✅ Mouse click-to-switch is wired: a left click anywhere inside a tab's column span focuses that tab. The hit-test ([`src/line.rs`](src/line.rs)) maps the clicked column to the tab drawn there and converts its 0-based position to the 1-based index `switch_tab_to` expects, so it needs the `ChangeApplicationState` permission (see the first-run note below).
 - ✅ [`v0.1.0`](https://github.com/GeneralD/zellij-tabmap/releases/tag/v0.1.0) is published with a prebuilt `zellij-tabmap.wasm` asset, so you can wire the plugin in by URL without building it — see [Use it in zellij](#use-it-in-zellij).
 
@@ -54,6 +54,7 @@ default_tab_template {
         plugin location="https://github.com/GeneralD/zellij-tabmap/releases/latest/download/zellij-tabmap.wasm" {
             shortcut_prefix "⌘"
             active_width "24"
+            align "center"                              // "center" slides to keep the active tab centered; "left" anchors the row (all-fit only)
             reorder "false"                             // drag a tab to reorder; "true" also needs RunActionsAsUser
         }
     }
@@ -70,6 +71,8 @@ Contributors hacking on the plugin can [build from source](#build-from-source) a
 plugin location="file:/absolute/path/to/zellij-tabmap.wasm"
 ```
 
+> **`align` — center vs left.** When every tab fits, `align` decides how the row is anchored: `center` (default) re-centers the active block on each focus change, so the whole strip slides horizontally; `left` pins the row at column 0, so a tab keeps its place when focus moves. `align` governs the all-fit case **only** — when tabs overflow, the visible window always follows the active tab (with `← +N` / `+N →` markers) regardless of `align`, because the active tab must stay on screen. The default stays `center` so existing layouts render unchanged on update.
+>
 > **First-run permission note** ([zellij#4982](https://github.com/zellij-org/zellij/issues/4982)): plugins started from `default_tab_template` cannot show the interactive permission dialog. If the plugin appears inert on first launch, grant it `ReadApplicationState` / `ChangeApplicationState` in zellij's plugin permission cache (`permissions` under the plugin cache) and reload.
 >
 > **Enabling `reorder`** requests a third permission, `RunActionsAsUser` (for the `MoveTabByTabId` action a tab drag performs). Granting is all-or-nothing for tab-template plugins, so when you set `reorder "true"` you must grant all three permissions and reload — otherwise the bar freezes with no prompt. Left at the default (`false`), the plugin requests only the two permissions above, so an existing install keeps working unchanged across updates.

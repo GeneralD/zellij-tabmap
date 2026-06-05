@@ -9,6 +9,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::line::Alignment;
+
 /// Parsed plugin configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -16,6 +18,11 @@ pub struct Config {
     pub shortcut_prefix: String,
     /// Column budget for the focused tab's detailed minimap.
     pub active_width: usize,
+    /// How the all-fit tab row is anchored: `Center` re-centers the active block
+    /// on each focus change (the strip slides), `Left` pins the row at column 0
+    /// (no slide). Governs the all-fit case only — an overflowing strip always
+    /// follows the active tab. See [`Alignment`].
+    pub align: Alignment,
     /// Whether to draw a 1px dark separator between adjacent panes.
     pub gutter: bool,
     /// Whether drag-to-reorder is enabled. Off by default: the plugin then
@@ -31,6 +38,10 @@ impl Config {
     pub const DEFAULT_SHORTCUT_PREFIX: &str = "⌘";
     /// Default column budget for the focused tab's minimap.
     pub const DEFAULT_ACTIVE_WIDTH: usize = 24;
+    /// Default alignment — centered, preserving the v0.1.0 sliding behavior so
+    /// existing layouts render identically on auto-update (opt into `left` to
+    /// anchor the row). Same default-preserve rationale as [`Self::DEFAULT_REORDER`].
+    pub const DEFAULT_ALIGN: Alignment = Alignment::Center;
     /// Default gutter state — no separator.
     pub const DEFAULT_GUTTER: bool = false;
     /// Default reorder state — off, preserving the v0.1.0 permission posture.
@@ -48,6 +59,10 @@ impl Config {
                 .get("active_width")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_ACTIVE_WIDTH),
+            align: configuration
+                .get("align")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_ALIGN),
             gutter: configuration
                 .get("gutter")
                 .and_then(|raw| raw.parse().ok())

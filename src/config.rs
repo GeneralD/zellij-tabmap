@@ -100,6 +100,7 @@ mod tests {
         let config = config_from(&[]);
         assert_eq!(config.shortcut_prefix, "⌘");
         assert_eq!(config.active_width, 24);
+        assert_eq!(config.align, Alignment::Center);
         assert!(!config.gutter);
         assert!(!config.reorder);
     }
@@ -109,13 +110,31 @@ mod tests {
         let config = config_from(&[
             ("shortcut_prefix", "C-"),
             ("active_width", "30"),
+            ("align", "left"),
             ("gutter", "true"),
             ("reorder", "true"),
         ]);
         assert_eq!(config.shortcut_prefix, "C-");
         assert_eq!(config.active_width, 30);
+        assert_eq!(config.align, Alignment::Left);
         assert!(config.gutter);
         assert!(config.reorder);
+    }
+
+    #[test]
+    fn parses_explicit_center_align() {
+        assert_eq!(config_from(&[("align", "center")]).align, Alignment::Center);
+    }
+
+    #[test]
+    fn malformed_align_falls_back() {
+        assert_eq!(
+            config_from(&[("align", "sideways")]).align,
+            Alignment::Center
+        );
+        assert_eq!(config_from(&[("align", "")]).align, Alignment::Center);
+        // Case-sensitive: only exact "left" / "center" parse.
+        assert_eq!(config_from(&[("align", "Left")]).align, Alignment::Center);
     }
 
     #[test]
@@ -140,6 +159,7 @@ mod tests {
         let config = config_from(&[("active_width", "18")]);
         assert_eq!(config.active_width, 18);
         assert_eq!(config.shortcut_prefix, "⌘");
+        assert_eq!(config.align, Alignment::Center);
         assert!(!config.gutter);
         assert!(!config.reorder);
     }

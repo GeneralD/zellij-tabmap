@@ -565,6 +565,52 @@ mod tests {
         assert_eq!(layout.tabs.len(), 4);
     }
 
+    fn span_of(layout: &LineLayout, position: usize) -> Option<(usize, usize)> {
+        layout
+            .tabs
+            .iter()
+            .find(|t| t.position == position)
+            .map(|t| (t.start, t.width))
+    }
+
+    #[test]
+    fn left_align_does_not_slide_the_row_when_the_active_changes() {
+        // All five tabs fit, so `align` governs. Under `Left` the row is pinned
+        // at column 0: a tab that is inactive in two different focus states keeps
+        // the exact same span — the strip does not slide as focus moves. This is
+        // the regression this option exists to prevent.
+        let focus_low = pack(120, 0, 20, 5, 1, Alignment::Left);
+        let focus_high = pack(120, 0, 20, 5, 3, Alignment::Left);
+        assert_eq!(span_of(&focus_low, 0), Some((0, 20)), "row anchored at 0");
+        assert_eq!(
+            span_of(&focus_low, 0),
+            span_of(&focus_high, 0),
+            "position 0 keeps its span across a focus change"
+        );
+    }
+
+    #[test]
+    fn center_align_slides_the_row_when_the_active_changes() {
+        // The contrast to `Left`: `Center` re-centers the active block, so the
+        // row's left edge shifts with focus. If this ever stopped differing,
+        // `Center` would have silently collapsed into `Left`.
+        let focus_low = pack(120, 0, 20, 5, 1, Alignment::Center);
+        let focus_high = pack(120, 0, 20, 5, 3, Alignment::Center);
+        assert_ne!(
+            span_of(&focus_low, 0),
+            span_of(&focus_high, 0),
+            "the centered row slides when the active tab changes"
+        );
+    }
+
+    #[test]
+    fn left_align_single_tab_anchors_at_the_prefix() {
+        // The lone-tab fast path honors `align` too: `Left` starts it at the
+        // prefix instead of centering it.
+        let layout = pack(120, 4, 20, 1, 0, Alignment::Left);
+        assert_eq!(span_of(&layout, 0), Some((4, 20)));
+    }
+
     #[test]
     fn right_overflow_marks_the_tail_when_active_is_first() {
         let layout = pack(40, 0, 16, 20, 0, Alignment::Center);
@@ -645,24 +691,29 @@ mod tests {
         // (every subtraction / clamp stays valid), spans stay ordered and in
         // bounds, and the active tab is always visible. The conservation law is
         // enforced by the debug_assert in `packed_with_overflow`, which runs in
-        // these (debug) test builds.
-        for cols in (0..=160).step_by(3) {
-            for tab_count in 1..=40 {
-                for active in 0..tab_count {
-                    let layout = pack(cols, 0, 20, tab_count, active, Alignment::Center);
-                    assert!(
-                        within_bounds(&layout, cols),
-                        "bounds: cols={cols} n={tab_count} a={active}"
-                    );
-                    assert!(
-                        ordered_non_overlapping(&layout),
-                        "order: cols={cols} n={tab_count} a={active}"
-                    );
-                    let has_active = layout.tabs.iter().any(|t| t.active && t.position == active);
-                    assert!(
-                        has_active || cols == 0,
-                        "active visible unless the bar is empty: cols={cols} n={tab_count} a={active}"
-                    );
+        // these (debug) test builds. Both alignments are swept — the row anchor
+        // must never violate these invariants, in either the all-fit or the
+        // overflow branch.
+        for align in [Alignment::Left, Alignment::Center] {
+            for cols in (0..=160).step_by(3) {
+                for tab_count in 1..=40 {
+                    for active in 0..tab_count {
+                        let layout = pack(cols, 0, 20, tab_count, active, align);
+                        assert!(
+                            within_bounds(&layout, cols),
+                            "bounds: align={align:?} cols={cols} n={tab_count} a={active}"
+                        );
+                        assert!(
+                            ordered_non_overlapping(&layout),
+                            "order: align={align:?} cols={cols} n={tab_count} a={active}"
+                        );
+                        let has_active =
+                            layout.tabs.iter().any(|t| t.active && t.position == active);
+                        assert!(
+                            has_active || cols == 0,
+                            "active visible unless empty: align={align:?} cols={cols} n={tab_count} a={active}"
+                        );
+                    }
                 }
             }
         }

@@ -65,7 +65,8 @@ pub enum Shift {
 ///
 /// Governs **only** the branch where every tab fits: `Center` re-centers the
 /// active block on each focus change, so the whole strip slides; `Left` pins the
-/// row's left edge at column 0, removing the whole-strip slide. `Left` does *not*
+/// row's left edge at the start of the tab area — `prefix_width` (column 0 when
+/// no prefix is reserved) — removing the whole-strip slide. `Left` does *not*
 /// freeze every tab's column: the active block is still drawn wider than the
 /// inactives, so the tabs after it shift right as focus crosses them — only the
 /// leftmost tab is truly pinned. When tabs overflow, the layout always follows
@@ -73,8 +74,9 @@ pub enum Shift {
 /// must stay on screen to be usable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Alignment {
-    /// Pin the row's left edge at column 0; the strip no longer slides as a
-    /// whole on focus change (tabs after the wider active block still reflow).
+    /// Pin the row's left edge at the start of the tab area (just after any
+    /// reserved prefix); the strip no longer slides as a whole on focus change
+    /// (tabs after the wider active block still reflow).
     Left,
     /// Center the active block; the strip slides to keep it centered.
     Center,
@@ -247,9 +249,10 @@ pub fn pack(
 
 /// Every tab fits: lay them out in order, anchoring the row per `align`. `Center`
 /// slides the row so the active block is centered (clamped into the leftover
-/// slack so nothing spills off an edge); `Left` pins the row's left edge at
-/// column 0, so the strip no longer slides as a whole on a focus change (the
-/// wider active block still pushes the tabs drawn after it to the right).
+/// slack so nothing spills off an edge); `Left` zeroes the in-row offset so the
+/// row begins right at `prefix_width` (column 0 when no prefix), and the strip no
+/// longer slides as a whole on a focus change (the wider active block still
+/// pushes the tabs drawn after it to the right).
 fn packed_aligned(
     prefix_width: usize,
     total_w: usize,
@@ -588,10 +591,26 @@ mod tests {
         // `Center` does is gone. This is the regression this option exists to
         // prevent; the earlier `active_w == inactive_w` form passed trivially
         // because nothing could reflow.
+        // prefix = 0 here, so the pinned left edge is absolute column 0.
         let left_edge = |active| pack(120, 0, 24, 8, active, Alignment::Left).tabs[0].start;
         assert!(
             (0..8).all(|active| left_edge(active) == 0),
             "left edge pinned at 0 for every focus: {:?}",
+            (0..8).map(left_edge).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn left_align_anchors_the_row_at_the_prefix_not_absolute_column_zero() {
+        // With a reserved prefix the pinned edge is `prefix_width`, not absolute
+        // column 0: `Left` zeroes the *in-row* offset, and tabs are laid out from
+        // `prefix_width + 0`. Guards the doc claim against the general
+        // `pack(.., prefix_width, ..)` API, not just the live `prefix == 0` caller.
+        let prefix = 4;
+        let left_edge = |active| pack(120, prefix, 24, 8, active, Alignment::Left).tabs[0].start;
+        assert!(
+            (0..8).all(|active| left_edge(active) == prefix),
+            "left edge pinned at the prefix ({prefix}) for every focus: {:?}",
             (0..8).map(left_edge).collect::<Vec<_>>()
         );
     }

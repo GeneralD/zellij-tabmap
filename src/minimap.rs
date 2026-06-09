@@ -251,12 +251,13 @@ mod tests {
     use super::*;
 
     /// A palette with distinct, easily recognized colors so tests can assert
-    /// on exact escape sequences. Accent and ring are unlike every slot.
+    /// on exact escape sequences. Accent and ring are unlike every slot — the
+    /// ring is pinned explicitly so the asserted escapes stay value-stable.
     fn test_palette() -> Palette {
         Palette::new(
             vec![(10, 20, 30), (40, 50, 60), (70, 80, 90)],
             (200, 100, 50),
-            (250, 250, 250),
+            Some((250, 250, 250)),
         )
     }
 

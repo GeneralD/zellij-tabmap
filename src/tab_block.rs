@@ -136,10 +136,17 @@ pub fn assemble(
     position: usize,
     prefix: &str,
 ) -> TabBlock {
+    // DRAFT (#32): stamp the `⌘N` shortcut *inside* the color block as a top-left
+    // badge (dark text over the pane fill) rather than as a separate gutter, so
+    // the shortcut shows on comfortably-sized tabs. The minimap self-skips the
+    // badge when the block is too narrow to host it, so the grid rungs degrade
+    // cleanly; the narrowest rungs (L3 glyph, L4 hint) carry the number on their
+    // own as before.
+    let hint = hint_text(position, prefix);
     let lines = match level_for(width) {
-        Level::L0 => grid_lines(panes, palette, width, LabelMode::All),
-        Level::L1 => grid_lines(panes, palette, width, LabelMode::Focused),
-        Level::L2 => grid_lines(panes, palette, width, LabelMode::None),
+        Level::L0 => grid_lines(panes, palette, width, LabelMode::All, Some(&hint)),
+        Level::L1 => grid_lines(panes, palette, width, LabelMode::Focused, Some(&hint)),
+        Level::L2 => grid_lines(panes, palette, width, LabelMode::None, Some(&hint)),
         Level::L3 => glyph_lines(panes, palette, width),
         Level::L4 => hint_lines(position, prefix, palette, width),
     };
@@ -166,13 +173,16 @@ pub fn hint_text(position: usize, prefix: &str) -> String {
 // ---- rung renderers -----------------------------------------------------
 
 /// L0–L2: delegate the color grid to the minimap with the rung's label policy.
+/// `badge`, when present, is the shortcut hint stamped into the block's top-left
+/// (the minimap drops it if the block is too narrow to host it).
 fn grid_lines(
     panes: &[PaneRect],
     palette: &Palette,
     width: usize,
     mode: LabelMode,
+    badge: Option<&str>,
 ) -> [StyledLine; ROWS] {
-    let block = minimap::render(panes, palette, width, ROWS, mode);
+    let block = minimap::render(panes, palette, width, ROWS, mode, badge);
     three_rows(block.lines().map(str::to_string), width)
 }
 
@@ -571,6 +581,24 @@ mod tests {
         assert!(
             !joined.contains('b'),
             "non-focused pane's label must be dropped at L1"
+        );
+    }
+
+    #[test]
+    fn grid_rungs_stamp_the_shortcut_badge() {
+        // A grid rung (here L0) stamps the "⌘N" shortcut as an in-block badge so
+        // the shortcut shows on comfortably-sized tabs, not only on the narrow
+        // L4 hint. The ⌘ glyph is the witness: a color escape carries only
+        // digits, so the badge digit can't be told from the grid, but ⌘ is
+        // unique to the badge. The narrow rungs (L3 glyph, L4 hint) carry the
+        // number themselves, so the badge wiring only needs locking on a grid
+        // rung.
+        let palette = test_palette();
+        let block = assemble(&one_pane("shell"), &palette, 16, 0, "\u{2318}");
+        let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
+        assert!(
+            joined.contains('\u{2318}'),
+            "an L0 grid must stamp the ⌘ badge inside the block"
         );
     }
 

@@ -20,6 +20,12 @@ pub type Rgb = (u8, u8, u8);
 /// marker [`Palette::new`] drops from the slot cycle (issue #27).
 const BLACK: Rgb = (0, 0, 0);
 
+/// Visible stand-in when a theme leaves `accent` (`frame_highlight.base`) unset
+/// and it collapses to [`BLACK`]. Matches [`Palette::fallback`]'s accent
+/// (`from_eightbit(166)`, orange) so a degenerate theme still gets a sensible
+/// focus color rather than an invisible one.
+const DEFAULT_ACCENT: Rgb = (215, 95, 0);
+
 /// Convert an xterm-256 palette index to RGB.
 ///
 /// Mirrors zellij's own `eightbit_to_rgb`, which is not re-exported to
@@ -105,10 +111,16 @@ impl Palette {
     /// unset theme colors collapse to, so it never cycles in as an invisible
     /// pane fill (issue #27). If no slot survives — empty input, or a list that
     /// was entirely the sentinel — falls back to `[accent]` so
-    /// [`color_for`](Self::color_for) never divides by zero. (The fallback
-    /// guards the modulo, not visibility: a sentinel `accent` — an unset
-    /// `frame_highlight.base` — is tracked separately in issue #29.)
+    /// [`color_for`](Self::color_for) never divides by zero. (A sentinel
+    /// `accent` — an unset `frame_highlight.base` — is replaced with
+    /// [`DEFAULT_ACCENT`] so the focused fill and the single-slot fallback
+    /// stay visible.)
     pub fn new(slots: Vec<Rgb>, accent: Rgb, ring: Rgb) -> Self {
+        let accent = if accent == BLACK {
+            DEFAULT_ACCENT
+        } else {
+            accent
+        };
         let visible: Vec<Rgb> = slots.into_iter().filter(|&c| c != BLACK).collect();
         let slots = if visible.is_empty() {
             vec![accent]
@@ -236,6 +248,27 @@ mod tests {
         let p = Palette::new(vec![(0, 0, 0), (0, 0, 0)], (1, 2, 3), (4, 5, 6));
         assert_eq!(p.color_for(0), (1, 2, 3));
         assert_eq!(p.color_for(99), (1, 2, 3));
+        Ok(())
+    }
+
+    #[test]
+    fn sentinel_accent_falls_back_to_default() -> R {
+        // An unset frame_highlight.base collapses accent to (0,0,0); the focused
+        // fill must stay visible, so accent is replaced with DEFAULT_ACCENT.
+        let p = Palette::new(vec![(10, 20, 30)], (0, 0, 0), (5, 5, 5));
+        assert_eq!(p.style_for(0, true).fill, DEFAULT_ACCENT);
+        assert_ne!(p.style_for(0, true).fill, (0, 0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn all_black_slots_and_accent_fall_back_to_visible_default() -> R {
+        // Worst case: every emphasis color AND frame_highlight.base unset. The
+        // slot cycle drops to [accent], and accent is the visible default — so
+        // color_for never yields black.
+        let p = Palette::new(vec![(0, 0, 0), (0, 0, 0)], (0, 0, 0), (4, 5, 6));
+        assert_eq!(p.color_for(0), DEFAULT_ACCENT);
+        assert_ne!(p.color_for(0), (0, 0, 0));
         Ok(())
     }
 

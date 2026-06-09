@@ -24,6 +24,12 @@ pub struct Config {
     /// whole-strip slide). Governs the all-fit case only — an overflowing strip
     /// always follows the active tab. See [`Alignment`].
     pub align: Alignment,
+    /// Columns of empty space left between adjacent tab blocks so the boundary
+    /// between screens reads clearly. `0` (default) packs the blocks flush — the
+    /// v0.1.0 look. The gap renders as the cleared pane background for free:
+    /// [`crate::paint::compose`] positions each block at its own column and never
+    /// paints the inter-block columns.
+    pub tab_gap: usize,
     /// Whether to draw a 1px dark separator between adjacent panes.
     pub gutter: bool,
     /// Whether drag-to-reorder is enabled. Off by default: the plugin then
@@ -43,6 +49,11 @@ impl Config {
     /// existing layouts render identically on auto-update (opt into `left` to
     /// anchor the row). Same default-preserve rationale as [`Self::DEFAULT_REORDER`].
     pub const DEFAULT_ALIGN: Alignment = Alignment::Center;
+    /// Default gap between tab blocks — `0`, packing blocks flush so existing
+    /// layouts render identically to v0.1.0 on auto-update (opt into a positive
+    /// value to separate the screens). Same default-preserve rationale as
+    /// [`Self::DEFAULT_ALIGN`] / [`Self::DEFAULT_REORDER`].
+    pub const DEFAULT_TAB_GAP: usize = 0;
     /// Default gutter state — no separator.
     pub const DEFAULT_GUTTER: bool = false;
     /// Default reorder state — off, preserving the v0.1.0 permission posture.
@@ -64,6 +75,10 @@ impl Config {
                 .get("align")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_ALIGN),
+            tab_gap: configuration
+                .get("tab_gap")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_TAB_GAP),
             gutter: configuration
                 .get("gutter")
                 .and_then(|raw| raw.parse().ok())
@@ -102,6 +117,7 @@ mod tests {
         assert_eq!(config.shortcut_prefix, "⌘");
         assert_eq!(config.active_width, 24);
         assert_eq!(config.align, Alignment::Center);
+        assert_eq!(config.tab_gap, 0);
         assert!(!config.gutter);
         assert!(!config.reorder);
     }
@@ -112,12 +128,14 @@ mod tests {
             ("shortcut_prefix", "C-"),
             ("active_width", "30"),
             ("align", "left"),
+            ("tab_gap", "1"),
             ("gutter", "true"),
             ("reorder", "true"),
         ]);
         assert_eq!(config.shortcut_prefix, "C-");
         assert_eq!(config.active_width, 30);
         assert_eq!(config.align, Alignment::Left);
+        assert_eq!(config.tab_gap, 1);
         assert!(config.gutter);
         assert!(config.reorder);
     }
@@ -156,11 +174,20 @@ mod tests {
     }
 
     #[test]
+    fn malformed_tab_gap_falls_back() {
+        assert_eq!(config_from(&[("tab_gap", "wide")]).tab_gap, 0);
+        assert_eq!(config_from(&[("tab_gap", "")]).tab_gap, 0);
+        // Negative values do not parse as `usize` — fall back to the default.
+        assert_eq!(config_from(&[("tab_gap", "-1")]).tab_gap, 0);
+    }
+
+    #[test]
     fn partial_config_keeps_other_defaults() {
         let config = config_from(&[("active_width", "18")]);
         assert_eq!(config.active_width, 18);
         assert_eq!(config.shortcut_prefix, "⌘");
         assert_eq!(config.align, Alignment::Center);
+        assert_eq!(config.tab_gap, 0);
         assert!(!config.gutter);
         assert!(!config.reorder);
     }

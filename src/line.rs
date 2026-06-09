@@ -190,9 +190,15 @@ fn right_marker(hidden: usize) -> String {
 /// the active block's requested width before the `16..=28` clamp. Inactive tabs
 /// share the remainder evenly down to a 2-column floor, capped at the active
 /// width so the active stays the prominent block and genuine slack remains to
-/// position it. When even the floors do not all fit, the tabs farthest from the
-/// active collapse into end markers and the window follows the active tab —
-/// `align` does not apply, since the active must stay on screen.
+/// position it. `gap` columns of empty space are kept between every adjacent
+/// pair of blocks (config key `tab_gap`); that budget is reserved *before* the
+/// inactives share the remainder, so separating the screens never pushes the row
+/// past the bar. The gap is drawn as the cleared pane background — no separator
+/// glyph — so [`crate::paint::compose`] needs no change. When even the floors
+/// plus gaps do not all fit, the tabs farthest from the active collapse into end
+/// markers and the window follows the active tab — `align` does not apply, since
+/// the active must stay on screen. No gap is inserted between a tab and an
+/// overflow marker: the markers carry their own padding spaces.
 pub fn pack(
     cols: usize,
     prefix_width: usize,
@@ -200,6 +206,7 @@ pub fn pack(
     tab_count: usize,
     active: usize,
     align: Alignment,
+    gap: usize,
 ) -> LineLayout {
     let total_w = cols.saturating_sub(prefix_width);
     if tab_count == 0 || total_w == 0 {
@@ -226,24 +233,29 @@ pub fn pack(
     }
 
     let inactives = tab_count - 1;
+    // One gap sits between each adjacent pair of blocks (`inactives` gaps for
+    // `tab_count` tabs); reserve that budget before the inactives share the
+    // remainder, so separating the screens never pushes the row past `total_w`.
+    let gaps = inactives * gap;
     // Cap at the active width (raised to the floor so the clamp bounds never
     // invert on a sub-2-column bar), then floor at 2 columns.
     let inactive_cap = active_w.max(INACTIVE_MIN);
-    let inactive_w =
-        (total_w.saturating_sub(active_w) / inactives).clamp(INACTIVE_MIN, inactive_cap);
+    let inactive_w = (total_w.saturating_sub(active_w).saturating_sub(gaps) / inactives)
+        .clamp(INACTIVE_MIN, inactive_cap);
 
-    if active_w + inactives * inactive_w <= total_w {
+    if active_w + inactives * inactive_w + gaps <= total_w {
         packed_aligned(
             prefix_width,
             total_w,
             active_w,
             inactive_w,
+            gap,
             tab_count,
             active,
             align,
         )
     } else {
-        packed_with_overflow(prefix_width, total_w, active_w, tab_count, active)
+        packed_with_overflow(prefix_width, total_w, active_w, gap, tab_count, active)
     }
 }
 
@@ -253,16 +265,22 @@ pub fn pack(
 /// row begins right at `prefix_width` (column 0 when no prefix), and the strip no
 /// longer slides as a whole on a focus change (the wider active block still
 /// pushes the tabs drawn after it to the right).
+// Eight distinct geometric inputs (widths, gap, count, focus, anchor) — each a
+// genuinely independent layout quantity, not a sign this pure helper does too
+// much. Bundling them into a struct is a separate refactor, not this gap change.
+#[allow(clippy::too_many_arguments)]
 fn packed_aligned(
     prefix_width: usize,
     total_w: usize,
     active_w: usize,
     inactive_w: usize,
+    gap: usize,
     tab_count: usize,
     active: usize,
     align: Alignment,
 ) -> LineLayout {
-    let content = active_w + (tab_count - 1) * inactive_w;
+    // `content` spans the blocks plus the `tab_count - 1` inter-block gaps.
+    let content = active_w + (tab_count - 1) * (inactive_w + gap);
     let slack = total_w - content;
     let row_start = match align {
         // Left-anchored: the row always starts at the prefix, so the left edge
@@ -271,9 +289,10 @@ fn packed_aligned(
         Alignment::Left => 0,
         // Active-centered: shift so the blocks before the active one end at the
         // bar's center; clamp into `0..=slack` so a far-left / far-right active
-        // just butts against its edge instead of dragging tabs out of view.
+        // just butts against its edge instead of dragging tabs out of view. Each
+        // block before the active spans `inactive_w + gap`.
         Alignment::Center => ((total_w - active_w) / 2)
-            .saturating_sub(active * inactive_w)
+            .saturating_sub(active * (inactive_w + gap))
             .min(slack),
     };
 
@@ -290,7 +309,9 @@ fn packed_aligned(
                 width,
                 active: position == active,
             };
-            *col += width;
+            // Advance past this block and the gap that follows it; the trailing
+            // gap after the last block is harmless (no further hit is emitted).
+            *col += width + gap;
             Some(hit)
         })
         .collect();
@@ -309,6 +330,7 @@ fn packed_with_overflow(
     prefix_width: usize,
     total_w: usize,
     active_w: usize,
+    gap: usize,
     tab_count: usize,
     active: usize,
 ) -> LineLayout {
@@ -316,7 +338,8 @@ fn packed_with_overflow(
     let after = tab_count - 1 - active;
     let inactive_w = INACTIVE_MIN;
 
-    let (visible_left, visible_right) = grow(before, after, inactive_w, active_w, total_w, 0, 0);
+    let (visible_left, visible_right) =
+        grow(before, after, inactive_w, gap, active_w, total_w, 0, 0);
     let left_hidden = before - visible_left;
     let right_hidden = after - visible_right;
 
@@ -331,7 +354,10 @@ fn packed_with_overflow(
     // two ends are treated symmetrically (see `marker_fit`) so a narrow bar
     // never suppresses one end while keeping the other — an asymmetric drop
     // would understate the hidden count and mislead hit-test consumers.
-    let content_w = (visible_left + visible_right) * inactive_w + active_w;
+    // The visible window of `visible_left + 1 + visible_right` blocks carries
+    // `visible_left + visible_right` inter-block gaps (none between a tab and an
+    // overflow marker — markers pad themselves).
+    let content_w = (visible_left + visible_right) * (inactive_w + gap) + active_w;
     let slack = total_w.saturating_sub(content_w);
     let left_w = if left_hidden > 0 {
         display_width(&left_marker(left_hidden))
@@ -366,11 +392,13 @@ fn packed_with_overflow(
                 width,
                 active: position == active,
             };
-            *col += width;
+            *col += width + gap;
             Some(hit)
         })
         .collect();
 
+    // `tab.start + tab.width` (not the scan's running `col`) excludes the
+    // trailing gap, so the right marker butts directly against the last block.
     let right_start = tabs.last().map_or(tabs_start, |tab| tab.start + tab.width);
     let right = show_right.then(|| Overflow {
         hidden: right_hidden,
@@ -409,10 +437,15 @@ fn marker_fit(
 /// Greedily grow the visible window outward from the active tab, always adding
 /// to the side with fewer shown tabs (so the active stays centered), as long as
 /// the next tab plus the markers for whatever stays hidden still fit.
+// Eight inputs: the two side budgets, the per-block width, the gap, the active
+// width, the column budget, and the two accumulating window counts the recursion
+// carries — each independent, not a sign this tail-recursive helper does too much.
+#[allow(clippy::too_many_arguments)]
 fn grow(
     before: usize,
     after: usize,
     inactive_w: usize,
+    gap: usize,
     active_w: usize,
     total_w: usize,
     visible_left: usize,
@@ -428,7 +461,9 @@ fn grow(
         } else {
             0
         });
-        (left + right) * inactive_w + active_w + markers <= total_w
+        // A window of `left + 1 + right` blocks holds `left + right` inter-block
+        // gaps, so each shown inactive costs `inactive_w + gap`.
+        (left + right) * (inactive_w + gap) + active_w + markers <= total_w
     };
     let can_left = visible_left < before && fits(visible_left + 1, visible_right);
     let can_right = visible_right < after && fits(visible_left, visible_right + 1);
@@ -440,6 +475,7 @@ fn grow(
             before,
             after,
             inactive_w,
+            gap,
             active_w,
             total_w,
             visible_left + 1,
@@ -450,6 +486,7 @@ fn grow(
         before,
         after,
         inactive_w,
+        gap,
         active_w,
         total_w,
         visible_left,
@@ -508,7 +545,7 @@ mod tests {
     fn active_clamped_up_to_minimum() {
         // Requesting 8 (< 16) yields a 16-column active block.
         assert_eq!(
-            pack(120, 0, 8, 1, 0, Alignment::Center)
+            pack(120, 0, 8, 1, 0, Alignment::Center, 0)
                 .tabs
                 .first()
                 .map(|t| t.width),
@@ -520,7 +557,7 @@ mod tests {
     fn active_clamped_down_to_maximum() {
         // Requesting 40 (> 28) yields a 28-column active block.
         assert_eq!(
-            pack(120, 0, 40, 1, 0, Alignment::Center)
+            pack(120, 0, 40, 1, 0, Alignment::Center, 0)
                 .tabs
                 .first()
                 .map(|t| t.width),
@@ -531,25 +568,27 @@ mod tests {
     #[test]
     fn inactive_blocks_keep_a_two_column_floor() {
         // Many tabs in a narrow bar: every shown inactive block is >= 2 wide.
-        let layout = pack(40, 0, 16, 12, 0, Alignment::Center);
-        assert!(layout
-            .tabs
-            .iter()
-            .filter(|t| !t.active)
-            .all(|t| t.width >= INACTIVE_MIN));
+        let layout = pack(40, 0, 16, 12, 0, Alignment::Center, 0);
+        assert!(
+            layout
+                .tabs
+                .iter()
+                .filter(|t| !t.active)
+                .all(|t| t.width >= INACTIVE_MIN)
+        );
     }
 
     #[test]
     fn packed_width_never_exceeds_cols() {
         // The remainder splits across inactives without the row exceeding cols.
-        let layout = pack(100, 0, 20, 6, 2, Alignment::Center);
+        let layout = pack(100, 0, 20, 6, 2, Alignment::Center, 0);
         assert!(within_bounds(&layout, 100));
         assert_eq!(layout.tabs.len(), 6);
     }
 
     #[test]
     fn active_block_is_centered_for_odd_tab_count() {
-        let layout = pack(120, 0, 20, 3, 1, Alignment::Center);
+        let layout = pack(120, 0, 20, 3, 1, Alignment::Center, 0);
         let margins = active_margins(&layout, 120, 0);
         assert!(
             matches!(margins, Some((l, r)) if l.abs_diff(r) <= 1),
@@ -559,7 +598,7 @@ mod tests {
 
     #[test]
     fn active_block_is_centered_for_even_tab_count() {
-        let layout = pack(120, 0, 20, 4, 1, Alignment::Center);
+        let layout = pack(120, 0, 20, 4, 1, Alignment::Center, 0);
         let margins = active_margins(&layout, 120, 0);
         assert!(
             matches!(margins, Some((l, r)) if l.abs_diff(r) <= 1),
@@ -569,7 +608,7 @@ mod tests {
 
     #[test]
     fn no_overflow_markers_when_every_tab_fits() {
-        let layout = pack(120, 0, 20, 4, 1, Alignment::Center);
+        let layout = pack(120, 0, 20, 4, 1, Alignment::Center, 0);
         assert!(layout.left.is_none() && layout.right.is_none());
         assert_eq!(layout.tabs.len(), 4);
     }
@@ -592,7 +631,7 @@ mod tests {
         // prevent; the earlier `active_w == inactive_w` form passed trivially
         // because nothing could reflow.
         // prefix = 0 here, so the pinned left edge is absolute column 0.
-        let left_edge = |active| pack(120, 0, 24, 8, active, Alignment::Left).tabs[0].start;
+        let left_edge = |active| pack(120, 0, 24, 8, active, Alignment::Left, 0).tabs[0].start;
         assert!(
             (0..8).all(|active| left_edge(active) == 0),
             "left edge pinned at 0 for every focus: {:?}",
@@ -607,7 +646,7 @@ mod tests {
         // `prefix_width + 0`. Guards the doc claim against the general
         // `pack(.., prefix_width, ..)` API, not just the live `prefix == 0` caller.
         let prefix = 4;
-        let left_edge = |active| pack(120, prefix, 24, 8, active, Alignment::Left).tabs[0].start;
+        let left_edge = |active| pack(120, prefix, 24, 8, active, Alignment::Left, 0).tabs[0].start;
         assert!(
             (0..8).all(|active| left_edge(active) == prefix),
             "left edge pinned at the prefix ({prefix}) for every focus: {:?}",
@@ -623,8 +662,8 @@ mod tests {
         // block precedes it) but left of active 5 (so it does not) — its start
         // differs between the two. Documents the limitation so a future change
         // can't quietly over-promise full rigidity.
-        let active_left = pack(120, 0, 24, 8, 2, Alignment::Left);
-        let active_right = pack(120, 0, 24, 8, 5, Alignment::Left);
+        let active_left = pack(120, 0, 24, 8, 2, Alignment::Left, 0);
+        let active_right = pack(120, 0, 24, 8, 5, Alignment::Left, 0);
         assert_ne!(
             span_of(&active_left, 3),
             span_of(&active_right, 3),
@@ -638,8 +677,8 @@ mod tests {
         // re-centers the active block, so the row's left edge shifts with focus.
         // If this ever stopped differing, `Center` would have silently collapsed
         // into `Left`.
-        let focus_low = pack(120, 0, 24, 8, 0, Alignment::Center);
-        let focus_high = pack(120, 0, 24, 8, 7, Alignment::Center);
+        let focus_low = pack(120, 0, 24, 8, 0, Alignment::Center, 0);
+        let focus_high = pack(120, 0, 24, 8, 7, Alignment::Center, 0);
         assert_ne!(
             focus_low.tabs[0].start, focus_high.tabs[0].start,
             "the centered row's left edge slides when the active tab changes"
@@ -650,13 +689,13 @@ mod tests {
     fn left_align_single_tab_anchors_at_the_prefix() {
         // The lone-tab fast path honors `align` too: `Left` starts it at the
         // prefix instead of centering it.
-        let layout = pack(120, 4, 20, 1, 0, Alignment::Left);
+        let layout = pack(120, 4, 20, 1, 0, Alignment::Left, 0);
         assert_eq!(span_of(&layout, 0), Some((4, 20)));
     }
 
     #[test]
     fn right_overflow_marks_the_tail_when_active_is_first() {
-        let layout = pack(40, 0, 16, 20, 0, Alignment::Center);
+        let layout = pack(40, 0, 16, 20, 0, Alignment::Center, 0);
         assert!(
             layout.left.is_none(),
             "no left marker when active is the first tab"
@@ -671,7 +710,7 @@ mod tests {
 
     #[test]
     fn left_overflow_marks_the_head_when_active_is_last() {
-        let layout = pack(40, 0, 16, 20, 19, Alignment::Center);
+        let layout = pack(40, 0, 16, 20, 19, Alignment::Center, 0);
         assert!(
             layout.right.is_none(),
             "no right marker when active is the last tab"
@@ -682,7 +721,7 @@ mod tests {
 
     #[test]
     fn both_ends_overflow_and_counts_sum_to_the_hidden_total() {
-        let layout = pack(40, 0, 16, 20, 10, Alignment::Center);
+        let layout = pack(40, 0, 16, 20, 10, Alignment::Center, 0);
         assert!(
             hidden(&layout.left) >= 1 && hidden(&layout.right) >= 1,
             "both ends collapse"
@@ -699,7 +738,7 @@ mod tests {
         // 23 cols only hold the active block (16) plus one marker, not both, yet
         // both sides hide tabs (10 left, 9 right). The larger-count side wins —
         // never an arbitrary end — and nothing spills past the bar.
-        let layout = pack(23, 0, 16, 20, 10, Alignment::Center);
+        let layout = pack(23, 0, 16, 20, 10, Alignment::Center, 0);
         assert_eq!(layout.left.as_ref().map(|o| o.hidden), Some(10));
         assert!(layout.right.is_none(), "the smaller (right) side yields");
         assert!(within_bounds(&layout, 23));
@@ -708,7 +747,7 @@ mod tests {
     #[test]
     fn tab_ranges_are_ordered_in_bounds_and_contiguous() {
         // prefix_width 4 exercises the leading offset.
-        let layout = pack(80, 4, 20, 8, 3, Alignment::Center);
+        let layout = pack(80, 4, 20, 8, 3, Alignment::Center, 0);
         assert!(within_bounds(&layout, 80));
         assert!(ordered_non_overlapping(&layout));
         assert!(
@@ -728,6 +767,86 @@ mod tests {
         assert_eq!(display_width(&right_marker(12)), 6); // " +12 →"
     }
 
+    // ---- tab_gap (inter-block separation) --------------------------------
+
+    #[test]
+    fn gap_separates_every_adjacent_pair_in_the_all_fit_row() {
+        // Four tabs that all fit with a 2-column gap between each pair. Every
+        // adjacent pair is separated by exactly `gap` cleared columns — the
+        // separation this option exists to produce — and nothing spills off the
+        // bar despite the reserved gap budget.
+        let gap = 2;
+        let layout = pack(120, 0, 20, 4, 1, Alignment::Center, gap);
+        assert!(
+            layout.left.is_none() && layout.right.is_none(),
+            "every tab fits"
+        );
+        assert_eq!(layout.tabs.len(), 4);
+        assert!(
+            layout
+                .tabs
+                .windows(2)
+                .all(|w| w[1].start == w[0].start + w[0].width + gap),
+            "each adjacent pair separated by exactly {gap} columns: {:?}",
+            layout
+                .tabs
+                .iter()
+                .map(|t| (t.start, t.width))
+                .collect::<Vec<_>>()
+        );
+        assert!(within_bounds(&layout, 120));
+    }
+
+    #[test]
+    fn zero_gap_packs_blocks_flush() {
+        // Regression guard: gap = 0 reproduces the v0.1.0 flush look — adjacent
+        // blocks touch, with no cleared column between them.
+        let layout = pack(120, 0, 20, 4, 1, Alignment::Center, 0);
+        assert!(
+            layout
+                .tabs
+                .windows(2)
+                .all(|w| w[1].start == w[0].start + w[0].width),
+            "blocks touch when gap is 0"
+        );
+    }
+
+    #[test]
+    fn gap_separates_visible_blocks_in_the_overflow_branch() {
+        // Many tabs in a narrow bar force the overflow branch. With a gap the
+        // visible window's blocks are still separated by exactly `gap`, the row
+        // stays in bounds, and (when drawn) the right marker butts directly
+        // against the last block — no gap precedes an overflow marker, since the
+        // marker carries its own padding spaces.
+        let gap = 1;
+        let layout = pack(40, 0, 16, 20, 10, Alignment::Center, gap);
+        assert!(within_bounds(&layout, 40));
+        assert!(ordered_non_overlapping(&layout));
+        assert!(
+            layout.tabs.len() >= 2,
+            "the window shows several blocks so the gap check is meaningful"
+        );
+        assert!(
+            layout
+                .tabs
+                .windows(2)
+                .all(|w| w[1].start == w[0].start + w[0].width + gap),
+            "visible blocks separated by exactly {gap}: {:?}",
+            layout
+                .tabs
+                .iter()
+                .map(|t| (t.start, t.width))
+                .collect::<Vec<_>>()
+        );
+        if let (Some(last), Some(right)) = (layout.tabs.last(), layout.right.as_ref()) {
+            assert_eq!(
+                right.start,
+                last.start + last.width,
+                "right marker butts against the last block, no gap before it"
+            );
+        }
+    }
+
     #[test]
     fn invariants_hold_across_the_input_space() {
         // A deterministic sweep standing in for property testing: no panic
@@ -736,26 +855,30 @@ mod tests {
         // enforced by the debug_assert in `packed_with_overflow`, which runs in
         // these (debug) test builds. Both alignments are swept — the row anchor
         // must never violate these invariants, in either the all-fit or the
-        // overflow branch.
-        for align in [Alignment::Left, Alignment::Center] {
-            for cols in (0..=160).step_by(3) {
-                for tab_count in 1..=40 {
-                    for active in 0..tab_count {
-                        let layout = pack(cols, 0, 20, tab_count, active, align);
-                        assert!(
-                            within_bounds(&layout, cols),
-                            "bounds: align={align:?} cols={cols} n={tab_count} a={active}"
-                        );
-                        assert!(
-                            ordered_non_overlapping(&layout),
-                            "order: align={align:?} cols={cols} n={tab_count} a={active}"
-                        );
-                        let has_active =
-                            layout.tabs.iter().any(|t| t.active && t.position == active);
-                        assert!(
-                            has_active || cols == 0,
-                            "active visible unless empty: align={align:?} cols={cols} n={tab_count} a={active}"
-                        );
+        // overflow branch. The `gap` dimension covers the inter-block separation:
+        // reserving gap budget must never push a span out of bounds or make two
+        // spans overlap, in either branch.
+        for gap in [0, 1, 2, 3] {
+            for align in [Alignment::Left, Alignment::Center] {
+                for cols in (0..=160).step_by(3) {
+                    for tab_count in 1..=40 {
+                        for active in 0..tab_count {
+                            let layout = pack(cols, 0, 20, tab_count, active, align, gap);
+                            assert!(
+                                within_bounds(&layout, cols),
+                                "bounds: gap={gap} align={align:?} cols={cols} n={tab_count} a={active}"
+                            );
+                            assert!(
+                                ordered_non_overlapping(&layout),
+                                "order: gap={gap} align={align:?} cols={cols} n={tab_count} a={active}"
+                            );
+                            let has_active =
+                                layout.tabs.iter().any(|t| t.active && t.position == active);
+                            assert!(
+                                has_active || cols == 0,
+                                "active visible unless empty: gap={gap} align={align:?} cols={cols} n={tab_count} a={active}"
+                            );
+                        }
                     }
                 }
             }
@@ -832,7 +955,7 @@ mod tests {
         // 1-based index, and every column no tab covers (markers / gaps /
         // padding) resolves to None — so a stray click is never a wrong switch.
         let cols = 40;
-        let layout = pack(cols, 0, 16, 12, 5, Alignment::Center);
+        let layout = pack(cols, 0, 16, 12, 5, Alignment::Center, 0);
         for tab in &layout.tabs {
             for column in tab.start..tab.start + tab.width {
                 assert_eq!(

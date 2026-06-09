@@ -214,6 +214,11 @@ pub fn pack(
     }
     let active = active.min(tab_count - 1);
     let active_w = active_desired.clamp(ACTIVE_MIN, ACTIVE_MAX).min(total_w);
+    // `gap` is unbounded config input (`tab_gap`); clamp it to the render
+    // budget at entry, mirroring `active_w` above, so every downstream
+    // `inactives * gap` / `inactive_w + gap` term stays in-bounds and a
+    // pathological value just collapses the blocks instead of overflowing.
+    let gap = gap.min(total_w);
 
     if tab_count == 1 {
         let start = match align {
@@ -857,8 +862,13 @@ mod tests {
         // must never violate these invariants, in either the all-fit or the
         // overflow branch. The `gap` dimension covers the inter-block separation:
         // reserving gap budget must never push a span out of bounds or make two
-        // spans overlap, in either branch.
-        for gap in [0, 1, 2, 3] {
+        // spans overlap, in either branch. The last two values are pathological:
+        // a gap wider than most `cols` here, and `usize::MAX` — the overflow
+        // canary. `gap` is unbounded config (`tab_gap`), so without the entry
+        // clamp `inactives * gap` would overflow and panic in these debug builds;
+        // the invariants holding under `usize::MAX` proves the clamp degrades the
+        // layout gracefully (blocks collapse) instead of breaking.
+        for gap in [0, 1, 2, 3, 100, usize::MAX] {
             for align in [Alignment::Left, Alignment::Center] {
                 for cols in (0..=160).step_by(3) {
                     for tab_count in 1..=40 {

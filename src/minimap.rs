@@ -226,8 +226,16 @@ pub fn render(
     // one-cell margin, drawn over the pane fill so it reads inside the block. It
     // is dropped wholesale when it would not fit within the width.
     const BADGE_COL: usize = 1;
+    // Char-indexed stamping (one cell per char below) is correct only when every
+    // badge glyph is one display column. `shortcut_prefix` is user-configurable,
+    // so a wide glyph would desync the cells from the terminal's advance and
+    // corrupt the row — drop the badge wholesale in that case, mirroring the
+    // wide-glyph label guard above (width-aware placement lands in #7). The
+    // default `⌘ ` + digit is all single-column, so the common case is untouched.
     let badge_chars: Vec<char> = badge.map(|b| b.chars().collect()).unwrap_or_default();
-    let badge_fits = !badge_chars.is_empty() && BADGE_COL + badge_chars.len() <= pw;
+    let badge_fits = badge.is_some_and(crate::title::is_single_column)
+        && !badge_chars.is_empty()
+        && BADGE_COL + badge_chars.len() <= pw;
 
     let mut out = String::with_capacity(text_rows * pw * 24);
     for tr in 0..text_rows {
@@ -472,6 +480,23 @@ mod tests {
         assert!(
             !narrow.contains('⌘'),
             "too-narrow block must drop the badge"
+        );
+    }
+
+    #[test]
+    fn badge_with_wide_glyphs_is_dropped_not_corrupted() {
+        // `shortcut_prefix` is user-configurable, so a badge can carry a
+        // fullwidth glyph (`符` advances two terminal columns). The stamping
+        // loop writes one char per cell, so a wide glyph would desync the cells
+        // from the cursor and corrupt the row. The block here is wide enough to
+        // host a single-column badge, so width is not the reason for the drop —
+        // the wide glyph is. The badge must be dropped wholesale, mirroring the
+        // wide-glyph label guard.
+        let panes = one_focused();
+        let out = render(&panes, &test_palette(), 10, 3, LabelMode::None, Some("符1"));
+        assert!(
+            !out.contains('符'),
+            "wide-glyph badge must be dropped, not placed"
         );
     }
 }

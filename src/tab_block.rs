@@ -136,7 +136,7 @@ pub fn assemble(
     position: usize,
     prefix: &str,
 ) -> TabBlock {
-    // DRAFT (#32): stamp the `⌘N` shortcut *inside* the color block as a top-left
+    // #32: stamp the `⌘N` shortcut *inside* the color block as a top-left
     // badge (dark text over the pane fill) rather than as a separate gutter, so
     // the shortcut shows on comfortably-sized tabs. The minimap self-skips the
     // badge when the block is too narrow to host it, so the grid rungs degrade

@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 use zellij_tabmap::color::{Palette, Rgb};
-use zellij_tabmap::line::{pack, Alignment};
+use zellij_tabmap::line::{Alignment, pack};
 use zellij_tabmap::minimap::PaneRect;
 use zellij_tabmap::paint::bar;
 

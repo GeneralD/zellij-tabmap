@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 
 use crate::line::Alignment;
+use crate::minimap::GradientMode;
 
 /// Parsed plugin configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +39,10 @@ pub struct Config {
     /// `RunActionsAsUser` cache miss on auto-update (zellij#4982). On → the
     /// third permission is requested and a tab drag reorders.
     pub reorder: bool,
+    /// Gradient sweep applied to each pane block's fill. Off by default —
+    /// flat fills, the v0.1.0 look — so existing layouts render identically
+    /// on auto-update. See [`GradientMode`].
+    pub gradient: GradientMode,
 }
 
 impl Config {
@@ -60,6 +65,9 @@ impl Config {
     pub const DEFAULT_GUTTER: bool = false;
     /// Default reorder state — off, preserving the v0.1.0 permission posture.
     pub const DEFAULT_REORDER: bool = false;
+    /// Default gradient mode — `Off`, preserving the flat v0.1.0 fills on
+    /// auto-update. Same default-preserve rationale as [`Self::DEFAULT_ALIGN`].
+    pub const DEFAULT_GRADIENT: GradientMode = GradientMode::Off;
 
     /// Parse the configuration map, falling back to a default for any missing or
     /// malformed value. Total: never panics on bad input.
@@ -89,6 +97,10 @@ impl Config {
                 .get("reorder")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_REORDER),
+            gradient: configuration
+                .get("gradient")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_GRADIENT),
         }
     }
 }
@@ -122,6 +134,7 @@ mod tests {
         assert_eq!(config.tab_gap, 0);
         assert!(!config.gutter);
         assert!(!config.reorder);
+        assert_eq!(config.gradient, GradientMode::Off);
     }
 
     #[test]
@@ -133,6 +146,7 @@ mod tests {
             ("tab_gap", "1"),
             ("gutter", "true"),
             ("reorder", "true"),
+            ("gradient", "sheen"),
         ]);
         assert_eq!(config.shortcut_prefix, "C-");
         assert_eq!(config.active_width, 30);
@@ -140,6 +154,29 @@ mod tests {
         assert_eq!(config.tab_gap, 1);
         assert!(config.gutter);
         assert!(config.reorder);
+        assert_eq!(config.gradient, GradientMode::Sheen);
+    }
+
+    #[test]
+    fn parses_weave_gradient() {
+        assert_eq!(
+            config_from(&[("gradient", "weave")]).gradient,
+            GradientMode::Weave
+        );
+    }
+
+    #[test]
+    fn malformed_gradient_falls_back() {
+        assert_eq!(
+            config_from(&[("gradient", "rainbow")]).gradient,
+            GradientMode::Off
+        );
+        assert_eq!(config_from(&[("gradient", "")]).gradient, GradientMode::Off);
+        // Case-sensitive: only exact "off" / "sheen" / "weave" parse.
+        assert_eq!(
+            config_from(&[("gradient", "Sheen")]).gradient,
+            GradientMode::Off
+        );
     }
 
     #[test]

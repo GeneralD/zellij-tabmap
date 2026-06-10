@@ -1,0 +1,3 @@
+#:schema https://json.schemastore.org/rustfmt.json
+edition = "2021"
+style_edition = "2024"

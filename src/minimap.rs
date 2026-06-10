@@ -93,8 +93,9 @@ pub enum LabelMode {
 /// Gradient fill applied to each pane block (config key `gradient`, #40).
 ///
 /// The sweep is *per pane block*: each filled column `x` of a pane spanning
-/// `w` pixel columns is `lerp(fill, stop, x / (w - 1))`, where the stop is the
-/// pane fill's luminance-shifted shade ([`crate::color::gradient_at`]). Focus
+/// `w` pixel columns is `mix(fill, stop, smoothstep(x / (w - 1)))`, where the
+/// stop is the pane fill's luminance-shifted shade and the mix runs in
+/// linear-light space ([`crate::color::gradient_at`], #46). Focus
 /// ring, label glyphs, and badge glyphs stay solid; label/badge background
 /// cells follow the sweep so text doesn't punch flat-colored holes in it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -148,7 +149,13 @@ fn fill_at(
     if span <= 1 {
         return fill;
     }
-    let t = ((px - px0) * 100 / (span - 1)) as u8;
+    // Smoothstep-ease the column ratio (3r² − 2r³) so the sweep eases in and
+    // out instead of ramping linearly — the first/last columns no longer show
+    // the largest perceived jumps (#46). Endpoints are fixed points (0→0,
+    // 1→1), so the base fill and the stop are reached exactly.
+    let ratio = (px - px0) as f32 / (span - 1) as f32;
+    let eased = ratio * ratio * (3.0 - 2.0 * ratio);
+    let t = (eased * 100.0).round() as u8;
     match gradient {
         GradientMode::Sheen => crate::color::gradient_at(fill, t),
         GradientMode::Weave if py.is_multiple_of(2) => crate::color::gradient_at(fill, t),

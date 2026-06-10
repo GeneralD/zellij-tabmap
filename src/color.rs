@@ -104,24 +104,65 @@ fn derived_ring(fill: Rgb) -> Rgb {
     mixed(fill, target, SHIFT_PERCENT)
 }
 
+/// One sRGB channel decoded to linear light (`0.0..=1.0`), via the exact
+/// piecewise sRGB EOTF (not the `^2.2` approximation). Inverse of
+/// [`linear_to_channel`].
+fn channel_to_linear(c: u8) -> f32 {
+    let s = c as f32 / 255.0;
+    if s <= 0.04045 {
+        return s / 12.92;
+    }
+    ((s + 0.055) / 1.055).powf(2.4)
+}
+
+/// Linear-light intensity re-encoded to an sRGB channel. Inverse of
+/// [`channel_to_linear`]; clamps so float drift never wraps a byte.
+fn linear_to_channel(l: f32) -> u8 {
+    let s = if l <= 0.003_130_8 {
+        l * 12.92
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// Blend `from` toward `to` by `t` (`0.0` = `from`, `1.0` = `to`) in
+/// **linear-light** space: decode sRGB → linear, lerp, re-encode. Unlike the
+/// raw-sRGB [`mixed`], equal `t` steps advance perceived lightness evenly, so
+/// gradients built on this don't band (#46).
+fn mixed_linear(from: Rgb, to: Rgb, t: f32) -> Rgb {
+    let lerp = |a: u8, b: u8| {
+        let (la, lb) = (channel_to_linear(a), channel_to_linear(b));
+        linear_to_channel(la + (lb - la) * t)
+    };
+    (lerp(from.0, to.0), lerp(from.1, to.1), lerp(from.2, to.2))
+}
+
 /// The color `percent` of the way along `fill`'s gradient sweep (#40).
 ///
 /// The sweep runs from `fill` toward a luminance-shifted stop — the same
 /// lighten-a-dark / darken-a-light direction rule as [`derived_ring`], so a
 /// light theme fill never blows out to white. `0` is the base fill, `100` the
-/// full stop. The stop's mix fraction is a visual parameter tuned so the sweep
-/// reads as a sheen at minimap scale; ring pixels are painted solid on top of
-/// the sweep (see [`crate::minimap`]), so the focus outline stays intact even
-/// where the sweep's far end approaches the ring's shade.
+/// full stop. The mix happens in linear-light space ([`mixed_linear`]) so the
+/// ramp is perceptually even instead of banded (#46). The stop's mix fraction
+/// is a visual parameter tuned so the sweep reads as a sheen at minimap
+/// scale; ring pixels are painted solid on top of the sweep (see
+/// [`crate::minimap`]), so the focus outline stays intact even where the
+/// sweep's far end approaches the ring's shade.
 pub(crate) fn gradient_at(fill: Rgb, percent: u8) -> Rgb {
-    /// Mix fraction toward white/black at the sweep's far end.
-    const SWEEP_PERCENT: u8 = 35;
+    /// Mix fraction toward white/black at the sweep's far end. A visual
+    /// parameter (like [`derived_ring`]'s `SHIFT_PERCENT`), not a
+    /// correctness constant — retune freely if the sheen reads too
+    /// strong/weak after curve changes.
+    const SWEEP_PERCENT: f32 = 0.35;
     let target = if luma(fill) < 128 {
         (255, 255, 255)
     } else {
         (0, 0, 0)
     };
-    mixed(fill, mixed(fill, target, SWEEP_PERCENT), percent)
+    // Composing the two lerps in linear space collapses to a single mix:
+    // fill→stop by t equals fill→target by t·SWEEP_PERCENT.
+    mixed_linear(fill, target, SWEEP_PERCENT * percent as f32 / 100.0)
 }
 
 /// Resolved drawing attributes for one pane.
@@ -402,6 +443,61 @@ mod tests {
         // reads darker than the pane.
         let p = Palette::new(vec![(220, 210, 200)], (200, 100, 50));
         assert!(luma(p.ring_for(0)) < luma((220, 210, 200)));
+        Ok(())
+    }
+
+    #[test]
+    fn gradient_endpoints_are_base_fill_and_stop() -> R {
+        // t=0 must be the untouched base fill; t=100 must be lighter than the
+        // base for a dark fill (the sweep lightens darks).
+        let fill = (10, 20, 30);
+        assert_eq!(gradient_at(fill, 0), fill);
+        assert!(luma(gradient_at(fill, 100)) > luma(fill));
+        Ok(())
+    }
+
+    #[test]
+    fn gradient_darkens_a_light_fill() -> R {
+        let fill = (220, 210, 200);
+        assert!(luma(gradient_at(fill, 100)) < luma(fill));
+        Ok(())
+    }
+
+    #[test]
+    fn gradient_channels_advance_monotonically() -> R {
+        // Each channel must move toward the stop without ever stepping back —
+        // a reversal would read as a visible band in the sweep.
+        let fill = (10, 20, 30);
+        let steps: Vec<Rgb> = (0..=100).map(|t| gradient_at(fill, t)).collect();
+        assert!(
+            steps
+                .windows(2)
+                .all(|w| { w[0].0 <= w[1].0 && w[0].1 <= w[1].1 && w[0].2 <= w[1].2 })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gradient_mixes_in_linear_light_not_srgb() -> R {
+        // The headline of #46: the midpoint must sit at the linear-light
+        // halfway, which for a dark fill is brighter than the raw-sRGB
+        // average (sRGB encoding lifts dark linear values).
+        let fill = (10, 20, 30);
+        let stop = gradient_at(fill, 100);
+        let srgb_mid = mixed(fill, stop, 50);
+        let mid = gradient_at(fill, 50);
+        assert!(
+            luma(mid) > luma(srgb_mid),
+            "linear-light midpoint {mid:?} must be brighter than sRGB midpoint {srgb_mid:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn linear_channel_codec_roundtrips_every_byte() -> R {
+        // decode→encode must be the identity on all 256 channel values, or a
+        // zero-width sweep would repaint the base fill.
+        assert!((0..=255).all(|c| linear_to_channel(channel_to_linear(c)) == c));
         Ok(())
     }
 

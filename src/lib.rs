@@ -239,6 +239,7 @@ impl ZellijPlugin for State {
                 &panes_by_position,
                 &self.palette,
                 &self.config.shortcut_prefix,
+                self.config.gradient,
             )
         );
 

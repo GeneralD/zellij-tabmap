@@ -90,23 +90,90 @@ pub enum LabelMode {
     All,
 }
 
+/// Gradient fill applied to each pane block (config key `gradient`, #40).
+///
+/// The sweep is *per pane block*: each filled column `x` of a pane spanning
+/// `w` pixel columns is `lerp(fill, stop, x / (w - 1))`, where the stop is the
+/// pane fill's luminance-shifted shade ([`crate::color::gradient_at`]). Focus
+/// ring, label glyphs, and badge glyphs stay solid; label/badge background
+/// cells follow the sweep so text doesn't punch flat-colored holes in it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GradientMode {
+    /// Flat fills — the historical look, byte-for-byte.
+    #[default]
+    Off,
+    /// Sweep each pane block left-to-right from its base fill toward its stop.
+    Sheen,
+    /// Like `Sheen`, but the two half-block pixel rows of each text row sweep
+    /// in opposite directions (top L→R, bottom R→L) — a woven texture.
+    Weave,
+}
+
+impl std::str::FromStr for GradientMode {
+    type Err = ();
+
+    /// `"off"` / `"sheen"` / `"weave"` (exact match); any other value is an
+    /// error so the config parser falls back to the documented default rather
+    /// than panicking.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "off" => Ok(Self::Off),
+            "sheen" => Ok(Self::Sheen),
+            "weave" => Ok(Self::Weave),
+            _ => Err(()),
+        }
+    }
+}
+
 // ---- core renderer ------------------------------------------------------
+
+/// Fill color of pane `i` at pixel `(px, py)` — the base fill swept by the
+/// active [`GradientMode`] across the pane's own column span (`bounds[i]`).
+/// A one-column span degenerates to the base fill (`t = 0`).
+fn fill_at(
+    panes: &[PaneRect],
+    palette: &Palette,
+    bounds: &[(usize, usize)],
+    gradient: GradientMode,
+    i: usize,
+    px: usize,
+    py: usize,
+) -> Rgb {
+    let fill = palette.style_for(panes[i].id, panes[i].focused).fill;
+    let (px0, px1) = bounds[i];
+    let span = px1.saturating_sub(px0);
+    if span <= 1 {
+        return fill;
+    }
+    let t = ((px - px0) * 100 / (span - 1)) as u8;
+    match gradient {
+        GradientMode::Off => fill,
+        GradientMode::Sheen => crate::color::gradient_at(fill, t),
+        GradientMode::Weave if py.is_multiple_of(2) => crate::color::gradient_at(fill, t),
+        GradientMode::Weave => crate::color::gradient_at(fill, 100 - t),
+    }
+}
 
 /// Color of the pixel at `(px, py)` in the pixel grid. `grid` stores the
 /// pane's *slice index* (to reach `panes[i]`); the color itself is keyed on
-/// that pane's stable `id`, never its position.
+/// that pane's stable `id`, never its position. Ring pixels are painted solid
+/// on top of the gradient sweep, so the focus outline stays intact in every
+/// [`GradientMode`].
+#[allow(clippy::too_many_arguments)]
 fn pixel_color(
     grid: &[Option<usize>],
     ring: &[bool],
     panes: &[PaneRect],
     palette: &Palette,
+    bounds: &[(usize, usize)],
+    gradient: GradientMode,
     pw: usize,
     px: usize,
     py: usize,
 ) -> Rgb {
     match grid[py * pw + px] {
         Some(_) if ring[py * pw + px] => palette.ring(),
-        Some(i) => palette.style_for(panes[i].id, panes[i].focused).fill,
+        Some(i) => fill_at(panes, palette, bounds, gradient, i, px, py),
         None => BG,
     }
 }
@@ -122,7 +189,9 @@ fn pixel_color(
 /// reads as a label *inside* the color block; it is dropped when the block is
 /// too narrow to host it, or when it contains a glyph wider than one column.
 /// Empty input yields an all-background block, with the badge still stamped
-/// over it when one is given and fits.
+/// over it when one is given and fits. `gradient` selects the per-pane fill
+/// sweep (see [`GradientMode`]); `Off` reproduces the historical flat fills
+/// byte-for-byte.
 pub fn render(
     panes: &[PaneRect],
     palette: &Palette,
@@ -130,6 +199,7 @@ pub fn render(
     text_rows: usize,
     mode: LabelMode,
     badge: Option<&str>,
+    gradient: GradientMode,
 ) -> String {
     let pw = cols;
     let ph = text_rows * 2;
@@ -150,6 +220,7 @@ pub fn render(
     let mut grid = vec![None::<usize>; ph * pw]; // pane index per pixel
     let mut ring = vec![false; ph * pw]; // focus-ring pixels
     let mut overlay = vec![None::<(char, usize)>; text_rows * pw]; // label chars
+    let mut bounds = Vec::with_capacity(panes.len()); // (px0, px1) per pane
 
     for (i, p) in panes.iter().enumerate() {
         let px0 = map(p.x, minx, bw, pw).min(pw);
@@ -162,6 +233,7 @@ pub fn render(
         if py1 <= py0 {
             py1 = (py0 + 1).min(ph);
         }
+        bounds.push((px0, px1));
 
         for py in py0..py1 {
             for px in px0..px1 {
@@ -248,7 +320,7 @@ pub fn render(
     for tr in 0..text_rows {
         for c in 0..pw {
             if tr == 0 && badge_fits && (BADGE_COL..BADGE_COL + badge_chars.len()).contains(&c) {
-                let fill = pixel_color(&grid, &ring, panes, palette, pw, c, 0);
+                let fill = pixel_color(&grid, &ring, panes, palette, &bounds, gradient, pw, c, 0);
                 put_bg(&mut out, fill);
                 put_fg(&mut out, LABEL_FG);
                 out.push_str("\x1b[1m");
@@ -258,7 +330,10 @@ pub fn render(
             }
             if let Some((ch, i)) = overlay[tr * pw + c] {
                 let style = palette.style_for(panes[i].id, panes[i].focused);
-                put_bg(&mut out, style.fill);
+                put_bg(
+                    &mut out,
+                    fill_at(panes, palette, &bounds, gradient, i, c, 2 * tr),
+                );
                 put_fg(&mut out, LABEL_FG);
                 if style.emphasized {
                     out.push_str("\x1b[1m");
@@ -269,8 +344,28 @@ pub fn render(
                 out.push(ch);
                 continue;
             }
-            let top = pixel_color(&grid, &ring, panes, palette, pw, c, 2 * tr);
-            let bottom = pixel_color(&grid, &ring, panes, palette, pw, c, 2 * tr + 1);
+            let top = pixel_color(
+                &grid,
+                &ring,
+                panes,
+                palette,
+                &bounds,
+                gradient,
+                pw,
+                c,
+                2 * tr,
+            );
+            let bottom = pixel_color(
+                &grid,
+                &ring,
+                panes,
+                palette,
+                &bounds,
+                gradient,
+                pw,
+                c,
+                2 * tr + 1,
+            );
             put_fg(&mut out, top);
             put_bg(&mut out, bottom);
             out.push('▀');
@@ -313,6 +408,7 @@ mod tests {
             3,
             LabelMode::None,
             None,
+            GradientMode::Off,
         );
         assert_eq!(out.lines().count(), 3);
     }
@@ -326,6 +422,7 @@ mod tests {
             3,
             LabelMode::None,
             None,
+            GradientMode::Off,
         );
         assert!(out.contains("\x1b[38;2;"), "expected a truecolor fg escape");
         assert!(out.contains("\x1b[48;2;"), "expected a truecolor bg escape");
@@ -335,7 +432,15 @@ mod tests {
     #[test]
     fn render_draws_focus_ring_for_large_pane() {
         let palette = test_palette();
-        let out = render(&one_focused(), &palette, 10, 3, LabelMode::None, None);
+        let out = render(
+            &one_focused(),
+            &palette,
+            10,
+            3,
+            LabelMode::None,
+            None,
+            GradientMode::Off,
+        );
         assert!(
             out.contains(&fg(palette.ring())),
             "focused pane should show its ring color"
@@ -359,6 +464,7 @@ mod tests {
                 3,
                 LabelMode::None,
                 None,
+                GradientMode::Off,
             )
         };
         let id1 = fg(palette.color_for(1));
@@ -381,7 +487,18 @@ mod tests {
 
     #[test]
     fn render_zero_size_is_empty() {
-        assert!(render(&one_focused(), &test_palette(), 0, 3, LabelMode::None, None).is_empty());
+        assert!(
+            render(
+                &one_focused(),
+                &test_palette(),
+                0,
+                3,
+                LabelMode::None,
+                None,
+                GradientMode::Off
+            )
+            .is_empty()
+        );
         assert!(
             render(
                 &one_focused(),
@@ -389,7 +506,8 @@ mod tests {
                 10,
                 0,
                 LabelMode::None,
-                None
+                None,
+                GradientMode::Off
             )
             .is_empty()
         );
@@ -397,7 +515,15 @@ mod tests {
 
     #[test]
     fn render_empty_panes_is_all_background() {
-        let out = render(&[], &test_palette(), 4, 2, LabelMode::None, None);
+        let out = render(
+            &[],
+            &test_palette(),
+            4,
+            2,
+            LabelMode::None,
+            None,
+            GradientMode::Off,
+        );
         assert_eq!(out.lines().count(), 2);
         let (r, g, b) = BG;
         let bg = format!("\x1b[48;2;{};{};{}m", r, g, b);
@@ -411,10 +537,26 @@ mod tests {
     fn labels_appear_when_wide_and_drop_when_narrow() {
         let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "cargo", false)];
         // Wide enough: the label's leading char should be overlaid (dark text fg).
-        let wide = render(&panes, &test_palette(), 12, 3, LabelMode::All, None);
+        let wide = render(
+            &panes,
+            &test_palette(),
+            12,
+            3,
+            LabelMode::All,
+            None,
+            GradientMode::Off,
+        );
         assert!(wide.contains('c'), "expected label text in a wide block");
         // Too narrow (cw < 4 after normalization): no label, only block glyphs.
-        let narrow = render(&panes, &test_palette(), 3, 3, LabelMode::All, None);
+        let narrow = render(
+            &panes,
+            &test_palette(),
+            3,
+            3,
+            LabelMode::All,
+            None,
+            GradientMode::Off,
+        );
         assert!(!narrow.contains('c'), "narrow block should drop the label");
     }
 
@@ -423,7 +565,15 @@ mod tests {
         // A shell pane in the home directory is titled `~` — one char. It must
         // be overlaid like any longer label, not dropped (#38).
         let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "~", false)];
-        let wide = render(&panes, &test_palette(), 12, 3, LabelMode::All, None);
+        let wide = render(
+            &panes,
+            &test_palette(),
+            12,
+            3,
+            LabelMode::All,
+            None,
+            GradientMode::Off,
+        );
         assert!(
             wide.contains('~'),
             "expected the 1-char label in a wide block"
@@ -441,7 +591,15 @@ mod tests {
             PaneRect::new(1, 0, 10, 100, 10, "bbb", false),
             PaneRect::new(2, 0, 20, 100, 10, "ccc", false),
         ];
-        let out = render(&panes, &test_palette(), 16, 3, LabelMode::All, None);
+        let out = render(
+            &panes,
+            &test_palette(),
+            16,
+            3,
+            LabelMode::All,
+            None,
+            GradientMode::Off,
+        );
         for ch in ['a', 'b', 'c'] {
             assert!(
                 !out.contains(ch),
@@ -461,7 +619,15 @@ mod tests {
             PaneRect::new(0, 0, 0, 100, 24, "zsh", false),
             PaneRect::new(1, 0, 24, 100, 16, "vim", true),
         ];
-        let out = render(&panes, &test_palette(), 16, 3, LabelMode::All, None);
+        let out = render(
+            &panes,
+            &test_palette(),
+            16,
+            3,
+            LabelMode::All,
+            None,
+            GradientMode::Off,
+        );
         assert!(
             out.contains('z'),
             "the taller pane (2 text rows) keeps its label"
@@ -479,7 +645,15 @@ mod tests {
         // advances two, mis-centering the label and corrupting the next cell.
         // Such labels must be dropped wholesale until width-aware placement (#7).
         let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "実装中", false)];
-        let out = render(&panes, &test_palette(), 12, 3, LabelMode::All, None);
+        let out = render(
+            &panes,
+            &test_palette(),
+            12,
+            3,
+            LabelMode::All,
+            None,
+            GradientMode::Off,
+        );
         assert!(
             !out.contains('実'),
             "wide-glyph label must be dropped, not placed"
@@ -495,9 +669,25 @@ mod tests {
         // block hosts it; a block too narrow for the 1-col margin plus the badge
         // drops it wholesale rather than truncating into noise.
         let panes = one_focused();
-        let wide = render(&panes, &test_palette(), 10, 3, LabelMode::None, Some("⌘ 1"));
+        let wide = render(
+            &panes,
+            &test_palette(),
+            10,
+            3,
+            LabelMode::None,
+            Some("⌘ 1"),
+            GradientMode::Off,
+        );
         assert!(wide.contains('⌘'), "wide block should host the badge");
-        let narrow = render(&panes, &test_palette(), 1, 3, LabelMode::None, Some("⌘ 1"));
+        let narrow = render(
+            &panes,
+            &test_palette(),
+            1,
+            3,
+            LabelMode::None,
+            Some("⌘ 1"),
+            GradientMode::Off,
+        );
         assert!(
             !narrow.contains('⌘'),
             "too-narrow block must drop the badge"
@@ -514,10 +704,103 @@ mod tests {
         // the wide glyph is. The badge must be dropped wholesale, mirroring the
         // wide-glyph label guard.
         let panes = one_focused();
-        let out = render(&panes, &test_palette(), 10, 3, LabelMode::None, Some("符1"));
+        let out = render(
+            &panes,
+            &test_palette(),
+            10,
+            3,
+            LabelMode::None,
+            Some("符1"),
+            GradientMode::Off,
+        );
         assert!(
             !out.contains('符'),
             "wide-glyph badge must be dropped, not placed"
         );
+    }
+
+    /// A single unfocused full-width pane — the simplest sweep canvas (no
+    /// ring, no label), so every emitted color is a gradient sample.
+    fn one_plain() -> Vec<PaneRect> {
+        vec![PaneRect::new(1, 0, 0, 100, 40, "", false)]
+    }
+
+    #[test]
+    fn gradient_off_paints_only_the_base_fill() {
+        let palette = test_palette();
+        let out = render(
+            &one_plain(),
+            &palette,
+            10,
+            2,
+            LabelMode::None,
+            None,
+            GradientMode::Off,
+        );
+        let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
+        assert!(out.contains(&fg(palette.color_for(1))));
+        assert!(!out.contains(&stop), "off must not paint any swept shade");
+    }
+
+    #[test]
+    fn sheen_sweeps_from_base_fill_to_stop() {
+        let palette = test_palette();
+        let out = render(
+            &one_plain(),
+            &palette,
+            10,
+            1,
+            LabelMode::None,
+            None,
+            GradientMode::Sheen,
+        );
+        let base = fg(palette.color_for(1));
+        let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
+        assert!(out.starts_with(&base), "leftmost column is the base fill");
+        assert!(
+            out.contains(&stop),
+            "rightmost column reaches the sweep stop"
+        );
+    }
+
+    #[test]
+    fn weave_reverses_the_bottom_pixel_row() {
+        // Pixel row parity drives the direction: at column 0 the top pixel is
+        // t=0 (base fill) while the bottom pixel sweeps R→L and is t=100 (the
+        // stop) — so the very first cell must pair base fg with stop bg.
+        let palette = test_palette();
+        let out = render(
+            &one_plain(),
+            &palette,
+            10,
+            1,
+            LabelMode::None,
+            None,
+            GradientMode::Weave,
+        );
+        let fill = palette.color_for(1);
+        let stop = crate::color::gradient_at(fill, 100);
+        let first_cell = format!("{}\x1b[48;2;{};{};{}m", fg(fill), stop.0, stop.1, stop.2);
+        assert!(
+            out.starts_with(&first_cell),
+            "weave column 0 must be base-over-stop"
+        );
+    }
+
+    #[test]
+    fn one_column_span_degenerates_to_the_base_fill() {
+        // A 1-px-wide pane has no sweep direction; it must render the base
+        // fill without dividing by zero.
+        let palette = test_palette();
+        let out = render(
+            &one_plain(),
+            &palette,
+            1,
+            1,
+            LabelMode::None,
+            None,
+            GradientMode::Sheen,
+        );
+        assert!(out.starts_with(&fg(palette.color_for(1))));
     }
 }

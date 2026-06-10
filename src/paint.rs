@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use crate::color::Palette;
 use crate::line::LineLayout;
-use crate::minimap::PaneRect;
+use crate::minimap::{GradientMode, PaneRect};
 use crate::tab_block::{self, TabBlock};
 
 /// Render a packed [`LineLayout`] into the full multi-row bar string.
@@ -39,6 +39,7 @@ pub fn bar(
     panes_by_position: &BTreeMap<usize, Vec<PaneRect>>,
     palette: &Palette,
     prefix: &str,
+    gradient: GradientMode,
 ) -> String {
     let blocks: Vec<TabBlock> = layout
         .tabs
@@ -48,7 +49,7 @@ pub fn bar(
                 .get(&hit.position)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            tab_block::assemble(panes, palette, hit.width, hit.position, prefix)
+            tab_block::assemble(panes, palette, hit.width, hit.position, prefix, gradient)
         })
         .collect();
     let placed: Vec<(usize, &TabBlock)> = layout
@@ -225,7 +226,14 @@ mod tests {
         // Two narrow (L4) tabs at columns 0 and 2; no panes needed for the hint
         // rung. Every (row, block) pair gets a cursor move at the block's column.
         let lo = layout(vec![hit(0, 0, 2, false), hit(1, 2, 2, true)], None, None);
-        let out = bar(3, &lo, &BTreeMap::new(), &Palette::default(), "\u{2318}");
+        let out = bar(
+            3,
+            &lo,
+            &BTreeMap::new(),
+            &Palette::default(),
+            "\u{2318}",
+            GradientMode::Off,
+        );
         for row in 1..=3 {
             assert!(
                 out.contains(&format!("\u{1b}[{row};1H")),
@@ -244,7 +252,14 @@ mod tests {
         // 1-based position, so a position-keyed bar shows ⌘4 / ⌘5; an
         // index-keyed bug would show ⌘1 / ⌘2.
         let lo = layout(vec![hit(3, 0, 2, true), hit(4, 2, 2, false)], None, None);
-        let out = bar(3, &lo, &BTreeMap::new(), &Palette::default(), "\u{2318}");
+        let out = bar(
+            3,
+            &lo,
+            &BTreeMap::new(),
+            &Palette::default(),
+            "\u{2318}",
+            GradientMode::Off,
+        );
         assert!(out.contains("\u{2318}4"), "position 3 → ⌘4");
         assert!(out.contains("\u{2318}5"), "position 4 → ⌘5");
         assert!(!out.contains("\u{2318}1"), "must not key by loop index");
@@ -269,7 +284,14 @@ mod tests {
         let mut panes = BTreeMap::new();
         panes.insert(0, vec![PaneRect::new(0, 0, 0, 10, 10, "shell", true)]);
         let lo = layout(vec![hit(0, 0, 16, true), hit(1, 16, 2, false)], None, None);
-        let out = bar(3, &lo, &panes, &Palette::default(), "\u{2318}");
+        let out = bar(
+            3,
+            &lo,
+            &panes,
+            &Palette::default(),
+            "\u{2318}",
+            GradientMode::Off,
+        );
         assert!(
             out.contains("\u{2318}2"),
             "inactive tab (width 2) renders its own L4 hint as a contiguous ⌘2"
@@ -295,7 +317,14 @@ mod tests {
                 text: " +3 \u{2192}".to_string(),
             }),
         );
-        let out = bar(3, &lo, &BTreeMap::new(), &Palette::default(), "\u{2318}");
+        let out = bar(
+            3,
+            &lo,
+            &BTreeMap::new(),
+            &Palette::default(),
+            "\u{2318}",
+            GradientMode::Off,
+        );
         // Middle row (row 2): left marker at col 1, right marker at col 8.
         assert!(out.contains("\u{1b}[2;1H\u{2190} +2 "));
         assert!(out.contains("\u{1b}[2;8H +3 \u{2192}"));

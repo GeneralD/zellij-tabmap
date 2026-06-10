@@ -104,6 +104,26 @@ fn derived_ring(fill: Rgb) -> Rgb {
     mixed(fill, target, SHIFT_PERCENT)
 }
 
+/// The color `percent` of the way along `fill`'s gradient sweep (#40).
+///
+/// The sweep runs from `fill` toward a luminance-shifted stop — the same
+/// lighten-a-dark / darken-a-light direction rule as [`derived_ring`], so a
+/// light theme fill never blows out to white. `0` is the base fill, `100` the
+/// full stop. The stop's mix fraction is a visual parameter tuned so the sweep
+/// reads as a sheen at minimap scale; ring pixels are painted solid on top of
+/// the sweep (see [`crate::minimap`]), so the focus outline stays intact even
+/// where the sweep's far end approaches the ring's shade.
+pub(crate) fn gradient_at(fill: Rgb, percent: u8) -> Rgb {
+    /// Mix fraction toward white/black at the sweep's far end.
+    const SWEEP_PERCENT: u8 = 35;
+    let target = if luma(fill) < 128 {
+        (255, 255, 255)
+    } else {
+        (0, 0, 0)
+    };
+    mixed(fill, mixed(fill, target, SWEEP_PERCENT), percent)
+}
+
 /// Resolved drawing attributes for one pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaneStyle {

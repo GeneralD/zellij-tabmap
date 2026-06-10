@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://json.schemastore.org/codecov.json
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: 80%
+
+ignore:
+  # The one-line `register_plugin!` FFI entry point — it only runs inside the
+  # zellij wasm host and cannot execute on the native test target.
+  - "src/main.rs"

@@ -2,7 +2,7 @@
 
 ![hero](assets/hero.png)
 
-[![CI](https://github.com/GeneralD/zellij-tabmap/actions/workflows/ci.yml/badge.svg)](https://github.com/GeneralD/zellij-tabmap/actions/workflows/ci.yml) ![license](https://img.shields.io/badge/license-MIT-green) ![zellij-tile](https://img.shields.io/badge/zellij--tile-0.44.3-blue) ![rust](https://img.shields.io/badge/rust-2021-orange?logo=rust) ![target](https://img.shields.io/badge/target-wasm32--wasip1-purple?logo=webassembly) ![status](https://img.shields.io/badge/status-early%20development-yellow)
+[![CI](https://github.com/GeneralD/zellij-tabmap/actions/workflows/ci.yml/badge.svg)](https://github.com/GeneralD/zellij-tabmap/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/GeneralD/zellij-tabmap/branch/main/graph/badge.svg)](https://codecov.io/gh/GeneralD/zellij-tabmap) ![license](https://img.shields.io/badge/license-MIT-green) ![zellij-tile](https://img.shields.io/badge/zellij--tile-0.44.3-blue) ![rust](https://img.shields.io/badge/rust-2021-orange?logo=rust) ![target](https://img.shields.io/badge/target-wasm32--wasip1-purple?logo=webassembly) ![status](https://img.shields.io/badge/status-early%20development-yellow)
 
 A [zellij](https://zellij.dev) plugin that replaces the thin one-row tab bar with a **taller, multi-row tab bar** in which every tab is drawn as a **color-coded minimap of its own pane layout** — a tiny pixel-grid thumbnail of how that tab's terminal is split. Panes are identified by color; where a tab is wide enough, a summarized title is overlaid; the `⌘N` switch hint is shown per tab.
 

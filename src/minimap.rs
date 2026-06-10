@@ -117,9 +117,10 @@ fn pixel_color(
 /// string of `text_rows` lines, each terminated by a reset and newline. `mode`
 /// selects which summarized pane titles are overlaid where width allows (see
 /// [`LabelMode`]). `badge`, when present, is the tab's shortcut hint stamped into
-/// the block's top-left in dark text over the pane fill — so it reads as a label
-/// *inside* the color block; it is dropped when the block is too narrow to host
-/// it. Empty input yields an all-background block.
+/// the block's top-left in dark text over the underlying cell color — the pane
+/// fill, or the focus ring where it overlaps a focused pane's outline — so it
+/// reads as a label *inside* the color block; it is dropped when the block is
+/// too narrow to host it. Empty input yields an all-background block.
 pub fn render(
     panes: &[PaneRect],
     palette: &Palette,
@@ -223,8 +224,11 @@ pub fn render(
     }
 
     // The shortcut badge occupies the top text row's left cells, after a
-    // one-cell margin, drawn over the pane fill so it reads inside the block. It
-    // is dropped wholesale when it would not fit within the width.
+    // one-cell margin, drawn over the underlying cell color — the pane fill, or
+    // the focus ring where it sits on a focused pane's outline — so it reads
+    // inside the block, integrating with the ring rather than punching a
+    // fill-colored hole in it. It is dropped wholesale when it would not fit
+    // within the width.
     const BADGE_COL: usize = 1;
     // Char-indexed stamping (one cell per char below) is correct only when every
     // badge glyph is one display column. `shortcut_prefix` is user-configurable,

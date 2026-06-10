@@ -1,6 +1,7 @@
 //! Standalone visual harness for #40: renders the same 2x2 layout in all
-//! three gradient modes side by side. Not part of the plugin — run with
-//! `cargo run --example render_gradient --target aarch64-apple-darwin`.
+//! three gradient modes side by side. Not part of the plugin — run with e.g.
+//! `cargo run --example render_gradient --target x86_64-unknown-linux-gnu`
+//! (or substitute your host target to override the wasm32-wasip1 default).
 
 use zellij_tabmap::color::Palette;
 use zellij_tabmap::minimap::{GradientMode, LabelMode, PaneRect, render};

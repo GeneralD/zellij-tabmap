@@ -77,10 +77,10 @@ fn rgb(c: PaletteColor) -> color::Rgb {
 /// beside one, and so never cohered as a minimap ramp. A theme defines only as
 /// many player slots as it cares to; the rest stay unset and collapse to the
 /// black sentinel that [`color::Palette::new`] drops — so a theme defining five
-/// players yields five hues. The focused pane uses `frame_highlight.base` as
-/// its accent fill; the ring is derived from that accent as a luminance-shifted
-/// shade ([`color::Palette::new`] with `None`), so the outline always tracks the
-/// focused fill instead of a separately-scraped theme color (issue #32).
+/// players yields five hues. The focused pane keeps its slot fill (issue #47);
+/// `frame_highlight.base` is the accent that seeds the focus ring, derived as a
+/// luminance-shifted shade ([`color::Palette::new`] with `None`), so the
+/// outline tracks the theme instead of a separately-scraped color (issue #32).
 fn palette_from_style(style: &Style) -> color::Palette {
     let colors = &style.colors;
     let players = colors.multiplayer_user_colors;
@@ -619,11 +619,11 @@ mod tests {
         assert_eq!(p.color_for(2), (70, 80, 90));
         assert_eq!(p.color_for(3), (10, 20, 30));
 
-        // Focus fill is frame_highlight.base; the ring is derived from that
-        // accent (issue #32), so it tracks the focused fill rather than a
-        // separately-scraped theme color. style_for hands back the palette ring.
+        // Focus keeps the pane's slot fill (issue #47); frame_highlight.base
+        // only seeds the ring, derived as a luminance-shifted shade (issue
+        // #32). style_for hands back the palette ring on the focused style.
         let focused = p.style_for(0, true);
-        assert_eq!(focused.fill, (200, 100, 50));
+        assert_eq!(focused.fill, (10, 20, 30));
         assert_eq!(focused.ring, Some(p.ring()));
         assert_ne!(focused.ring, Some(focused.fill));
     }

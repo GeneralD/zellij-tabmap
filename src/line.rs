@@ -637,10 +637,10 @@ mod tests {
         // because nothing could reflow.
         // prefix = 0 here, so the pinned left edge is absolute column 0.
         let left_edge = |active| pack(120, 0, 24, 8, active, Alignment::Left, 0).tabs[0].start;
+        let edges: Vec<_> = (0..8).map(left_edge).collect();
         assert!(
-            (0..8).all(|active| left_edge(active) == 0),
-            "left edge pinned at 0 for every focus: {:?}",
-            (0..8).map(left_edge).collect::<Vec<_>>()
+            edges.iter().all(|&edge| edge == 0),
+            "left edge pinned at 0 for every focus: {edges:?}"
         );
     }
 
@@ -652,10 +652,10 @@ mod tests {
         // `pack(.., prefix_width, ..)` API, not just the live `prefix == 0` caller.
         let prefix = 4;
         let left_edge = |active| pack(120, prefix, 24, 8, active, Alignment::Left, 0).tabs[0].start;
+        let edges: Vec<_> = (0..8).map(left_edge).collect();
         assert!(
-            (0..8).all(|active| left_edge(active) == prefix),
-            "left edge pinned at the prefix ({prefix}) for every focus: {:?}",
-            (0..8).map(left_edge).collect::<Vec<_>>()
+            edges.iter().all(|&edge| edge == prefix),
+            "left edge pinned at the prefix ({prefix}) for every focus: {edges:?}"
         );
     }
 
@@ -787,17 +787,10 @@ mod tests {
             "every tab fits"
         );
         assert_eq!(layout.tabs.len(), 4);
+        let spans: Vec<_> = layout.tabs.iter().map(|t| (t.start, t.width)).collect();
         assert!(
-            layout
-                .tabs
-                .windows(2)
-                .all(|w| w[1].start == w[0].start + w[0].width + gap),
-            "each adjacent pair separated by exactly {gap} columns: {:?}",
-            layout
-                .tabs
-                .iter()
-                .map(|t| (t.start, t.width))
-                .collect::<Vec<_>>()
+            spans.windows(2).all(|w| w[1].0 == w[0].0 + w[0].1 + gap),
+            "each adjacent pair separated by exactly {gap} columns: {spans:?}"
         );
         assert!(within_bounds(&layout, 120));
     }
@@ -831,25 +824,21 @@ mod tests {
             layout.tabs.len() >= 2,
             "the window shows several blocks so the gap check is meaningful"
         );
+        let spans: Vec<_> = layout.tabs.iter().map(|t| (t.start, t.width)).collect();
         assert!(
-            layout
-                .tabs
-                .windows(2)
-                .all(|w| w[1].start == w[0].start + w[0].width + gap),
-            "visible blocks separated by exactly {gap}: {:?}",
-            layout
-                .tabs
-                .iter()
-                .map(|t| (t.start, t.width))
-                .collect::<Vec<_>>()
+            spans.windows(2).all(|w| w[1].0 == w[0].0 + w[0].1 + gap),
+            "visible blocks separated by exactly {gap}: {spans:?}"
         );
-        if let (Some(last), Some(right)) = (layout.tabs.last(), layout.right.as_ref()) {
-            assert_eq!(
-                right.start,
-                last.start + last.width,
-                "right marker butts against the last block, no gap before it"
-            );
-        }
+        let right_start = layout.right.as_ref().map(|marker| marker.start);
+        let last_end = layout.tabs.last().map(|tab| tab.start + tab.width);
+        assert!(
+            right_start.is_some(),
+            "a 20-tab strip in 40 columns must draw a right overflow marker"
+        );
+        assert_eq!(
+            right_start, last_end,
+            "right marker butts against the last block, no gap before it"
+        );
     }
 
     #[test]

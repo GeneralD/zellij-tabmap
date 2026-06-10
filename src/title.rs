@@ -215,6 +215,29 @@ mod tests {
     }
 
     #[test]
+    fn summarize_falls_back_to_text_when_the_icon_does_not_fit() {
+        // Leading command recognized + icons on, but no column to spend: the
+        // 1-column glyph cannot fit a 0-column budget, so the icon branch falls
+        // through to the width-truncated text path (which also yields nothing).
+        assert_eq!(summarize("cargo build", 0, true), "");
+    }
+
+    #[test]
+    fn summarize_keeps_text_when_no_icon_is_known() {
+        // Icons on, but the command has no glyph in the table: the icon branch
+        // yields nothing and the leading token passes through as text.
+        assert_eq!(summarize("ls", 5, true), "ls");
+    }
+
+    #[test]
+    fn is_command_title_rejects_a_blank_title() {
+        // `summarize` trims and returns early on empty input, but the helper
+        // itself must stay total: no leading token → not a command.
+        assert!(!is_command_title(""));
+        assert!(!is_command_title("   "));
+    }
+
+    #[test]
     fn is_single_column_flags_wide_glyphs() {
         // ASCII and the 1-column ellipsis are safe for char-indexed placement.
         assert!(is_single_column("cargo"));

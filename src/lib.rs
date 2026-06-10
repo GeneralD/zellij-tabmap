@@ -593,6 +593,263 @@ mod tests {
         ));
     }
 
+    /// A configuration map as zellij would deliver it from the KDL block.
+    fn config_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// A content pane zellij would report for a tiled layout.
+    fn content_pane(x: usize, y: usize, w: usize, h: usize) -> PaneInfo {
+        PaneInfo {
+            pane_x: x,
+            pane_y: y,
+            pane_columns: w,
+            pane_rows: h,
+            title: "sh".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn load_parses_the_configuration_before_requesting_permissions() {
+        // `load` must parse the delivered map first — the permission request
+        // depends on `reorder` (#23). Host imports are stubbed natively, so the
+        // observable contract is the parsed config; what gets *requested* per
+        // config is pinned separately by the `permissions_*` tests.
+        let mut state = State::default();
+        state.load(config_map(&[("reorder", "true"), ("active_width", "20")]));
+
+        assert!(state.config.reorder);
+        assert_eq!(state.config.active_width, 20);
+        assert!(!state.permitted, "permission arrives later as an event");
+    }
+
+    #[test]
+    fn permission_result_tracks_granted_and_denied() {
+        // Both outcomes repaint (the bar must redraw either way), and only
+        // Granted flips `permitted` — a Denied result must not leave a stale
+        // grant behind.
+        let mut state = State::default();
+
+        assert!(state.update(Event::PermissionRequestResult(PermissionStatus::Granted)));
+        assert!(state.permitted);
+
+        assert!(state.update(Event::PermissionRequestResult(PermissionStatus::Denied)));
+        assert!(!state.permitted);
+    }
+
+    #[test]
+    fn tab_and_pane_updates_replace_the_snapshots_and_repaint() {
+        // The plugin stores whatever snapshot zellij hands it wholesale; both
+        // events request a repaint so the bar tracks the live session.
+        let mut state = State::default();
+
+        assert!(state.update(Event::TabUpdate(vec![tab(0, 1), tab(1, 2)])));
+        assert_eq!(state.tabs.len(), 2);
+
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(0, vec![content_pane(0, 1, 80, 24)]);
+        assert!(state.update(Event::PaneUpdate(manifest)));
+        assert_eq!(state.panes.panes.len(), 1);
+    }
+
+    #[test]
+    fn mode_update_swaps_the_palette_from_the_live_theme() {
+        // zellij delivers the active theme via the mode style; the palette must
+        // be rebuilt from it so pane colors track theme changes.
+        let mut state = State::default();
+        let mut mode_info = ModeInfo::default();
+        mode_info.style.colors.multiplayer_user_colors.player_1 = PaletteColor::Rgb((10, 20, 30));
+
+        assert!(state.update(Event::ModeUpdate(mode_info)));
+        assert_eq!(state.palette.color_for(0), (10, 20, 30));
+    }
+
+    #[test]
+    fn left_click_on_a_tab_arms_a_drag_and_defers_the_repaint() {
+        // The click switches tabs via the host (stubbed here) and records the
+        // press as a potential drag. No repaint is requested — the switch
+        // arrives back as a TabUpdate, which drives the redraw.
+        let mut state = State::default();
+        state.config = Config {
+            reorder: true,
+            ..Default::default()
+        };
+        state.tabs = vec![tab(0, 7), tab(1, 8), tab(2, 100), tab(3, 9), tab(4, 10)];
+        state.tab_layout = five_block_layout();
+
+        assert!(!state.update(Event::Mouse(Mouse::LeftClick(0, 9))));
+        assert!(matches!(
+            state.drag,
+            Some(DragState {
+                grabbed_tab_id: 100,
+                dragging: false
+            })
+        ));
+    }
+
+    #[test]
+    fn left_click_off_any_tab_clears_a_stale_drag() {
+        // A press past the drawn blocks (columns 0..20) resolves to no tab:
+        // nothing to switch to, and any stale drag is dropped rather than left
+        // armed against geometry the press never touched.
+        let mut state = State::default();
+        state.config = Config {
+            reorder: true,
+            ..Default::default()
+        };
+        state.tabs = vec![tab(0, 7)];
+        state.tab_layout = five_block_layout();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 7,
+            dragging: false,
+        });
+
+        assert!(!state.update(Event::Mouse(Mouse::LeftClick(0, 30))));
+        assert!(state.drag.is_none());
+    }
+
+    #[test]
+    fn hold_promotes_the_press_to_a_real_drag() {
+        // Motion while pressed is what separates a drag from a plain click;
+        // only the fact matters, the drop column is read from the Release.
+        let mut state = State::default();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 100,
+            dragging: false,
+        });
+
+        assert!(!state.update(Event::Mouse(Mouse::Hold(0, 12))));
+        assert!(matches!(state.drag, Some(DragState { dragging: true, .. })));
+    }
+
+    #[test]
+    fn hold_without_a_grab_is_a_no_op() {
+        // A Hold with no recorded press (e.g. the press landed off any tab)
+        // must not conjure a drag out of nothing.
+        let mut state = State::default();
+
+        assert!(!state.update(Event::Mouse(Mouse::Hold(0, 12))));
+        assert!(state.drag.is_none());
+    }
+
+    #[test]
+    fn release_resolves_the_drag_but_the_emit_panics_at_the_shim_boundary() {
+        // The full gesture: a dragging grab on id 100 (currently position 1)
+        // released over position 4's block resolves a rightward plan and emits
+        // `MoveTabByTabId`. The emit, however, panics inside zellij-tile
+        // 0.44.3: `ProtobufAction::try_from` classifies `MoveTabByTabId` as a
+        // CLI-only action and the `run_action` shim unwraps that error. The
+        // conversion is pure data mapping, so the same panic fires on wasm —
+        // this test pins the landmine (analysis in the #51 coverage PR) and
+        // will start failing the moment a zellij-tile upgrade fixes the
+        // conversion, which is the signal to assert the happy path instead.
+        let mut state = State::default();
+        state.tabs = vec![tab(0, 7), tab(1, 100), tab(2, 8), tab(3, 9), tab(4, 10)];
+        state.tab_layout = five_block_layout();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 100,
+            dragging: true,
+        });
+
+        let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.update(Event::Mouse(Mouse::Release(0, 18)))
+        }));
+
+        assert!(
+            emitted.is_err(),
+            "zellij-tile 0.44.3 rejects MoveTabByTabId in its protobuf \
+             conversion; a passing update() here means the upstream fixed it"
+        );
+    }
+
+    #[test]
+    fn release_resolves_a_leftward_plan_before_the_emit() {
+        // Same gesture mirrored: id 100 (position 3) dropped on position 0's
+        // block resolves a leftward plan — covering the `Shift::Left` direction
+        // arm — before hitting the same zellij-tile boundary panic as above.
+        let mut state = State::default();
+        state.tabs = vec![tab(0, 7), tab(1, 8), tab(2, 9), tab(3, 100), tab(4, 10)];
+        state.tab_layout = five_block_layout();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 100,
+            dragging: true,
+        });
+
+        assert_eq!(state.reorder_plan(1), Some((100, Shift::Left, 3)));
+        let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.update(Event::Mouse(Mouse::Release(0, 1)))
+        }));
+        assert!(emitted.is_err());
+    }
+
+    #[test]
+    fn release_without_a_drag_requests_no_repaint() {
+        // A Release with nothing grabbed (or after a plain click) moves nothing
+        // and must not waste a repaint.
+        let mut state = State::default();
+        state.tab_layout = five_block_layout();
+
+        assert!(!state.update(Event::Mouse(Mouse::Release(0, 18))));
+        assert!(state.drag.is_none());
+    }
+
+    #[test]
+    fn unrelated_events_request_no_repaint() {
+        // Anything outside the subscribed working set falls through the
+        // catch-all arm without touching state.
+        let mut state = State::default();
+
+        assert!(!state.update(Event::Visible(true)));
+    }
+
+    #[test]
+    fn render_draws_the_bar_and_records_click_geometry() {
+        // The success path: permitted, an active tab, and a pane manifest. The
+        // frame paints (to the captured test stdout) and re-records the spans a
+        // later click hit-tests against — including the active block.
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                ..tab(0, 1)
+            },
+            tab(1, 2),
+            tab(2, 3),
+        ];
+        state.panes.panes.insert(
+            0,
+            vec![content_pane(0, 1, 40, 24), content_pane(40, 1, 40, 24)],
+        );
+
+        state.render(ROWS, 80);
+
+        assert!(!state.tab_layout.is_empty(), "the frame records its spans");
+        assert!(
+            state.tab_layout.iter().any(|hit| hit.active),
+            "the active tab's span is among the recorded hits"
+        );
+    }
+
+    #[test]
+    fn render_clears_geometry_when_no_tab_is_active() {
+        // Permitted but mid-transition (no tab marked active): the frame bails
+        // out after wiping the previous spans, so a click resolves against
+        // nothing rather than geometry no longer on screen.
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![tab(0, 1)];
+        state.tab_layout = five_block_layout();
+
+        state.render(ROWS, 80);
+
+        assert!(state.tab_layout.is_empty());
+    }
+
     #[test]
     fn palette_slots_come_from_multiplayer_user_colors() {
         // The follow palette draws pane fills from the theme's categorical

@@ -195,7 +195,8 @@ pub fn render(
         // any pane that projects to a single text row — every pane of a deep
         // (≥3) vertical stack, AND the shorter side of an asymmetric two-way
         // vertical split, while the taller side (≥2 text rows) keeps its label.
-        // If the summarized title is shorter than 2 chars, drop it.
+        // An empty summarized title yields no label; a single char (e.g. a
+        // pane titled `~`) is overlaid like any longer label.
         let trow0 = py0 / 2;
         let cell_text_rows = py1.div_ceil(2).saturating_sub(trow0);
         let inner = cw.saturating_sub(2);
@@ -212,7 +213,7 @@ pub fn render(
             // width-aware and can return wider glyphs (CJK renames now, icons in
             // #7) — drop those rather than corrupt the row; width-aware placement
             // lands in #7.
-            if label_len >= 2 && crate::title::is_single_column(&label) {
+            if label_len >= 1 && crate::title::is_single_column(&label) {
                 let row = trow0 + cell_text_rows / 2;
                 let start = px0 + 1 + (inner - label_len) / 2;
                 for (k, ch) in label.chars().enumerate() {
@@ -413,6 +414,15 @@ mod tests {
         // Too narrow (cw < 4 after normalization): no label, only block glyphs.
         let narrow = render(&panes, &test_palette(), 3, 3, LabelMode::All, None);
         assert!(!narrow.contains('c'), "narrow block should drop the label");
+    }
+
+    #[test]
+    fn single_char_title_keeps_its_label() {
+        // A shell pane in the home directory is titled `~` — one char. It must
+        // be overlaid like any longer label, not dropped (#38).
+        let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "~", false)];
+        let wide = render(&panes, &test_palette(), 12, 3, LabelMode::All, None);
+        assert!(wide.contains('~'), "expected the 1-char label in a wide block");
     }
 
     #[test]

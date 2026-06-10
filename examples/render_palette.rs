@@ -13,12 +13,11 @@ use std::collections::BTreeMap;
 
 use zellij_tabmap::color::{Palette, Rgb};
 use zellij_tabmap::line::{Alignment, pack};
-use zellij_tabmap::minimap::PaneRect;
+use zellij_tabmap::minimap::{GradientMode, PaneRect};
 use zellij_tabmap::paint::bar;
 
-// frame_highlight of tokyo-night: base is the focus accent. The ring is no
-// longer scraped from the theme — `Palette::new(.., None)` derives it as a
-// luminance-shifted shade of this accent (issue #32, Option A).
+// frame_highlight of tokyo-night: base is the accent that seeds the hint text
+// shade. Focus rings are derived per pane from its own fill (issue #47).
 const ACCENT: Rgb = (255, 158, 100); // orange
 
 /// Pre-#32 palette: `emphasis_0..3` of `text_unselected`, `ribbon_unselected`,
@@ -54,7 +53,7 @@ fn old_tokyonight() -> Palette {
             }
             acc
         });
-    Palette::new(slots, ACCENT, None)
+    Palette::new(slots, ACCENT)
 }
 
 /// #32 follow palette: `multiplayer_user_colors`, verbatim tokyo-night values.
@@ -73,7 +72,7 @@ fn new_tokyonight() -> Palette {
         (0, 0, 0),       // player_9  unset
         (0, 0, 0),       // player_10 unset
     ];
-    Palette::new(players.to_vec(), ACCENT, None)
+    Palette::new(players.to_vec(), ACCENT)
 }
 
 fn main() {
@@ -86,7 +85,7 @@ fn main() {
 
     // One wide active tab carrying a 2x3 pane grid, so several distinct slot
     // fills plus the focused pane's accent + ring are all on screen at once.
-    let layout = pack(cols, 0, 28, 1, 0, Alignment::Center);
+    let layout = pack(cols, 0, 28, 1, 0, Alignment::Center, 2);
     let mut panes: BTreeMap<usize, Vec<PaneRect>> = BTreeMap::new();
     panes.insert(
         0,
@@ -100,5 +99,15 @@ fn main() {
         ],
     );
 
-    print!("{}", bar(3, &layout, &panes, &palette, "\u{2318}"));
+    print!(
+        "{}",
+        bar(
+            3,
+            &layout,
+            &panes,
+            &palette,
+            "\u{2318}",
+            GradientMode::Sheen
+        )
+    );
 }

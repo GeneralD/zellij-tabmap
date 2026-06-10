@@ -23,7 +23,7 @@ Box-drawing rules can only place a line on a *cell boundary*. The upper-half-blo
    row 3   │ █ A █ │ ▀▀▀   fg=C bg=C   (top & bottom both C)
 ```
 
-A focused pane is emphasized with a bright outline ring and a more vivid hue; non-focused panes keep their hue but mute their saturation. Titles degrade gracefully — labels that cannot fit are dropped rather than truncated into noise.
+A focused pane is marked with an outline ring and a bold label — its fill keeps the same identity hue as when unfocused, so a pane never changes color as focus moves. The ring is a luminance-shifted shade of the pane's own fill (a blue pane gets a slightly different blue outline), so the highlight stays in the pane's hue family. Titles degrade gracefully — labels that cannot fit are dropped rather than truncated into noise.
 
 ## Status
 

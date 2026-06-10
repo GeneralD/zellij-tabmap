@@ -140,6 +140,9 @@ fn fill_at(
     py: usize,
 ) -> Rgb {
     let fill = palette.style_for(panes[i].id, panes[i].focused).fill;
+    if gradient == GradientMode::Off {
+        return fill;
+    }
     let (px0, px1) = bounds[i];
     let span = px1.saturating_sub(px0);
     if span <= 1 {
@@ -147,10 +150,10 @@ fn fill_at(
     }
     let t = ((px - px0) * 100 / (span - 1)) as u8;
     match gradient {
-        GradientMode::Off => fill,
         GradientMode::Sheen => crate::color::gradient_at(fill, t),
         GradientMode::Weave if py.is_multiple_of(2) => crate::color::gradient_at(fill, t),
         GradientMode::Weave => crate::color::gradient_at(fill, 100 - t),
+        GradientMode::Off => unreachable!("handled above"),
     }
 }
 

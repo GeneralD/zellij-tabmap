@@ -1,8 +1,24 @@
+<p align="center">
+  <img src="assets/hero.png" alt="zellij-tabmap" width="600">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/github/v/tag/GeneralD/zellij-tabmap?label=version" alt="Version">
+  <img src="https://img.shields.io/badge/zellij--tile-0.44.3-blue" alt="zellij-tile">
+  <img src="https://img.shields.io/badge/Rust-2021-orange?logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/target-wasm32--wasip1-purple?logo=webassembly" alt="Target">
+  <img src="https://img.shields.io/github/license/GeneralD/zellij-tabmap" alt="License">
+  <img src="https://img.shields.io/github/actions/workflow/status/GeneralD/zellij-tabmap/ci.yml?label=tests" alt="Tests">
+  <a href="https://codecov.io/gh/GeneralD/zellij-tabmap"><img src="https://codecov.io/gh/GeneralD/zellij-tabmap/graph/badge.svg" alt="Coverage"></a>
+  <a href="https://coderabbit.ai"><img src="https://img.shields.io/coderabbit/prs/github/GeneralD/zellij-tabmap?utm_source=oss&utm_medium=github&utm_campaign=GeneralD%2Fzellij-tabmap&labelColor=171717&color=FF570A&label=CodeRabbit+Reviews" alt="CodeRabbit Reviews"></a>
+  <img src="https://img.shields.io/badge/open%20source-%E2%9D%A4-red" alt="Open Source">
+</p>
+
+<p align="center">
+  <a href="https://codecov.io/gh/GeneralD/zellij-tabmap"><img src="https://codecov.io/gh/GeneralD/zellij-tabmap/graphs/sunburst.svg" alt="Coverage Sunburst" width="200"></a>
+</p>
+
 # zellij-tabmap
-
-![hero](assets/hero.png)
-
-[![CI](https://github.com/GeneralD/zellij-tabmap/actions/workflows/ci.yml/badge.svg)](https://github.com/GeneralD/zellij-tabmap/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/GeneralD/zellij-tabmap/branch/main/graph/badge.svg)](https://codecov.io/gh/GeneralD/zellij-tabmap) ![license](https://img.shields.io/badge/license-MIT-green) ![zellij-tile](https://img.shields.io/badge/zellij--tile-0.44.3-blue) ![rust](https://img.shields.io/badge/rust-2021-orange?logo=rust) ![target](https://img.shields.io/badge/target-wasm32--wasip1-purple?logo=webassembly) ![status](https://img.shields.io/badge/status-early%20development-yellow)
 
 A [zellij](https://zellij.dev) plugin that replaces the thin one-row tab bar with a **taller, multi-row tab bar** in which every tab is drawn as a **color-coded minimap of its own pane layout** — a tiny pixel-grid thumbnail of how that tab's terminal is split. Panes are identified by color; where a tab is wide enough, a summarized title is overlaid; the `⌘N` switch hint is shown per tab.
 

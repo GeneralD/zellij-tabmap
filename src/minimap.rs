@@ -120,7 +120,9 @@ fn pixel_color(
 /// the block's top-left in dark text over the underlying cell color — the pane
 /// fill, or the focus ring where it overlaps a focused pane's outline — so it
 /// reads as a label *inside* the color block; it is dropped when the block is
-/// too narrow to host it. Empty input yields an all-background block.
+/// too narrow to host it, or when it contains a glyph wider than one column.
+/// Empty input yields an all-background block, with the badge still stamped
+/// over it when one is given and fits.
 pub fn render(
     panes: &[PaneRect],
     palette: &Palette,

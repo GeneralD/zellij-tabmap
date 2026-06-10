@@ -382,15 +382,17 @@ mod tests {
     #[test]
     fn render_zero_size_is_empty() {
         assert!(render(&one_focused(), &test_palette(), 0, 3, LabelMode::None, None).is_empty());
-        assert!(render(
-            &one_focused(),
-            &test_palette(),
-            10,
-            0,
-            LabelMode::None,
-            None
-        )
-        .is_empty());
+        assert!(
+            render(
+                &one_focused(),
+                &test_palette(),
+                10,
+                0,
+                LabelMode::None,
+                None
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -422,7 +424,10 @@ mod tests {
         // be overlaid like any longer label, not dropped (#38).
         let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "~", false)];
         let wide = render(&panes, &test_palette(), 12, 3, LabelMode::All, None);
-        assert!(wide.contains('~'), "expected the 1-char label in a wide block");
+        assert!(
+            wide.contains('~'),
+            "expected the 1-char label in a wide block"
+        );
     }
 
     #[test]

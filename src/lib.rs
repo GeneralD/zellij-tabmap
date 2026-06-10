@@ -105,11 +105,15 @@ fn palette_from_style(style: &Style) -> color::Palette {
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
-        // A fixed-size (`size=3`) default_tab_template pane is only stable when
-        // the plugin marks itself non-selectable. Assert it first, then again
-        // on PermissionResult (see `update`), since the post-permission
-        // re-render is when a stale selectable state would surface.
-        set_selectable(false);
+        // Deliberately NO `set_selectable(false)` here: the pane stays
+        // selectable until the permission flow resolves, and the
+        // PermissionRequestResult arm (see `update`) pins it. Pinning before
+        // `request_permission` made the pane unfocusable while the interactive
+        // prompt was on screen, so `y` could never reach it (#54). Both load
+        // paths still pin within the first event: a cache-granted load (the
+        // normal `default_tab_template` path) receives `Granted` immediately
+        // after load, and an ad-hoc load with no grant stays focusable until
+        // the user answers the prompt — which then delivers the result.
         self.config = Config::from_configuration(&configuration);
         // Request exactly the permissions the active config needs — see
         // [`Self::permissions`]. A plugin started from `default_tab_template`
@@ -133,8 +137,14 @@ impl ZellijPlugin for State {
         match event {
             Event::PermissionRequestResult(status) => {
                 self.permitted = status == PermissionStatus::Granted;
-                // Re-assert non-selectable: the post-permission re-render is the
-                // moment a stale selectable state would destabilize the bar.
+                // The permission flow has resolved — pin the pane
+                // non-selectable now, the earliest moment that cannot trap the
+                // interactive prompt (#54). A fixed-size (`size=3`)
+                // default_tab_template pane is only stable once the plugin is
+                // non-selectable, and this fires within the first event there
+                // (a cache grant emits `Granted` right after load). Pinning is
+                // unconditional on purpose: a `Denied` bar renders nothing and
+                // must not linger as a focusable dead pane in the tab order.
                 set_selectable(false);
                 true
             }
@@ -377,14 +387,38 @@ impl State {
 // imports (all routed through `host_run_plugin_command`). Provide the symbol
 // so `cargo test --lib --target <host>` links off-wasm. On wasm the real host
 // supplies it, so this stub is compiled only under `cfg(test)`.
+//
+// The stub counts its calls per test thread: the command payload travels over
+// stdout (invisible here), but the *number* of host commands a hook emits is
+// observable, which is enough to pin selectability ordering — e.g. that `load`
+// emits no `set_selectable` ahead of the permission flow (#54). Thread-local
+// so parallel tests never see each other's counts; tests measure deltas via
+// `host_commands_during`, which also keeps them correct under
+// `--test-threads=1` thread reuse.
+#[cfg(test)]
+thread_local! {
+    static HOST_COMMAND_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[cfg(test)]
 #[no_mangle]
-extern "C" fn host_run_plugin_command() {}
+extern "C" fn host_run_plugin_command() {
+    HOST_COMMAND_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::line::{Shift, TabHit};
+
+    /// The number of host commands `body` emits, as a delta of this thread's
+    /// stub counter — robust whether the harness gives each test its own
+    /// thread (the default) or reuses one (`--test-threads=1`).
+    fn host_commands_during(body: impl FnOnce()) -> usize {
+        let before = HOST_COMMAND_CALLS.with(std::cell::Cell::get);
+        body();
+        HOST_COMMAND_CALLS.with(std::cell::Cell::get) - before
+    }
 
     /// A `TabInfo` carrying only the two fields the reorder math reads.
     fn tab(position: usize, tab_id: usize) -> TabInfo {
@@ -623,6 +657,41 @@ mod tests {
         assert!(state.config.reorder);
         assert_eq!(state.config.active_width, 20);
         assert!(!state.permitted, "permission arrives later as an event");
+    }
+
+    #[test]
+    fn load_keeps_the_pane_selectable_until_the_permission_flow_resolves() {
+        // `load` must emit exactly two host commands — `request_permission`
+        // and `subscribe` — and crucially NO `set_selectable`: pinning the
+        // pane non-selectable before the permission request made the
+        // interactive prompt unfocusable, so an ad-hoc load could never be
+        // answered (#54). The pin belongs to the PermissionRequestResult arm.
+        let mut state = State::default();
+
+        assert_eq!(
+            host_commands_during(|| state.load(config_map(&[]))),
+            2,
+            "request_permission + subscribe only — no pre-grant set_selectable"
+        );
+    }
+
+    #[test]
+    fn permission_result_pins_non_selectable_on_both_outcomes() {
+        // Each resolution emits exactly one host command — the
+        // `set_selectable(false)` pin. Granted stabilizes the fixed-size
+        // template pane within the first event; Denied must pin too, so a
+        // refused prompt never leaves a focusable dead pane in the tab order.
+        let mut state = State::default();
+
+        let granted = host_commands_during(|| {
+            state.update(Event::PermissionRequestResult(PermissionStatus::Granted));
+        });
+        assert_eq!(granted, 1, "Granted pins the pane non-selectable");
+
+        let denied = host_commands_during(|| {
+            state.update(Event::PermissionRequestResult(PermissionStatus::Denied));
+        });
+        assert_eq!(denied, 1, "Denied pins too — no focusable dead pane");
     }
 
     #[test]

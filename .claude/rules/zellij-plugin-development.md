@@ -65,6 +65,12 @@ Pre-seed `permissions.kdl` (see #1) and start a fresh server. In normal use
 the plugin loads from a layout (config-trusted), so this only bites
 ad-hoc CLI loads and live verification.
 
+**Fixed in this plugin (#54):** `load()` no longer pins early — the pane
+stays selectable until `PermissionRequestResult` arrives (the handler pins
+on both Granted and Denied), so an ad-hoc CLI load can be focused and
+answered with `y`. The trap above still applies to any plugin that calls
+`set_selectable(false)` before its permission flow resolves.
+
 ---
 
 ## 3. Detached sessions **don't pump plugin events**

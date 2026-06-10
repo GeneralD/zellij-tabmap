@@ -528,4 +528,17 @@ mod tests {
         assert_eq!(from_eightbit(15), (255, 255, 255));
         Ok(())
     }
+
+    #[test]
+    fn gradient_sweeps_a_light_fill_toward_black() -> R {
+        // The sweep direction follows the same rule as `derived_ring`: a light
+        // fill sweeps darker (toward black), so a light-theme pane never blows
+        // out to white at the sweep's far end. Every channel must move down,
+        // and the sweep's base stays the fill itself.
+        let light = (240, 230, 220);
+        assert_eq!(gradient_at(light, 0), light);
+        let far = gradient_at(light, 100);
+        assert!(far.0 < light.0 && far.1 < light.1 && far.2 < light.2);
+        Ok(())
+    }
 }

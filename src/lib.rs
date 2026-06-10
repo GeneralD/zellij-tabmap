@@ -255,7 +255,7 @@ impl State {
     /// The permission set this config requires. `ReadApplicationState` (Tab/
     /// Pane/Mode updates) and `ChangeApplicationState` (`switch_tab_to` for
     /// click-to-switch, #8) are always needed. `RunActionsAsUser` (the
-    /// `MoveTabByTabId` run_action behind drag-to-reorder, #10) is added **only
+    /// `MoveTab` run_action behind drag-to-reorder, #10) is added **only
     /// when `reorder` is enabled** (#23) — so the default request matches the
     /// v0.1.0 two-permission set and existing auto-updaters never freeze on a
     /// cache miss (zellij#4982). Pure, so the gating is unit-tested directly
@@ -290,7 +290,7 @@ impl State {
     ///
     /// Short-circuits to `None` when `reorder` is disabled (#23): without it the
     /// plugin lacks `RunActionsAsUser`, so arming a drag would only leave the
-    /// gesture "armed but inert" — its `MoveTabByTabId` silently dropped at the
+    /// gesture "armed but inert" — its `MoveTab` silently dropped at the
     /// host boundary. Refusing to arm keeps a press a clean switch-only no-op.
     fn grab_at(&self, column: usize) -> Option<DragState> {
         if !self.config.reorder {
@@ -326,10 +326,10 @@ impl State {
     /// leaves this method a thin resolve→effect seam and makes the move math
     /// testable without a zellij host.
     fn commit_drag_at(&self, column: usize) -> bool {
-        let Some((tab_id, shift, steps)) = self.reorder_plan(column) else {
+        let Some((_, shift, steps)) = self.reorder_plan(column) else {
             return false;
         };
-        self.reorder(tab_id, shift, steps);
+        self.reorder(shift, steps);
         true
     }
 
@@ -353,24 +353,22 @@ impl State {
         Some((drag.grabbed_tab_id, shift, steps))
     }
 
-    /// Emit one `MoveTabByTabId` per step. The action shifts a tab a single
-    /// neighbour per call and targets the **stable** id, so emitting it `steps`
-    /// times walks that tab that many slots in `shift`'s direction — immune to
-    /// the positions reshuffling under each hop. Needs the `RunActionsAsUser`
-    /// permission; without it the host drops the action and reorder is inert.
-    fn reorder(&self, tab_id: usize, shift: line::Shift, steps: usize) {
+    /// Emit one `MoveTab` per step. `MoveTab` shifts the **focused** tab a
+    /// single neighbour per call, and the press that armed this drag already
+    /// focused the grabbed tab (`switch_to_tab_at`), so emitting it `steps`
+    /// times walks that tab into the drop slot. The by-id variant
+    /// (`MoveTabByTabId`) cannot be used here: zellij-utils classifies it as
+    /// CLI-only and the `run_action` shim `unwrap`s the failed protobuf
+    /// conversion — a guaranteed panic on every drag commit (pinned by the
+    /// release tests). Needs the `RunActionsAsUser` permission; without it
+    /// the host drops the action and reorder is inert.
+    fn reorder(&self, shift: line::Shift, steps: usize) {
         let direction = match shift {
             line::Shift::Left => Direction::Left,
             line::Shift::Right => Direction::Right,
         };
         (0..steps).for_each(|_| {
-            run_action(
-                actions::Action::MoveTabByTabId {
-                    id: tab_id as u64,
-                    direction,
-                },
-                BTreeMap::new(),
-            );
+            run_action(actions::Action::MoveTab { direction }, BTreeMap::new());
         });
     }
 }
@@ -540,7 +538,7 @@ mod tests {
 
     #[test]
     fn permissions_include_run_actions_when_reorder_on() {
-        // Opting into reorder adds the third permission `MoveTabByTabId` needs.
+        // Opting into reorder adds the third permission `MoveTab` needs.
         let config = Config {
             reorder: true,
             ..Default::default()
@@ -559,7 +557,7 @@ mod tests {
     fn grab_is_inert_when_reorder_off() {
         // With reorder off the plugin never even arms a drag: a press over a tab
         // records no `DragState`, so the gesture is a clean no-op rather than an
-        // "armed but inert" drag whose `MoveTabByTabId` is silently dropped at
+        // "armed but inert" drag whose `MoveTab` is silently dropped at
         // the host boundary for lack of `RunActionsAsUser`.
         let mut state = State::default();
         state.config = Config {
@@ -591,6 +589,256 @@ mod tests {
                 dragging: false
             })
         ));
+    }
+
+    /// A configuration map as zellij would deliver it from the KDL block.
+    fn config_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// A content pane zellij would report for a tiled layout.
+    fn content_pane(x: usize, y: usize, w: usize, h: usize) -> PaneInfo {
+        PaneInfo {
+            pane_x: x,
+            pane_y: y,
+            pane_columns: w,
+            pane_rows: h,
+            title: "sh".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn load_parses_the_configuration_before_requesting_permissions() {
+        // `load` must parse the delivered map first — the permission request
+        // depends on `reorder` (#23). Host imports are stubbed natively, so the
+        // observable contract is the parsed config; what gets *requested* per
+        // config is pinned separately by the `permissions_*` tests.
+        let mut state = State::default();
+        state.load(config_map(&[("reorder", "true"), ("active_width", "20")]));
+
+        assert!(state.config.reorder);
+        assert_eq!(state.config.active_width, 20);
+        assert!(!state.permitted, "permission arrives later as an event");
+    }
+
+    #[test]
+    fn permission_result_tracks_granted_and_denied() {
+        // Both outcomes repaint (the bar must redraw either way), and only
+        // Granted flips `permitted` — a Denied result must not leave a stale
+        // grant behind.
+        let mut state = State::default();
+
+        assert!(state.update(Event::PermissionRequestResult(PermissionStatus::Granted)));
+        assert!(state.permitted);
+
+        assert!(state.update(Event::PermissionRequestResult(PermissionStatus::Denied)));
+        assert!(!state.permitted);
+    }
+
+    #[test]
+    fn tab_and_pane_updates_replace_the_snapshots_and_repaint() {
+        // The plugin stores whatever snapshot zellij hands it wholesale; both
+        // events request a repaint so the bar tracks the live session.
+        let mut state = State::default();
+
+        assert!(state.update(Event::TabUpdate(vec![tab(0, 1), tab(1, 2)])));
+        assert_eq!(state.tabs.len(), 2);
+
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(0, vec![content_pane(0, 1, 80, 24)]);
+        assert!(state.update(Event::PaneUpdate(manifest)));
+        assert_eq!(state.panes.panes.len(), 1);
+    }
+
+    #[test]
+    fn mode_update_swaps_the_palette_from_the_live_theme() {
+        // zellij delivers the active theme via the mode style; the palette must
+        // be rebuilt from it so pane colors track theme changes.
+        let mut state = State::default();
+        let mut mode_info = ModeInfo::default();
+        mode_info.style.colors.multiplayer_user_colors.player_1 = PaletteColor::Rgb((10, 20, 30));
+
+        assert!(state.update(Event::ModeUpdate(mode_info)));
+        assert_eq!(state.palette.color_for(0), (10, 20, 30));
+    }
+
+    #[test]
+    fn left_click_on_a_tab_arms_a_drag_and_defers_the_repaint() {
+        // The click switches tabs via the host (stubbed here) and records the
+        // press as a potential drag. No repaint is requested — the switch
+        // arrives back as a TabUpdate, which drives the redraw.
+        let mut state = State::default();
+        state.config = Config {
+            reorder: true,
+            ..Default::default()
+        };
+        state.tabs = vec![tab(0, 7), tab(1, 8), tab(2, 100), tab(3, 9), tab(4, 10)];
+        state.tab_layout = five_block_layout();
+
+        assert!(!state.update(Event::Mouse(Mouse::LeftClick(0, 9))));
+        assert!(matches!(
+            state.drag,
+            Some(DragState {
+                grabbed_tab_id: 100,
+                dragging: false
+            })
+        ));
+    }
+
+    #[test]
+    fn left_click_off_any_tab_clears_a_stale_drag() {
+        // A press past the drawn blocks (columns 0..20) resolves to no tab:
+        // nothing to switch to, and any stale drag is dropped rather than left
+        // armed against geometry the press never touched.
+        let mut state = State::default();
+        state.config = Config {
+            reorder: true,
+            ..Default::default()
+        };
+        state.tabs = vec![tab(0, 7)];
+        state.tab_layout = five_block_layout();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 7,
+            dragging: false,
+        });
+
+        assert!(!state.update(Event::Mouse(Mouse::LeftClick(0, 30))));
+        assert!(state.drag.is_none());
+    }
+
+    #[test]
+    fn hold_promotes_the_press_to_a_real_drag() {
+        // Motion while pressed is what separates a drag from a plain click;
+        // only the fact matters, the drop column is read from the Release.
+        let mut state = State::default();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 100,
+            dragging: false,
+        });
+
+        assert!(!state.update(Event::Mouse(Mouse::Hold(0, 12))));
+        assert!(matches!(state.drag, Some(DragState { dragging: true, .. })));
+    }
+
+    #[test]
+    fn hold_without_a_grab_is_a_no_op() {
+        // A Hold with no recorded press (e.g. the press landed off any tab)
+        // must not conjure a drag out of nothing.
+        let mut state = State::default();
+
+        assert!(!state.update(Event::Mouse(Mouse::Hold(0, 12))));
+        assert!(state.drag.is_none());
+    }
+
+    #[test]
+    fn release_commits_a_rightward_drag_and_requests_a_repaint() {
+        // The full gesture: a dragging grab on id 100 (currently position 1)
+        // released over position 4's block resolves a rightward plan and emits
+        // `MoveTab` once per hop (the press already focused the grabbed tab,
+        // so the focused-tab move walks exactly that tab). The choice of
+        // action is load-bearing: the by-id variant (`MoveTabByTabId`) is
+        // CLI-only in zellij-utils and `run_action`'s shim panics on its
+        // failed protobuf conversion — this test running update() through the
+        // real emit pins that the emitted action converts cleanly.
+        let mut state = State::default();
+        state.tabs = vec![tab(0, 7), tab(1, 100), tab(2, 8), tab(3, 9), tab(4, 10)];
+        state.tab_layout = five_block_layout();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 100,
+            dragging: true,
+        });
+
+        assert!(
+            state.update(Event::Mouse(Mouse::Release(0, 18))),
+            "a committed drag must request a repaint"
+        );
+        assert!(state.drag.is_none(), "release always clears the drag");
+    }
+
+    #[test]
+    fn release_commits_a_leftward_drag() {
+        // Same gesture mirrored: id 100 (position 3) dropped on position 0's
+        // block resolves a leftward plan — covering the `Shift::Left`
+        // direction arm — and the emit passes the same shim boundary.
+        let mut state = State::default();
+        state.tabs = vec![tab(0, 7), tab(1, 8), tab(2, 9), tab(3, 100), tab(4, 10)];
+        state.tab_layout = five_block_layout();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 100,
+            dragging: true,
+        });
+
+        assert_eq!(state.reorder_plan(1), Some((100, Shift::Left, 3)));
+        assert!(state.update(Event::Mouse(Mouse::Release(0, 1))));
+        assert!(state.drag.is_none());
+    }
+
+    #[test]
+    fn release_without_a_drag_requests_no_repaint() {
+        // A Release with nothing grabbed (or after a plain click) moves nothing
+        // and must not waste a repaint.
+        let mut state = State::default();
+        state.tab_layout = five_block_layout();
+
+        assert!(!state.update(Event::Mouse(Mouse::Release(0, 18))));
+        assert!(state.drag.is_none());
+    }
+
+    #[test]
+    fn unrelated_events_request_no_repaint() {
+        // Anything outside the subscribed working set falls through the
+        // catch-all arm without touching state.
+        let mut state = State::default();
+
+        assert!(!state.update(Event::Visible(true)));
+    }
+
+    #[test]
+    fn render_draws_the_bar_and_records_click_geometry() {
+        // The success path: permitted, an active tab, and a pane manifest. The
+        // frame paints (to the captured test stdout) and re-records the spans a
+        // later click hit-tests against — including the active block.
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                ..tab(0, 1)
+            },
+            tab(1, 2),
+            tab(2, 3),
+        ];
+        state.panes.panes.insert(
+            0,
+            vec![content_pane(0, 1, 40, 24), content_pane(40, 1, 40, 24)],
+        );
+
+        state.render(ROWS, 80);
+
+        assert!(!state.tab_layout.is_empty(), "the frame records its spans");
+        assert!(
+            state.tab_layout.iter().any(|hit| hit.active),
+            "the active tab's span is among the recorded hits"
+        );
+    }
+
+    #[test]
+    fn render_clears_geometry_when_no_tab_is_active() {
+        // Permitted but mid-transition (no tab marked active): the frame bails
+        // out after wiping the previous spans, so a click resolves against
+        // nothing rather than geometry no longer on screen.
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![tab(0, 1)];
+        state.tab_layout = five_block_layout();
+
+        state.render(ROWS, 80);
+
+        assert!(state.tab_layout.is_empty());
     }
 
     #[test]

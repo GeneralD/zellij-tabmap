@@ -423,6 +423,32 @@ mod tests {
     }
 
     #[test]
+    fn render_widens_a_degenerate_pane_to_one_pixel() {
+        // A zero-area pane inside a larger bounding box maps both of its edges
+        // to the same pixel on both axes. The renderer must widen it to a
+        // single pixel rather than drop it, so its fill still shows up.
+        let panes = vec![
+            PaneRect::new(0, 0, 0, 100, 40, "a", false),
+            PaneRect::new(1, 50, 20, 0, 0, "b", false),
+        ];
+        let palette = test_palette();
+        let out = render(
+            &panes,
+            &palette,
+            10,
+            3,
+            LabelMode::None,
+            None,
+            GradientMode::Off,
+        );
+        let (r, g, b) = palette.color_for(1);
+        assert!(
+            out.contains(&format!("2;{r};{g};{b}m")),
+            "the degenerate pane's slot color must be painted somewhere"
+        );
+    }
+
+    #[test]
     fn render_uses_truecolor_and_halfblock() {
         let out = render(
             &one_focused(),

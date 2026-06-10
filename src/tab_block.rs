@@ -406,6 +406,18 @@ mod tests {
     }
 
     #[test]
+    fn styled_line_width_skips_csi_sequences_and_lone_escapes() {
+        // `width()` must count display columns only: a CSI color sequence
+        // contributes nothing, and a lone ESC not followed by `[` drops back
+        // to text without counting the aborting character. The same string
+        // drives the test-local `measured` cross-check through its matching
+        // ESC-without-bracket branch, keeping the two accountings in lockstep.
+        let line = StyledLine("\u{1b}[38;2;1;2;3mab\u{1b}Zcd".to_string());
+        assert_eq!(line.width(), 4);
+        assert_eq!(measured(&line), 4);
+    }
+
+    #[test]
     fn selects_l0_for_a_wide_active_tab() {
         assert_eq!(level_for(24), Level::L0);
         assert_eq!(level_for(L0_MIN), Level::L0);

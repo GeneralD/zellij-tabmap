@@ -203,6 +203,7 @@ impl ZellijPlugin for State {
             self.tabs.len(),
             active_position,
             self.config.align,
+            self.config.tab_gap,
         );
 
         // Project only the visible tabs' tiled panes (the collapsed ones need no

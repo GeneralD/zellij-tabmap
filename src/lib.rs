@@ -77,10 +77,11 @@ fn rgb(c: PaletteColor) -> color::Rgb {
 /// beside one, and so never cohered as a minimap ramp. A theme defines only as
 /// many player slots as it cares to; the rest stay unset and collapse to the
 /// black sentinel that [`color::Palette::new`] drops — so a theme defining five
-/// players yields five hues. The focused pane keeps its slot fill (issue #47);
-/// `frame_highlight.base` is the accent that seeds the focus ring, derived as a
-/// luminance-shifted shade ([`color::Palette::new`] with `None`), so the
-/// outline tracks the theme instead of a separately-scraped color (issue #32).
+/// players yields five hues. The focused pane keeps its slot fill, and its
+/// focus ring is derived from that fill as a luminance-shifted shade — the
+/// outline stays in the pane's own hue family (issue #47).
+/// `frame_highlight.base` is the accent that seeds the degraded-rung hint
+/// text shade ([`color::Palette::hint`], issue #32).
 fn palette_from_style(style: &Style) -> color::Palette {
     let colors = &style.colors;
     let players = colors.multiplayer_user_colors;
@@ -99,7 +100,7 @@ fn palette_from_style(style: &Style) -> color::Palette {
     .into_iter()
     .map(rgb)
     .collect();
-    color::Palette::new(slots, rgb(colors.frame_highlight.base), None)
+    color::Palette::new(slots, rgb(colors.frame_highlight.base))
 }
 
 impl ZellijPlugin for State {
@@ -619,12 +620,12 @@ mod tests {
         assert_eq!(p.color_for(2), (70, 80, 90));
         assert_eq!(p.color_for(3), (10, 20, 30));
 
-        // Focus keeps the pane's slot fill (issue #47); frame_highlight.base
-        // only seeds the ring, derived as a luminance-shifted shade (issue
-        // #32). style_for hands back the palette ring on the focused style.
+        // Focus keeps the pane's slot fill (issue #47); the ring is derived
+        // from that fill as a luminance-shifted shade, so the outline stays
+        // in the pane's own hue family rather than tracking the theme accent.
         let focused = p.style_for(0, true);
         assert_eq!(focused.fill, (10, 20, 30));
-        assert_eq!(focused.ring, Some(p.ring()));
+        assert_eq!(focused.ring, Some(p.ring_for(0)));
         assert_ne!(focused.ring, Some(focused.fill));
     }
 }

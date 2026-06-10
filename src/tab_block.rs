@@ -208,7 +208,7 @@ fn glyph_lines(panes: &[PaneRect], palette: &Palette, width: usize) -> [StyledLi
     let glyph = representative_glyph(panes);
     [
         StyledLine(blank_row(width)),
-        StyledLine(text_row(&glyph.to_string(), palette.ring(), width)),
+        StyledLine(text_row(&glyph.to_string(), palette.hint(), width)),
         StyledLine(blank_row(width)),
     ]
 }
@@ -223,7 +223,7 @@ fn hint_lines(
     let hint = fit_hint(position, prefix, width);
     [
         StyledLine(blank_row(width)),
-        StyledLine(text_row(&hint, palette.ring(), width)),
+        StyledLine(text_row(&hint, palette.hint(), width)),
         StyledLine(blank_row(width)),
     ]
 }
@@ -364,7 +364,6 @@ mod tests {
         Palette::new(
             vec![(10, 20, 30), (40, 50, 60), (70, 80, 90)],
             (200, 100, 50),
-            Some((250, 250, 250)),
         )
     }
 

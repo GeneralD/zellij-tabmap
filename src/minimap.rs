@@ -175,7 +175,7 @@ fn pixel_color(
     py: usize,
 ) -> Rgb {
     match grid[py * pw + px] {
-        Some(_) if ring[py * pw + px] => palette.ring(),
+        Some(i) if ring[py * pw + px] => palette.ring_for(panes[i].id),
         Some(i) => fill_at(panes, palette, bounds, gradient, i, px, py),
         None => BG,
     }
@@ -384,13 +384,12 @@ mod tests {
     use super::*;
 
     /// A palette with distinct, easily recognized colors so tests can assert
-    /// on exact escape sequences. Accent and ring are unlike every slot — the
-    /// ring is pinned explicitly so the asserted escapes stay value-stable.
+    /// on exact escape sequences. The accent is unlike every slot; rings are
+    /// derived per pane from its own fill (`ring_for`).
     fn test_palette() -> Palette {
         Palette::new(
             vec![(10, 20, 30), (40, 50, 60), (70, 80, 90)],
             (200, 100, 50),
-            Some((250, 250, 250)),
         )
     }
 
@@ -445,7 +444,7 @@ mod tests {
             GradientMode::Off,
         );
         assert!(
-            out.contains(&fg(palette.ring())),
+            out.contains(&fg(palette.ring_for(0))),
             "focused pane should show its ring color"
         );
     }

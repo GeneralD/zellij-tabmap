@@ -41,8 +41,10 @@ pub struct Config {
 }
 
 impl Config {
-    /// Command glyph `⌘` — default switch-hint prefix.
-    pub const DEFAULT_SHORTCUT_PREFIX: &str = "⌘";
+    /// Command glyph `⌘` plus a trailing space — the default switch-hint prefix.
+    /// The space keeps the NerdFont `⌘`, which overflows its cell, from colliding
+    /// with the position digit (renders `⌘ 1`, not `⌘1`).
+    pub const DEFAULT_SHORTCUT_PREFIX: &str = "⌘ ";
     /// Default column budget for the focused tab's minimap.
     pub const DEFAULT_ACTIVE_WIDTH: usize = 24;
     /// Default alignment — centered, preserving the v0.1.0 sliding behavior so
@@ -114,7 +116,7 @@ mod tests {
     #[test]
     fn defaults_when_empty() {
         let config = config_from(&[]);
-        assert_eq!(config.shortcut_prefix, "⌘");
+        assert_eq!(config.shortcut_prefix, "⌘ ");
         assert_eq!(config.active_width, 24);
         assert_eq!(config.align, Alignment::Center);
         assert_eq!(config.tab_gap, 0);
@@ -185,7 +187,7 @@ mod tests {
     fn partial_config_keeps_other_defaults() {
         let config = config_from(&[("active_width", "18")]);
         assert_eq!(config.active_width, 18);
-        assert_eq!(config.shortcut_prefix, "⌘");
+        assert_eq!(config.shortcut_prefix, "⌘ ");
         assert_eq!(config.align, Alignment::Center);
         assert_eq!(config.tab_gap, 0);
         assert!(!config.gutter);

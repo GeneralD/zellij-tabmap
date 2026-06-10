@@ -116,13 +116,20 @@ fn pixel_color(
 /// Colors come from `palette`, keyed on each pane's stable id. Returns an ANSI
 /// string of `text_rows` lines, each terminated by a reset and newline. `mode`
 /// selects which summarized pane titles are overlaid where width allows (see
-/// [`LabelMode`]). Empty input yields an all-background block.
+/// [`LabelMode`]). `badge`, when present, is the tab's shortcut hint stamped into
+/// the block's top-left in dark text over the underlying cell color — the pane
+/// fill, or the focus ring where it overlaps a focused pane's outline — so it
+/// reads as a label *inside* the color block; it is dropped when the block is
+/// too narrow to host it, or when it contains a glyph wider than one column.
+/// Empty input yields an all-background block, with the badge still stamped
+/// over it when one is given and fits.
 pub fn render(
     panes: &[PaneRect],
     palette: &Palette,
     cols: usize,
     text_rows: usize,
     mode: LabelMode,
+    badge: Option<&str>,
 ) -> String {
     let pw = cols;
     let ph = text_rows * 2;
@@ -218,9 +225,36 @@ pub fn render(
         }
     }
 
+    // The shortcut badge occupies the top text row's left cells, after a
+    // one-cell margin, drawn over the underlying cell color — the pane fill, or
+    // the focus ring where it sits on a focused pane's outline — so it reads
+    // inside the block, integrating with the ring rather than punching a
+    // fill-colored hole in it. It is dropped wholesale when it would not fit
+    // within the width.
+    const BADGE_COL: usize = 1;
+    // Char-indexed stamping (one cell per char below) is correct only when every
+    // badge glyph is one display column. `shortcut_prefix` is user-configurable,
+    // so a wide glyph would desync the cells from the terminal's advance and
+    // corrupt the row — drop the badge wholesale in that case, mirroring the
+    // wide-glyph label guard above (width-aware placement lands in #7). The
+    // default `⌘ ` + digit is all single-column, so the common case is untouched.
+    let badge_chars: Vec<char> = badge.map(|b| b.chars().collect()).unwrap_or_default();
+    let badge_fits = badge.is_some_and(crate::title::is_single_column)
+        && !badge_chars.is_empty()
+        && BADGE_COL + badge_chars.len() <= pw;
+
     let mut out = String::with_capacity(text_rows * pw * 24);
     for tr in 0..text_rows {
         for c in 0..pw {
+            if tr == 0 && badge_fits && (BADGE_COL..BADGE_COL + badge_chars.len()).contains(&c) {
+                let fill = pixel_color(&grid, &ring, panes, palette, pw, c, 0);
+                put_bg(&mut out, fill);
+                put_fg(&mut out, LABEL_FG);
+                out.push_str("\x1b[1m");
+                out.push(badge_chars[c - BADGE_COL]);
+                out.push_str("\x1b[22m");
+                continue;
+            }
             if let Some((ch, i)) = overlay[tr * pw + c] {
                 let style = palette.style_for(panes[i].id, panes[i].focused);
                 put_bg(&mut out, style.fill);
@@ -251,12 +285,13 @@ mod tests {
     use super::*;
 
     /// A palette with distinct, easily recognized colors so tests can assert
-    /// on exact escape sequences. Accent and ring are unlike every slot.
+    /// on exact escape sequences. Accent and ring are unlike every slot — the
+    /// ring is pinned explicitly so the asserted escapes stay value-stable.
     fn test_palette() -> Palette {
         Palette::new(
             vec![(10, 20, 30), (40, 50, 60), (70, 80, 90)],
             (200, 100, 50),
-            (250, 250, 250),
+            Some((250, 250, 250)),
         )
     }
 
@@ -270,13 +305,27 @@ mod tests {
 
     #[test]
     fn render_emits_requested_row_count() {
-        let out = render(&one_focused(), &test_palette(), 10, 3, LabelMode::None);
+        let out = render(
+            &one_focused(),
+            &test_palette(),
+            10,
+            3,
+            LabelMode::None,
+            None,
+        );
         assert_eq!(out.lines().count(), 3);
     }
 
     #[test]
     fn render_uses_truecolor_and_halfblock() {
-        let out = render(&one_focused(), &test_palette(), 10, 3, LabelMode::None);
+        let out = render(
+            &one_focused(),
+            &test_palette(),
+            10,
+            3,
+            LabelMode::None,
+            None,
+        );
         assert!(out.contains("\x1b[38;2;"), "expected a truecolor fg escape");
         assert!(out.contains("\x1b[48;2;"), "expected a truecolor bg escape");
         assert!(out.contains('▀'), "expected the upper-half-block glyph");
@@ -285,7 +334,7 @@ mod tests {
     #[test]
     fn render_draws_focus_ring_for_large_pane() {
         let palette = test_palette();
-        let out = render(&one_focused(), &palette, 10, 3, LabelMode::None);
+        let out = render(&one_focused(), &palette, 10, 3, LabelMode::None, None);
         assert!(
             out.contains(&fg(palette.ring())),
             "focused pane should show its ring color"
@@ -308,6 +357,7 @@ mod tests {
                 12,
                 3,
                 LabelMode::None,
+                None,
             )
         };
         let id1 = fg(palette.color_for(1));
@@ -330,13 +380,21 @@ mod tests {
 
     #[test]
     fn render_zero_size_is_empty() {
-        assert!(render(&one_focused(), &test_palette(), 0, 3, LabelMode::None).is_empty());
-        assert!(render(&one_focused(), &test_palette(), 10, 0, LabelMode::None).is_empty());
+        assert!(render(&one_focused(), &test_palette(), 0, 3, LabelMode::None, None).is_empty());
+        assert!(render(
+            &one_focused(),
+            &test_palette(),
+            10,
+            0,
+            LabelMode::None,
+            None
+        )
+        .is_empty());
     }
 
     #[test]
     fn render_empty_panes_is_all_background() {
-        let out = render(&[], &test_palette(), 4, 2, LabelMode::None);
+        let out = render(&[], &test_palette(), 4, 2, LabelMode::None, None);
         assert_eq!(out.lines().count(), 2);
         let (r, g, b) = BG;
         let bg = format!("\x1b[48;2;{};{};{}m", r, g, b);
@@ -350,10 +408,10 @@ mod tests {
     fn labels_appear_when_wide_and_drop_when_narrow() {
         let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "cargo", false)];
         // Wide enough: the label's leading char should be overlaid (dark text fg).
-        let wide = render(&panes, &test_palette(), 12, 3, LabelMode::All);
+        let wide = render(&panes, &test_palette(), 12, 3, LabelMode::All, None);
         assert!(wide.contains('c'), "expected label text in a wide block");
         // Too narrow (cw < 4 after normalization): no label, only block glyphs.
-        let narrow = render(&panes, &test_palette(), 3, 3, LabelMode::All);
+        let narrow = render(&panes, &test_palette(), 3, 3, LabelMode::All, None);
         assert!(!narrow.contains('c'), "narrow block should drop the label");
     }
 
@@ -368,7 +426,7 @@ mod tests {
             PaneRect::new(1, 0, 10, 100, 10, "bbb", false),
             PaneRect::new(2, 0, 20, 100, 10, "ccc", false),
         ];
-        let out = render(&panes, &test_palette(), 16, 3, LabelMode::All);
+        let out = render(&panes, &test_palette(), 16, 3, LabelMode::All, None);
         for ch in ['a', 'b', 'c'] {
             assert!(
                 !out.contains(ch),
@@ -388,7 +446,7 @@ mod tests {
             PaneRect::new(0, 0, 0, 100, 24, "zsh", false),
             PaneRect::new(1, 0, 24, 100, 16, "vim", true),
         ];
-        let out = render(&panes, &test_palette(), 16, 3, LabelMode::All);
+        let out = render(&panes, &test_palette(), 16, 3, LabelMode::All, None);
         assert!(
             out.contains('z'),
             "the taller pane (2 text rows) keeps its label"
@@ -406,10 +464,45 @@ mod tests {
         // advances two, mis-centering the label and corrupting the next cell.
         // Such labels must be dropped wholesale until width-aware placement (#7).
         let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "実装中", false)];
-        let out = render(&panes, &test_palette(), 12, 3, LabelMode::All);
+        let out = render(&panes, &test_palette(), 12, 3, LabelMode::All, None);
         assert!(
             !out.contains('実'),
             "wide-glyph label must be dropped, not placed"
+        );
+    }
+
+    #[test]
+    fn badge_is_stamped_when_it_fits_and_dropped_when_too_narrow() {
+        // The shortcut badge lands in the top text row's left cells, drawn dark
+        // over the pane fill so it reads inside the block. The `⌘` glyph is unique
+        // to the badge (color escapes carry only digits/semicolons, the grid only
+        // `▀`), so its presence/absence is a clean witness for the badge. A wide
+        // block hosts it; a block too narrow for the 1-col margin plus the badge
+        // drops it wholesale rather than truncating into noise.
+        let panes = one_focused();
+        let wide = render(&panes, &test_palette(), 10, 3, LabelMode::None, Some("⌘ 1"));
+        assert!(wide.contains('⌘'), "wide block should host the badge");
+        let narrow = render(&panes, &test_palette(), 1, 3, LabelMode::None, Some("⌘ 1"));
+        assert!(
+            !narrow.contains('⌘'),
+            "too-narrow block must drop the badge"
+        );
+    }
+
+    #[test]
+    fn badge_with_wide_glyphs_is_dropped_not_corrupted() {
+        // `shortcut_prefix` is user-configurable, so a badge can carry a
+        // fullwidth glyph (`符` advances two terminal columns). The stamping
+        // loop writes one char per cell, so a wide glyph would desync the cells
+        // from the cursor and corrupt the row. The block here is wide enough to
+        // host a single-column badge, so width is not the reason for the drop —
+        // the wide glyph is. The badge must be dropped wholesale, mirroring the
+        // wide-glyph label guard.
+        let panes = one_focused();
+        let out = render(&panes, &test_palette(), 10, 3, LabelMode::None, Some("符1"));
+        assert!(
+            !out.contains('符'),
+            "wide-glyph badge must be dropped, not placed"
         );
     }
 }

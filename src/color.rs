@@ -74,6 +74,36 @@ pub fn from_eightbit(c: u8) -> Rgb {
     }
 }
 
+/// Perceived luminance (Rec. 601 luma) of a color, `0..=255`. Decides which way
+/// a focus ring shifts: lighten a dark fill, darken a light one.
+fn luma((r, g, b): Rgb) -> u8 {
+    ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8
+}
+
+/// Blend `from` toward `to` by `percent` (`0` = `from`, `100` = `to`), per
+/// channel. Overflow-safe: the lerp runs in `i32` and lands back in `0..=255`.
+fn mixed(from: Rgb, to: Rgb, percent: u8) -> Rgb {
+    let lerp = |a: u8, b: u8| (a as i32 + (b as i32 - a as i32) * percent as i32 / 100) as u8;
+    (lerp(from.0, to.0), lerp(from.1, to.1), lerp(from.2, to.2))
+}
+
+/// Luminance-aware focus-ring shade of `fill`: lighten a dark fill toward white,
+/// darken a light one toward black, by a fixed mix. The ring stays in the same
+/// hue family as the pane it surrounds (cohesive) while reading as a distinct
+/// outline — it is never equal to `fill`. This is the default ring when a layout
+/// does not pin one explicitly (issue #32).
+fn derived_ring(fill: Rgb) -> Rgb {
+    /// Mix fraction toward white/black. A visual parameter tuned for a ring that
+    /// reads as an outline at minimap scale, not a correctness constant.
+    const SHIFT_PERCENT: u8 = 18;
+    let target = if luma(fill) < 128 {
+        (255, 255, 255)
+    } else {
+        (0, 0, 0)
+    };
+    mixed(fill, target, SHIFT_PERCENT)
+}
+
 /// Resolved drawing attributes for one pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaneStyle {
@@ -92,7 +122,10 @@ pub struct PaneStyle {
 /// is the real focus disambiguator: some themes make `accent` coincide with
 /// a slot color (the default theme's `frame_highlight.base` equals a
 /// `text_unselected` emphasis color), so the focused fill alone can match a
-/// neighbor — the ring outline is what keeps focus unambiguous.
+/// neighbor — the ring outline is what keeps focus unambiguous. By default
+/// `ring` is a luminance-shifted shade of `accent` ([`derived_ring`]), so it
+/// always reads as an outline of the focused fill; a layout may pin it
+/// explicitly instead (issue #32).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Palette {
     slots: Vec<Rgb>,
@@ -115,7 +148,13 @@ impl Palette {
     /// `accent` — an unset `frame_highlight.base` — is replaced with
     /// [`DEFAULT_ACCENT`] so the focused fill and the single-slot fallback
     /// stay visible.)
-    pub fn new(slots: Vec<Rgb>, accent: Rgb, ring: Rgb) -> Self {
+    ///
+    /// `ring` is the focus-outline color: `Some` pins it explicitly (a layout
+    /// override), `None` derives it from the **post-fallback** `accent` via
+    /// [`derived_ring`] — a luminance-shifted shade of the focused fill. Deriving
+    /// after the sentinel swap means the ring always tracks the *visible* accent,
+    /// never the invisible [`BLACK`] one.
+    pub fn new(slots: Vec<Rgb>, accent: Rgb, ring: Option<Rgb>) -> Self {
         let accent = if accent == BLACK {
             DEFAULT_ACCENT
         } else {
@@ -127,6 +166,7 @@ impl Palette {
         } else {
             visible
         };
+        let ring = ring.unwrap_or_else(|| derived_ring(accent));
         Self {
             slots,
             accent,
@@ -143,7 +183,7 @@ impl Palette {
             .into_iter()
             .map(from_eightbit)
             .collect();
-        Self::new(slots, from_eightbit(166), from_eightbit(201))
+        Self::new(slots, from_eightbit(166), None)
     }
 
     /// Deterministic per-identity color: the same `pane_id` always resolves
@@ -184,7 +224,7 @@ mod tests {
         Palette::new(
             vec![(10, 20, 30), (40, 50, 60), (70, 80, 90)],
             (200, 100, 50),
-            (250, 250, 250),
+            None,
         )
     }
 
@@ -216,7 +256,7 @@ mod tests {
 
     #[test]
     fn empty_slots_fall_back_to_accent() -> R {
-        let p = Palette::new(vec![], (1, 2, 3), (4, 5, 6));
+        let p = Palette::new(vec![], (1, 2, 3), None);
         // No division by zero, and every id resolves to the accent.
         assert_eq!(p.color_for(0), (1, 2, 3));
         assert_eq!(p.color_for(99), (1, 2, 3));
@@ -230,7 +270,7 @@ mod tests {
         let p = Palette::new(
             vec![(0, 0, 0), (10, 20, 30), (0, 0, 0), (40, 50, 60)],
             (200, 100, 50),
-            (250, 250, 250),
+            None,
         );
         // Only the two visible colors remain, cycled in order.
         assert_eq!(p.color_for(0), (10, 20, 30));
@@ -245,7 +285,7 @@ mod tests {
     fn all_black_slots_fall_back_to_accent() -> R {
         // A theme that leaves every emphasis color unset yields an all-black
         // slot list; after dropping the sentinels the modulo guard kicks in.
-        let p = Palette::new(vec![(0, 0, 0), (0, 0, 0)], (1, 2, 3), (4, 5, 6));
+        let p = Palette::new(vec![(0, 0, 0), (0, 0, 0)], (1, 2, 3), None);
         assert_eq!(p.color_for(0), (1, 2, 3));
         assert_eq!(p.color_for(99), (1, 2, 3));
         Ok(())
@@ -255,7 +295,7 @@ mod tests {
     fn sentinel_accent_falls_back_to_default() -> R {
         // An unset frame_highlight.base collapses accent to (0,0,0); the focused
         // fill must stay visible, so accent is replaced with DEFAULT_ACCENT.
-        let p = Palette::new(vec![(10, 20, 30)], (0, 0, 0), (5, 5, 5));
+        let p = Palette::new(vec![(10, 20, 30)], (0, 0, 0), None);
         assert_eq!(p.style_for(0, true).fill, DEFAULT_ACCENT);
         assert_ne!(p.style_for(0, true).fill, (0, 0, 0));
         Ok(())
@@ -266,7 +306,7 @@ mod tests {
         // Worst case: every emphasis color AND frame_highlight.base unset. The
         // slot cycle drops to [accent], and accent is the visible default — so
         // color_for never yields black.
-        let p = Palette::new(vec![(0, 0, 0), (0, 0, 0)], (0, 0, 0), (4, 5, 6));
+        let p = Palette::new(vec![(0, 0, 0), (0, 0, 0)], (0, 0, 0), None);
         assert_eq!(p.color_for(0), DEFAULT_ACCENT);
         assert_ne!(p.color_for(0), (0, 0, 0));
         Ok(())
@@ -277,7 +317,7 @@ mod tests {
         let p = palette();
         let focused = p.style_for(0, true);
         assert_eq!(focused.fill, (200, 100, 50));
-        assert_eq!(focused.ring, Some((250, 250, 250)));
+        assert_eq!(focused.ring, Some(p.ring()));
         assert!(focused.emphasized);
         Ok(())
     }
@@ -308,11 +348,47 @@ mod tests {
         // Safety net for themes where `accent` equals a slot color: the ring
         // is what keeps a focused pane distinguishable from a same-colored
         // neighbor, since the fill alone would not.
-        let collide = Palette::new(vec![(9, 9, 9)], (9, 9, 9), (1, 1, 1));
+        let collide = Palette::new(vec![(9, 9, 9)], (9, 9, 9), None);
         let focused = collide.style_for(0, true);
         let neighbor = collide.style_for(0, false);
         assert_eq!(focused.fill, neighbor.fill);
         assert!(focused.ring.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn ring_is_distinct_from_accent_fill() -> R {
+        // The derived ring must never equal the focused fill, or the outline
+        // would vanish into the pane it surrounds.
+        let p = palette();
+        assert_ne!(p.ring(), p.style_for(0, true).fill);
+        Ok(())
+    }
+
+    #[test]
+    fn dark_accent_derives_a_lighter_ring() -> R {
+        // A dark focused fill gets a ring shifted toward white, so the outline
+        // reads brighter than the pane.
+        let p = Palette::new(vec![(10, 20, 30)], (20, 30, 40), None);
+        assert!(luma(p.ring()) > luma((20, 30, 40)));
+        Ok(())
+    }
+
+    #[test]
+    fn light_accent_derives_a_darker_ring() -> R {
+        // A light focused fill gets a ring shifted toward black, so the outline
+        // reads darker than the pane.
+        let p = Palette::new(vec![(10, 20, 30)], (220, 210, 200), None);
+        assert!(luma(p.ring()) < luma((220, 210, 200)));
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_ring_overrides_derivation() -> R {
+        // A layout-pinned ring is used verbatim, bypassing the luminance shift.
+        let p = Palette::new(vec![(10, 20, 30)], (20, 30, 40), Some((1, 2, 3)));
+        assert_eq!(p.ring(), (1, 2, 3));
+        assert_eq!(p.style_for(0, true).ring, Some((1, 2, 3)));
         Ok(())
     }
 

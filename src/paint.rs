@@ -253,19 +253,31 @@ mod tests {
 
     #[test]
     fn bar_assembles_each_tab_at_its_own_budgeted_width() {
-        // Active tab budgeted 16 (L0 color grid, no hint glyph); inactive tab
-        // budgeted 2 (L4 hint). If `bar` fed the active width to the inactive it
-        // would render an L0 grid with no ⌘2; if it fed the inactive width to the
-        // active it would emit ⌘1. Neither must happen.
+        // Each tab picks its ladder rung from its *own* budgeted width, never a
+        // shared one. The active tab (width 16) lands on L0: a color grid that
+        // stamps "⌘1" as an in-block badge. The minimap draws the badge
+        // cell-by-cell, so its glyph and digit are split by SGR escapes and never
+        // form the *contiguous* "⌘1" that a hint rung emits. The inactive tab
+        // (width 2) lands on L4: the shortcut hint proper, a contiguous,
+        // centered "⌘2".
+        //
+        // That contiguous-vs-split split is exactly what discriminates the two
+        // budgeting bugs: feeding the active width to the inactive would replace
+        // its contiguous "⌘2" hint with an L0 grid (no contiguous "⌘2"); feeding
+        // the inactive width to the active would collapse its grid+badge into a
+        // contiguous "⌘1" hint.
         let mut panes = BTreeMap::new();
         panes.insert(0, vec![PaneRect::new(0, 0, 0, 10, 10, "shell", true)]);
         let lo = layout(vec![hit(0, 0, 16, true), hit(1, 16, 2, false)], None, None);
         let out = bar(3, &lo, &panes, &Palette::default(), "\u{2318}");
         assert!(
             out.contains("\u{2318}2"),
-            "inactive tab degrades to its own L4 hint"
+            "inactive tab (width 2) renders its own L4 hint as a contiguous ⌘2"
         );
-        assert!(!out.contains("\u{2318}1"), "active tab is L0, not a hint");
+        assert!(
+            !out.contains("\u{2318}1"),
+            "active tab (width 16) is an L0 grid — its ⌘1 is a split badge, not a contiguous hint"
+        );
     }
 
     #[test]

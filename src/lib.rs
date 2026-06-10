@@ -255,7 +255,7 @@ impl State {
     /// The permission set this config requires. `ReadApplicationState` (Tab/
     /// Pane/Mode updates) and `ChangeApplicationState` (`switch_tab_to` for
     /// click-to-switch, #8) are always needed. `RunActionsAsUser` (the
-    /// `MoveTabByTabId` run_action behind drag-to-reorder, #10) is added **only
+    /// `MoveTab` run_action behind drag-to-reorder, #10) is added **only
     /// when `reorder` is enabled** (#23) — so the default request matches the
     /// v0.1.0 two-permission set and existing auto-updaters never freeze on a
     /// cache miss (zellij#4982). Pure, so the gating is unit-tested directly
@@ -290,7 +290,7 @@ impl State {
     ///
     /// Short-circuits to `None` when `reorder` is disabled (#23): without it the
     /// plugin lacks `RunActionsAsUser`, so arming a drag would only leave the
-    /// gesture "armed but inert" — its `MoveTabByTabId` silently dropped at the
+    /// gesture "armed but inert" — its `MoveTab` silently dropped at the
     /// host boundary. Refusing to arm keeps a press a clean switch-only no-op.
     fn grab_at(&self, column: usize) -> Option<DragState> {
         if !self.config.reorder {
@@ -326,10 +326,10 @@ impl State {
     /// leaves this method a thin resolve→effect seam and makes the move math
     /// testable without a zellij host.
     fn commit_drag_at(&self, column: usize) -> bool {
-        let Some((tab_id, shift, steps)) = self.reorder_plan(column) else {
+        let Some((_, shift, steps)) = self.reorder_plan(column) else {
             return false;
         };
-        self.reorder(tab_id, shift, steps);
+        self.reorder(shift, steps);
         true
     }
 
@@ -353,24 +353,22 @@ impl State {
         Some((drag.grabbed_tab_id, shift, steps))
     }
 
-    /// Emit one `MoveTabByTabId` per step. The action shifts a tab a single
-    /// neighbour per call and targets the **stable** id, so emitting it `steps`
-    /// times walks that tab that many slots in `shift`'s direction — immune to
-    /// the positions reshuffling under each hop. Needs the `RunActionsAsUser`
-    /// permission; without it the host drops the action and reorder is inert.
-    fn reorder(&self, tab_id: usize, shift: line::Shift, steps: usize) {
+    /// Emit one `MoveTab` per step. `MoveTab` shifts the **focused** tab a
+    /// single neighbour per call, and the press that armed this drag already
+    /// focused the grabbed tab (`switch_to_tab_at`), so emitting it `steps`
+    /// times walks that tab into the drop slot. The by-id variant
+    /// (`MoveTabByTabId`) cannot be used here: zellij-utils classifies it as
+    /// CLI-only and the `run_action` shim `unwrap`s the failed protobuf
+    /// conversion — a guaranteed panic on every drag commit (pinned by the
+    /// release tests). Needs the `RunActionsAsUser` permission; without it
+    /// the host drops the action and reorder is inert.
+    fn reorder(&self, shift: line::Shift, steps: usize) {
         let direction = match shift {
             line::Shift::Left => Direction::Left,
             line::Shift::Right => Direction::Right,
         };
         (0..steps).for_each(|_| {
-            run_action(
-                actions::Action::MoveTabByTabId {
-                    id: tab_id as u64,
-                    direction,
-                },
-                BTreeMap::new(),
-            );
+            run_action(actions::Action::MoveTab { direction }, BTreeMap::new());
         });
     }
 }
@@ -540,7 +538,7 @@ mod tests {
 
     #[test]
     fn permissions_include_run_actions_when_reorder_on() {
-        // Opting into reorder adds the third permission `MoveTabByTabId` needs.
+        // Opting into reorder adds the third permission `MoveTab` needs.
         let config = Config {
             reorder: true,
             ..Default::default()
@@ -559,7 +557,7 @@ mod tests {
     fn grab_is_inert_when_reorder_off() {
         // With reorder off the plugin never even arms a drag: a press over a tab
         // records no `DragState`, so the gesture is a clean no-op rather than an
-        // "armed but inert" drag whose `MoveTabByTabId` is silently dropped at
+        // "armed but inert" drag whose `MoveTab` is silently dropped at
         // the host boundary for lack of `RunActionsAsUser`.
         let mut state = State::default();
         state.config = Config {
@@ -737,16 +735,15 @@ mod tests {
     }
 
     #[test]
-    fn release_resolves_the_drag_but_the_emit_panics_at_the_shim_boundary() {
+    fn release_commits_a_rightward_drag_and_requests_a_repaint() {
         // The full gesture: a dragging grab on id 100 (currently position 1)
         // released over position 4's block resolves a rightward plan and emits
-        // `MoveTabByTabId`. The emit, however, panics inside zellij-tile
-        // 0.44.3: `ProtobufAction::try_from` classifies `MoveTabByTabId` as a
-        // CLI-only action and the `run_action` shim unwraps that error. The
-        // conversion is pure data mapping, so the same panic fires on wasm —
-        // this test pins the landmine (analysis in the #51 coverage PR) and
-        // will start failing the moment a zellij-tile upgrade fixes the
-        // conversion, which is the signal to assert the happy path instead.
+        // `MoveTab` once per hop (the press already focused the grabbed tab,
+        // so the focused-tab move walks exactly that tab). The choice of
+        // action is load-bearing: the by-id variant (`MoveTabByTabId`) is
+        // CLI-only in zellij-utils and `run_action`'s shim panics on its
+        // failed protobuf conversion — this test running update() through the
+        // real emit pins that the emitted action converts cleanly.
         let mut state = State::default();
         state.tabs = vec![tab(0, 7), tab(1, 100), tab(2, 8), tab(3, 9), tab(4, 10)];
         state.tab_layout = five_block_layout();
@@ -755,22 +752,18 @@ mod tests {
             dragging: true,
         });
 
-        let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            state.update(Event::Mouse(Mouse::Release(0, 18)))
-        }));
-
         assert!(
-            emitted.is_err(),
-            "zellij-tile 0.44.3 rejects MoveTabByTabId in its protobuf \
-             conversion; a passing update() here means the upstream fixed it"
+            state.update(Event::Mouse(Mouse::Release(0, 18))),
+            "a committed drag must request a repaint"
         );
+        assert!(state.drag.is_none(), "release always clears the drag");
     }
 
     #[test]
-    fn release_resolves_a_leftward_plan_before_the_emit() {
+    fn release_commits_a_leftward_drag() {
         // Same gesture mirrored: id 100 (position 3) dropped on position 0's
-        // block resolves a leftward plan — covering the `Shift::Left` direction
-        // arm — before hitting the same zellij-tile boundary panic as above.
+        // block resolves a leftward plan — covering the `Shift::Left`
+        // direction arm — and the emit passes the same shim boundary.
         let mut state = State::default();
         state.tabs = vec![tab(0, 7), tab(1, 8), tab(2, 9), tab(3, 100), tab(4, 10)];
         state.tab_layout = five_block_layout();
@@ -780,10 +773,8 @@ mod tests {
         });
 
         assert_eq!(state.reorder_plan(1), Some((100, Shift::Left, 3)));
-        let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            state.update(Event::Mouse(Mouse::Release(0, 1)))
-        }));
-        assert!(emitted.is_err());
+        assert!(state.update(Event::Mouse(Mouse::Release(0, 1))));
+        assert!(state.drag.is_none());
     }
 
     #[test]

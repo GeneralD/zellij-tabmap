@@ -173,6 +173,7 @@ pane (including this tab bar) dumps as blank. So you cannot snapshot the
 plugin's rendered truecolor output through `dump-screen`.
 
 **Way out:** split verification in two —
+
 - **Data / projection** (what feeds the renderer): verify live via the
   eprintln oracle (#4).
 - **Visual / paint** (the half-block truecolor cells): verify with unit
@@ -211,3 +212,83 @@ plugin's rendered truecolor output through `dump-screen`.
   user's tiled content. The active tab's raw pane count therefore exceeds
   the projected count (the bar/status-bar plugins are part of the raw set).
 - Use `is_focused` to mark the active pane; the newest split is focused.
+
+---
+
+## 10. zellij caches HTTP **error bodies** as the wasm for remote-URL plugins
+
+When a layout points at an `https://` plugin location, zellij downloads the
+URL **without validating the HTTP status or the wasm magic number** and
+caches whatever bytes came back. If the asset 404s (e.g. the release isn't
+published yet), the literal 9-byte body `Not Found` is cached **as the
+plugin wasm** — permanently, keyed by URL.
+
+Symptom in `zellij.log`:
+
+```text
+failed to parse plugin ...: magic header not detected:
+bad magic number — actual=[0x4e, 0x6f, 0x74, 0x20]
+```
+
+`[0x4e, 0x6f, 0x74, 0x20]` is ASCII `"Not "` — the start of `Not Found`.
+**Restarting zellij does NOT recover**: the poisoned download is on disk and
+is served on every subsequent load of that URL.
+
+**Way out:** delete the cached artifacts for that URL, then start a fresh
+session. On macOS the cache root is
+`~/Library/Caches/org.Zellij-Contributors.Zellij/` (Linux:
+`$XDG_CACHE_HOME/zellij/`), and the URL leaves two traces:
+
+1. A **hashed blob** directly under the cache root — a file whose name is a
+   long decimal hash of the URL. Find the poisoned one by size/content
+   (`file`/`head` shows it's the HTML/text error body, e.g. 9 bytes,
+   instead of a multi-MB wasm).
+2. A **URL-derived directory tree**, e.g.
+   `<cache-root>/https:/github.com/<owner>/<repo>/releases/download/vX.Y.Z/`.
+
+Delete both, restart, and zellij re-downloads. (`permissions.kdl` in the
+same directory is unrelated — leave it alone.)
+
+---
+
+## 11. Remote-URL permission grants are **per exact URL string**
+
+`permissions.kdl` (#1) keys on the literal plugin location string. For
+remote plugins that means:
+
+- A **version-pinned URL** (`.../releases/download/v0.3.0/...`) needs a
+  fresh grant for **every release** — the v0.2.x grant does not carry over.
+- The **`latest` URL** (`.../releases/latest/download/...`) needs one grant
+  ever, but combines badly with #10's URL-keyed wasm cache: the cached wasm
+  for that URL is never invalidated, so updates are held back until the
+  cache is cleared.
+
+Standard onboarding for users (and for yourself after a release bump):
+load the plugin **once in a regular pane** —
+
+```bash
+zellij plugin -- https://github.com/<owner>/<repo>/releases/download/vX.Y.Z/plugin.wasm
+```
+
+— press `y`, close the pane, restart the session. The interactive prompt
+works fine there; zellij#4982 only prevents the dialog for plugins loaded
+from `default_tab_template`. Hand-editing `permissions.kdl` (#1) is the
+fallback, not the primary flow.
+
+---
+
+## 12. Release-timing trap: never point a layout at a tag URL before the asset exists
+
+The release workflow takes ~6 minutes after the tag push to build and
+attach the wasm. If a layout (or `zellij plugin --`) hits the tag URL in
+that window, GitHub returns 404 and zellij **poisons its cache with the
+error body** (#10) — the plugin then stays broken even after the asset is
+published, until the cache is manually cleared.
+
+Order of operations for a release bump in your own layout:
+
+1. Push the tag; wait for the release workflow to finish
+   (`gh run watch`, or `gh release view vX.Y.Z` shows the `.wasm` asset).
+2. Only then update the layout's plugin URL.
+3. Grant the permission for the new URL (#11).
+4. Start a fresh session (#1 — permissions are read at server start).

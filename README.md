@@ -76,7 +76,13 @@ plugin location="file:/absolute/path/to/zellij-tabmap.wasm"
 >
 > **`gradient` — per-pane fill sweep.** `sheen` sweeps each pane block's fill left-to-right from its base color toward a luminance-shifted shade (lighter for dark themes, darker for light ones); `weave` alternates the sweep direction on each half-block pixel row for a woven texture. The focus ring, labels, and the `⌘N` badge stay solid on top, so readability is unchanged. The default stays `off` (flat fills) so existing layouts render unchanged on update.
 >
-> **First-run permission note** ([zellij#4982](https://github.com/zellij-org/zellij/issues/4982)): plugins started from `default_tab_template` cannot show the interactive permission dialog. If the plugin appears inert on first launch, grant it `ReadApplicationState` / `ChangeApplicationState` in zellij's plugin permission cache (`permissions` under the plugin cache) and reload.
+> **First-run permission note**: the bar needs two permissions — `ReadApplicationState` (pane/tab layout data) and `ChangeApplicationState` (click-to-switch) — but when loaded from `default_tab_template` it gets no usable permission prompt: the bar pins itself as a non-selectable pane, so the prompt can't be focused or accepted, and it appears inert on first launch (see also the related upstream issue [zellij#4982](https://github.com/zellij-org/zellij/issues/4982), which tracks the same dead-end for background plugins). To grant the permissions, load the plugin **once in a regular pane** — the prompt shows there and the grant is cached per URL:
+>
+> ```bash
+> zellij plugin -- https://github.com/GeneralD/zellij-tabmap/releases/latest/download/zellij-tabmap.wasm
+> ```
+>
+> Press <kbd>y</kbd> to accept and close the pane, then restart the session so the template-loaded bar picks up the grant. Note the grant is keyed on the **exact plugin URL**, so a version-pinned URL needs this once per version, while the `latest` URL needs it only once (at the cost of zellij's URL-keyed wasm cache holding back updates). As a fallback you can also add the entry by hand to `permissions.kdl` in zellij's cache directory (Linux: `~/.cache/zellij/permissions.kdl`, macOS: `~/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl`) — the file is read once at server startup, so manual edits take effect only in a fresh session.
 >
 > **Enabling `reorder`** requests a third permission, `RunActionsAsUser` (for the `MoveTabByTabId` action a tab drag performs). Granting is all-or-nothing for tab-template plugins, so when you set `reorder "true"` you must grant all three permissions and reload — otherwise the bar freezes with no prompt. Left at the default (`false`), the plugin requests only the two permissions above, so an existing install keeps working unchanged across updates.
 

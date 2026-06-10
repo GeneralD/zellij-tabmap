@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use zellij_tabmap::color::{Palette, Rgb};
 use zellij_tabmap::line::{Alignment, pack};
-use zellij_tabmap::minimap::PaneRect;
+use zellij_tabmap::minimap::{GradientMode, PaneRect};
 use zellij_tabmap::paint::bar;
 
 // frame_highlight of tokyo-night: base is the focus accent. The ring is no
@@ -86,7 +86,7 @@ fn main() {
 
     // One wide active tab carrying a 2x3 pane grid, so several distinct slot
     // fills plus the focused pane's accent + ring are all on screen at once.
-    let layout = pack(cols, 0, 28, 1, 0, Alignment::Center);
+    let layout = pack(cols, 0, 28, 1, 0, Alignment::Center, 2);
     let mut panes: BTreeMap<usize, Vec<PaneRect>> = BTreeMap::new();
     panes.insert(
         0,
@@ -100,5 +100,15 @@ fn main() {
         ],
     );
 
-    print!("{}", bar(3, &layout, &panes, &palette, "\u{2318}"));
+    print!(
+        "{}",
+        bar(
+            3,
+            &layout,
+            &panes,
+            &palette,
+            "\u{2318}",
+            GradientMode::Sheen
+        )
+    );
 }

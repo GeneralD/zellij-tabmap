@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="https://codecov.io/gh/GeneralD/zellij-tabmap"><img src="https://codecov.io/gh/GeneralD/zellij-tabmap/graphs/sunburst.svg" alt="Coverage Sunburst" width="200"></a>
+  <a href="https://codecov.io/gh/GeneralD/zellij-tabmap"><img src="https://codecov.io/gh/GeneralD/zellij-tabmap/graphs/tree.svg?token=blGigRjQcZ" alt="Coverage Tree" width="400"></a>
 </p>
 
 # zellij-tabmap

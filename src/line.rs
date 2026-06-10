@@ -157,10 +157,11 @@ pub fn drag_steps(tabs: &[TabHit], from: usize, release_col: usize) -> Option<(S
 /// The 0-based `position` a release at `release_col` drops onto. Unlike
 /// [`position_at_column`] (an exact grab hit that may miss), a drop is clamped
 /// into the drawn strip: a column left of the first block targets the first
-/// visible tab, one at or past the last block targets the last, and one inside
-/// the contiguous run targets the block under it. `None` only when nothing is
-/// drawn — so an in-strip drop always resolves to a sensible neighbour rather
-/// than discarding the gesture.
+/// visible tab, one at or past the last block targets the last, one inside the
+/// run targets the block under it, and one on an inter-block gap column (a
+/// real miss once `tab_gap` > 0, #33) targets the nearest block. `None` only
+/// when nothing is drawn — so an in-strip drop always resolves to a sensible
+/// neighbour rather than discarding the gesture.
 fn drop_position_at_column(tabs: &[TabHit], release_col: usize) -> Option<usize> {
     let first = tabs.first()?;
     let last = tabs.last()?;
@@ -170,9 +171,29 @@ fn drop_position_at_column(tabs: &[TabHit], release_col: usize) -> Option<usize>
     if release_col >= last.start + last.width {
         return Some(last.position);
     }
-    // Packed spans are contiguous between the ends, so the exact hit always
-    // lands; the fallback only guards a non-contiguous layout defensively.
-    position_at_column(tabs, release_col).or(Some(last.position))
+    // With `tab_gap = 0` blocks pack flush, so the exact hit always lands; a
+    // positive gap opens real miss columns *between* blocks. Falling back to
+    // the last tab there (as this once did) teleported a gap drop to the end
+    // of the strip (#34) — resolve it to the nearest block instead.
+    position_at_column(tabs, release_col).or_else(|| nearest_position_to_column(tabs, release_col))
+}
+
+/// The 0-based `position` of the visible tab whose drawn span lies nearest to
+/// `column` — the gap-column resolver behind [`drop_position_at_column`].
+/// Distance is measured to the nearer span edge (zero inside a span; at most
+/// one of the two saturating terms is non-zero, so their max is the distance).
+/// A column equidistant from both neighbours resolves to the **left** block —
+/// `min_by_key` keeps the first minimum and `tabs` is ordered left → right —
+/// a deterministic tie rule the user can learn. `None` only when nothing is
+/// drawn.
+fn nearest_position_to_column(tabs: &[TabHit], column: usize) -> Option<usize> {
+    tabs.iter()
+        .min_by_key(|tab| {
+            tab.start
+                .saturating_sub(column)
+                .max(column.saturating_sub(tab.start + tab.width - 1))
+        })
+        .map(|tab| tab.position)
 }
 
 fn left_marker(hidden: usize) -> String {
@@ -1071,6 +1092,77 @@ mod tests {
             Some((Shift::Left, 1)),
             "just left of the first block"
         );
+    }
+
+    #[test]
+    fn drop_in_a_gap_column_lands_on_the_nearest_block_not_the_last_tab() {
+        // A `tab_gap = 3` strip: p0 spans [0,2), p1 [5,7), p2 [10,12), so
+        // columns 2..5 and 7..10 are real hit-test misses. Before #34 every
+        // gap drop fell through to the LAST tab; now it resolves to the block
+        // whose span edge is nearest.
+        let tabs = vec![
+            hit(0, 0, 2, true),
+            hit(1, 5, 2, false),
+            hit(2, 10, 2, false),
+        ];
+        assert_eq!(
+            drag_steps(&tabs, 2, 2),
+            Some((Shift::Left, 2)),
+            "column 2 is 1 from p0, 3 from p1"
+        );
+        assert_eq!(
+            drag_steps(&tabs, 2, 4),
+            Some((Shift::Left, 1)),
+            "column 4 is 1 from p1, 3 from p0"
+        );
+        assert_eq!(
+            drag_steps(&tabs, 0, 9),
+            Some((Shift::Right, 2)),
+            "column 9 is 1 from p2, 3 from p1"
+        );
+    }
+
+    #[test]
+    fn drop_on_the_centre_of_an_odd_gap_ties_to_the_left_block() {
+        // Column 3 sits exactly 2 from p0's right edge (column 1) and 2 from
+        // p1's left edge (column 5); the tie breaks toward the LEFT block so
+        // the rule stays deterministic across symmetric gaps.
+        let tabs = vec![
+            hit(0, 0, 2, true),
+            hit(1, 5, 2, false),
+            hit(2, 10, 2, false),
+        ];
+        assert_eq!(drag_steps(&tabs, 2, 3), Some((Shift::Left, 2)), "tie → p0");
+        assert_eq!(
+            drag_steps(&tabs, 0, 8),
+            Some((Shift::Right, 1)),
+            "tie → p1, not p2"
+        );
+    }
+
+    #[test]
+    fn drag_steps_matches_the_nearest_block_across_every_gapped_release() {
+        // Positions 0..4 separated by 2-column gaps: p spans [4p, 4p + 2),
+        // last block ends at 14. Independently of the implementation, each
+        // block owns its span plus the nearer half of each neighbouring gap,
+        // so the drop position of any release is `(release_col + 1) / 4`,
+        // clamped to the last position past the end — a genuine cross-check,
+        // not a restatement.
+        let spans: Vec<TabHit> = (0..4).map(|p| hit(p, p * 4, 2, p == 1)).collect();
+        for from in 0usize..4 {
+            for release_col in 0usize..20 {
+                let to = ((release_col + 1) / 4).min(3);
+                let expected = (to != from).then(|| {
+                    let shift = if to > from { Shift::Right } else { Shift::Left };
+                    (shift, to.abs_diff(from))
+                });
+                assert_eq!(
+                    drag_steps(&spans, from, release_col),
+                    expected,
+                    "from {from}, release_col {release_col} (drop position {to})"
+                );
+            }
+        }
     }
 
     #[test]

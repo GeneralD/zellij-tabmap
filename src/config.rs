@@ -26,10 +26,10 @@ pub struct Config {
     /// always follows the active tab. See [`Alignment`].
     pub align: Alignment,
     /// Columns of empty space left between adjacent tab blocks so the boundary
-    /// between screens reads clearly. `0` (default) packs the blocks flush — the
-    /// v0.1.0 look. The gap renders as the cleared pane background for free:
-    /// [`crate::paint::compose`] positions each block at its own column and never
-    /// paints the inter-block columns.
+    /// between screens reads clearly. Defaults to `2`; `0` packs the blocks
+    /// flush — the original v0.1.0 look. The gap renders as the cleared pane
+    /// background for free: [`crate::paint::compose`] positions each block at
+    /// its own column and never paints the inter-block columns.
     pub tab_gap: usize,
     /// Whether to draw a 1px dark separator between adjacent panes.
     pub gutter: bool,
@@ -39,9 +39,9 @@ pub struct Config {
     /// `RunActionsAsUser` cache miss on auto-update (zellij#4982). On → the
     /// third permission is requested and a tab drag reorders.
     pub reorder: bool,
-    /// Gradient sweep applied to each pane block's fill. Off by default —
-    /// flat fills, the v0.1.0 look — so existing layouts render identically
-    /// on auto-update. See [`GradientMode`].
+    /// Gradient sweep applied to each pane block's fill. Defaults to `sheen`
+    /// — the polished out-of-the-box look; `off` restores the flat
+    /// v0.1.0-style fills. See [`GradientMode`].
     pub gradient: GradientMode,
 }
 
@@ -56,18 +56,17 @@ impl Config {
     /// existing layouts render identically on auto-update (opt into `left` to
     /// anchor the row). Same default-preserve rationale as [`Self::DEFAULT_REORDER`].
     pub const DEFAULT_ALIGN: Alignment = Alignment::Center;
-    /// Default gap between tab blocks — `0`, packing blocks flush so existing
-    /// layouts render identically to v0.1.0 on auto-update (opt into a positive
-    /// value to separate the screens). Same default-preserve rationale as
-    /// [`Self::DEFAULT_ALIGN`] / [`Self::DEFAULT_REORDER`].
-    pub const DEFAULT_TAB_GAP: usize = 0;
+    /// Default gap between tab blocks — `2` cleared columns, so adjacent
+    /// screens read as separate blocks out of the box. Set `0` to pack the
+    /// blocks flush (the original v0.1.0 look).
+    pub const DEFAULT_TAB_GAP: usize = 2;
     /// Default gutter state — no separator.
     pub const DEFAULT_GUTTER: bool = false;
     /// Default reorder state — off, preserving the v0.1.0 permission posture.
     pub const DEFAULT_REORDER: bool = false;
-    /// Default gradient mode — `Off`, preserving the flat v0.1.0 fills on
-    /// auto-update. Same default-preserve rationale as [`Self::DEFAULT_ALIGN`].
-    pub const DEFAULT_GRADIENT: GradientMode = GradientMode::Off;
+    /// Default gradient mode — `Sheen`, the polished out-of-the-box look.
+    /// Set `off` to restore the flat v0.1.0-style fills.
+    pub const DEFAULT_GRADIENT: GradientMode = GradientMode::Sheen;
 
     /// Parse the configuration map, falling back to a default for any missing or
     /// malformed value. Total: never panics on bad input.
@@ -131,10 +130,10 @@ mod tests {
         assert_eq!(config.shortcut_prefix, "⌘ ");
         assert_eq!(config.active_width, 24);
         assert_eq!(config.align, Alignment::Center);
-        assert_eq!(config.tab_gap, 0);
+        assert_eq!(config.tab_gap, 2);
         assert!(!config.gutter);
         assert!(!config.reorder);
-        assert_eq!(config.gradient, GradientMode::Off);
+        assert_eq!(config.gradient, GradientMode::Sheen);
     }
 
     #[test]
@@ -169,12 +168,24 @@ mod tests {
     fn malformed_gradient_falls_back() {
         assert_eq!(
             config_from(&[("gradient", "rainbow")]).gradient,
-            GradientMode::Off
+            GradientMode::Sheen
         );
-        assert_eq!(config_from(&[("gradient", "")]).gradient, GradientMode::Off);
-        // Case-sensitive: only exact "off" / "sheen" / "weave" parse.
         assert_eq!(
-            config_from(&[("gradient", "Sheen")]).gradient,
+            config_from(&[("gradient", "")]).gradient,
+            GradientMode::Sheen
+        );
+        // Case-sensitive: only exact "off" / "sheen" / "weave" parse — a
+        // capitalized "Weave" falls back to the default instead of Weave.
+        assert_eq!(
+            config_from(&[("gradient", "Weave")]).gradient,
+            GradientMode::Sheen
+        );
+    }
+
+    #[test]
+    fn parses_explicit_off_gradient() {
+        assert_eq!(
+            config_from(&[("gradient", "off")]).gradient,
             GradientMode::Off
         );
     }
@@ -214,10 +225,15 @@ mod tests {
 
     #[test]
     fn malformed_tab_gap_falls_back() {
-        assert_eq!(config_from(&[("tab_gap", "wide")]).tab_gap, 0);
-        assert_eq!(config_from(&[("tab_gap", "")]).tab_gap, 0);
+        assert_eq!(config_from(&[("tab_gap", "wide")]).tab_gap, 2);
+        assert_eq!(config_from(&[("tab_gap", "")]).tab_gap, 2);
         // Negative values do not parse as `usize` — fall back to the default.
-        assert_eq!(config_from(&[("tab_gap", "-1")]).tab_gap, 0);
+        assert_eq!(config_from(&[("tab_gap", "-1")]).tab_gap, 2);
+    }
+
+    #[test]
+    fn parses_explicit_zero_tab_gap() {
+        assert_eq!(config_from(&[("tab_gap", "0")]).tab_gap, 0);
     }
 
     #[test]
@@ -226,7 +242,7 @@ mod tests {
         assert_eq!(config.active_width, 18);
         assert_eq!(config.shortcut_prefix, "⌘ ");
         assert_eq!(config.align, Alignment::Center);
-        assert_eq!(config.tab_gap, 0);
+        assert_eq!(config.tab_gap, 2);
         assert!(!config.gutter);
         assert!(!config.reorder);
     }

@@ -56,7 +56,8 @@ default_tab_template {
             active_width "24"
             align "center"                              // "center" slides to keep the active tab centered; "left" anchors the row (all-fit only)
             reorder "false"                             // drag a tab to reorder; "true" also needs RunActionsAsUser
-            gradient "off"                              // pane fill sweep: "off" (flat, default) / "sheen" (L→R) / "weave" (alternating rows)
+            tab_gap "2"                                 // cleared columns between tab blocks; "0" packs them flush
+            gradient "sheen"                            // pane fill sweep: "sheen" (L→R, default) / "weave" (alternating rows) / "off" (flat)
         }
     }
     children
@@ -74,7 +75,9 @@ plugin location="file:/absolute/path/to/zellij-tabmap.wasm"
 
 > **`align` — center vs left.** When every tab fits, `align` decides how the row is anchored: `center` (default) re-centers the active block on each focus change, so the whole strip slides horizontally; `left` pins the row's **left edge** at the start of the tab area (column 0, or just after any reserved prefix columns), removing that whole-strip slide. Note `left` does not freeze every tab's column — the active tab is still drawn wider than the inactives, so the tabs drawn after it shift right as focus crosses them; only the leftmost tab is truly fixed. `align` governs the all-fit case **only** — when tabs overflow, the visible window always follows the active tab (with `← +N` / `+N →` markers) regardless of `align`, because the active tab must stay on screen. The default stays `center` so existing layouts render unchanged on update.
 >
-> **`gradient` — per-pane fill sweep.** `sheen` sweeps each pane block's fill left-to-right from its base color toward a luminance-shifted shade (lighter for dark themes, darker for light ones); `weave` alternates the sweep direction on each half-block pixel row for a woven texture. The focus ring, labels, and the `⌘N` badge stay solid on top, so readability is unchanged. The default stays `off` (flat fills) so existing layouts render unchanged on update.
+> **`tab_gap` — space between tabs.** Leaves the given number of cleared columns between adjacent tab blocks so the boundary between screens reads clearly (default `2`). Set `0` to pack the blocks flush.
+>
+> **`gradient` — per-pane fill sweep.** `sheen` (default) sweeps each pane block's fill left-to-right from its base color toward a luminance-shifted shade (lighter for dark themes, darker for light ones); `weave` alternates the sweep direction on each half-block pixel row for a woven texture. The focus ring, labels, and the `⌘N` badge stay solid on top, so readability is unchanged. Set `off` for flat fills.
 >
 > **First-run permission note**: the bar needs two permissions — `ReadApplicationState` (pane/tab layout data) and `ChangeApplicationState` (click-to-switch) — but when loaded from `default_tab_template` it gets no usable permission prompt: the bar pins itself as a non-selectable pane, so the prompt can't be focused or accepted, and it appears inert on first launch (see also the related upstream issue [zellij#4982](https://github.com/zellij-org/zellij/issues/4982), which tracks the same dead-end for background plugins). To grant the permissions, load the plugin **once in a regular pane** — the prompt shows there and the grant is cached per URL:
 >

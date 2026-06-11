@@ -492,8 +492,8 @@ mod tests {
         let palette = test_palette();
         // Width accounting must hold independent of pane shape, so sweep several
         // layouts: a lone pane, side-by-side columns, a 2×2 grid, and a CJK title
-        // (which drops a wide label at the grid rungs and reduces to the single
-        // ▪ glyph at L3). Each must fill exactly the budget on every row.
+        // (whose 2-column glyphs overlay via continuation cells at the grid
+        // rungs, #57). Each must fill exactly the budget on every row.
         let layouts: [(&str, Vec<PaneRect>); 4] = [
             ("single ascii", one_pane("cargo build")),
             (

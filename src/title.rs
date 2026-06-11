@@ -129,18 +129,6 @@ fn truncated_to_width(s: &str, available: usize) -> String {
     format!("{kept}{ellipsis}")
 }
 
-/// Whether `label` is safe for a char-indexed (one-cell-per-char) overlay —
-/// every character occupies exactly one display column.
-///
-/// The minimap places labels by character index (one terminal cell per char),
-/// which is only correct when each char is a single column. A summarized label
-/// can still be wider than one column per char (a CJK rename, or an icon glyph
-/// once `icons` is enabled), so the renderer uses this to drop such labels
-/// rather than corrupt the row until width-aware placement lands.
-pub fn is_single_column(label: &str) -> bool {
-    label.chars().all(|c| UnicodeWidthChar::width(c) == Some(1))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,15 +223,5 @@ mod tests {
         // itself must stay total: no leading token → not a command.
         assert!(!is_command_title(""));
         assert!(!is_command_title("   "));
-    }
-
-    #[test]
-    fn is_single_column_flags_wide_glyphs() {
-        // ASCII and the 1-column ellipsis are safe for char-indexed placement.
-        assert!(is_single_column("cargo"));
-        assert!(is_single_column("car…"));
-        assert!(is_single_column(""));
-        // A CJK title occupies two columns per char — unsafe for that path.
-        assert!(!is_single_column("実装中"));
     }
 }

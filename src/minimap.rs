@@ -12,6 +12,8 @@
 //! and prints the ANSI string this module returns. Per-pane colors come from
 //! the theme-derived [`Palette`], keyed on each pane's stable id.
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use crate::color::Palette;
 // Re-exported so the historical `minimap::Rgb` path keeps resolving (the
 // canonical definition lives in `crate::color`).
@@ -126,6 +128,22 @@ impl std::str::FromStr for GradientMode {
     }
 }
 
+/// One label-overlay cell, placed by display column.
+///
+/// A glyph claims its leading cell plus one [`Continuation`] cell per extra
+/// column it spans (a CJK glyph spans two), so the overlay stays in lockstep
+/// with the terminal's cursor advance: the emitter paints the leading cell and
+/// skips continuations, which the wide glyph already covers on screen.
+///
+/// [`Continuation`]: OverlayCell::Continuation
+#[derive(Clone, Copy)]
+enum OverlayCell {
+    /// The leading cell of a glyph, carrying it and its pane's slice index.
+    Glyph(char, usize),
+    /// A cell covered by the trailing column(s) of a preceding wide glyph.
+    Continuation,
+}
+
 // ---- core renderer ------------------------------------------------------
 
 /// Fill color of pane `i` at pixel `(px, py)` — the base fill swept by the
@@ -197,7 +215,7 @@ fn pixel_color(
 /// the block's top-left in dark text over the underlying cell color — the pane
 /// fill, or the focus ring where it overlaps a focused pane's outline — so it
 /// reads as a label *inside* the color block; it is dropped when the block is
-/// too narrow to host it, or when it contains a glyph wider than one column.
+/// too narrow to host its display width.
 /// Empty input yields an all-background block, with the badge still stamped
 /// over it when one is given and fits. `gradient` selects the per-pane fill
 /// sweep (see [`GradientMode`]); `Off` reproduces the historical flat fills
@@ -229,7 +247,7 @@ pub fn render(
 
     let mut grid = vec![None::<usize>; ph * pw]; // pane index per pixel
     let mut ring = vec![false; ph * pw]; // focus-ring pixels
-    let mut overlay = vec![None::<(char, usize)>; text_rows * pw]; // label chars
+    let mut overlay = vec![None::<OverlayCell>; text_rows * pw]; // label cells
     let mut bounds = Vec::with_capacity(panes.len()); // (px0, px1) per pane
 
     for (i, p) in panes.iter().enumerate() {
@@ -289,21 +307,36 @@ pub fn render(
         };
         if want_label && cw >= 4 && cell_text_rows >= 2 && inner >= 2 {
             let label = crate::title::summarize(&p.title, inner, false);
-            let label_len = label.chars().count();
-            // Placement below is char-indexed (one cell per char), correct only
-            // when every char occupies one display column. `summarize` is
-            // width-aware and can return wider glyphs (CJK renames now, icons in
-            // #7) — drop those rather than corrupt the row; width-aware placement
-            // lands in #7.
-            if label_len >= 1 && crate::title::is_single_column(&label) {
-                let row = trow0 + cell_text_rows / 2;
-                let start = px0 + 1 + (inner - label_len) / 2;
-                for (k, ch) in label.chars().enumerate() {
-                    let col = start + k;
-                    if col < px1 && row < text_rows {
-                        overlay[row * pw + col] = Some((ch, i));
-                    }
-                }
+            // Placement is by display column (#57): the label is centered by
+            // its display width and each glyph claims one cell per column it
+            // spans (see [`OverlayCell`]), so a CJK rename overlays like any
+            // ASCII title. Zero-width chars are skipped — the per-column
+            // overlay has no cell to host a combining mark. `summarize` keeps
+            // the label within `inner`, so the edge guard below only defends
+            // against a wide glyph straddling the region's right border.
+            let label_width = UnicodeWidthStr::width(label.as_str());
+            let row = trow0 + cell_text_rows / 2;
+            if label_width >= 1 && row < text_rows {
+                let start = px0 + 1 + (inner - label_width) / 2;
+                label
+                    .chars()
+                    .filter_map(|ch| {
+                        UnicodeWidthChar::width(ch)
+                            .filter(|w| *w >= 1)
+                            .map(|w| (ch, w))
+                    })
+                    .scan(start, |col, (ch, w)| {
+                        let at = *col;
+                        *col += w;
+                        Some((at, ch, w))
+                    })
+                    .take_while(|(at, _, w)| at + w <= px1)
+                    .for_each(|(at, ch, w)| {
+                        overlay[row * pw + at] = Some(OverlayCell::Glyph(ch, i));
+                        (at + 1..at + w).for_each(|cc| {
+                            overlay[row * pw + cc] = Some(OverlayCell::Continuation);
+                        });
+                    });
             }
         }
     }
@@ -315,30 +348,52 @@ pub fn render(
     // fill-colored hole in it. It is dropped wholesale when it would not fit
     // within the width.
     const BADGE_COL: usize = 1;
-    // Char-indexed stamping (one cell per char below) is correct only when every
-    // badge glyph is one display column. `shortcut_prefix` is user-configurable,
-    // so a wide glyph would desync the cells from the terminal's advance and
-    // corrupt the row — drop the badge wholesale in that case, mirroring the
-    // wide-glyph label guard above (width-aware placement lands in #7). The
-    // default `⌘ ` + digit is all single-column, so the common case is untouched.
-    let badge_chars: Vec<char> = badge.map(|b| b.chars().collect()).unwrap_or_default();
-    let badge_fits = badge.is_some_and(crate::title::is_single_column)
-        && !badge_chars.is_empty()
-        && BADGE_COL + badge_chars.len() <= pw;
+    // Stamping is by display column (#57): each badge glyph claims its leading
+    // cell (`Some`) plus one `None` continuation cell per extra column it
+    // spans, mirroring the label overlay above — `shortcut_prefix` is
+    // user-configurable, so a fullwidth glyph must advance two cells to stay
+    // in lockstep with the terminal's advance. Zero-width chars are skipped.
+    // Fitting is judged on the resulting per-column length; a badge wider than
+    // the block is dropped wholesale rather than split mid-glyph.
+    let badge_cells: Vec<Option<char>> = badge
+        .map(|b| {
+            b.chars()
+                .filter_map(|ch| {
+                    UnicodeWidthChar::width(ch)
+                        .filter(|w| *w >= 1)
+                        .map(|w| (ch, w))
+                })
+                .flat_map(|(ch, w)| {
+                    std::iter::once(Some(ch)).chain(std::iter::repeat_n(None, w - 1))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let badge_fits = !badge_cells.is_empty() && BADGE_COL + badge_cells.len() <= pw;
 
     let mut out = String::with_capacity(text_rows * pw * 24);
     for tr in 0..text_rows {
         for c in 0..pw {
-            if tr == 0 && badge_fits && (BADGE_COL..BADGE_COL + badge_chars.len()).contains(&c) {
+            if tr == 0 && badge_fits && (BADGE_COL..BADGE_COL + badge_cells.len()).contains(&c) {
+                // A `None` cell sits under the trailing column of a wide badge
+                // glyph, which already covers it on screen — emit nothing.
+                let Some(ch) = badge_cells[c - BADGE_COL] else {
+                    continue;
+                };
                 let fill = pixel_color(&grid, &ring, panes, palette, &bounds, gradient, pw, c, 0);
                 put_bg(&mut out, fill);
                 put_fg(&mut out, LABEL_FG);
                 out.push_str("\x1b[1m");
-                out.push(badge_chars[c - BADGE_COL]);
+                out.push(ch);
                 out.push_str("\x1b[22m");
                 continue;
             }
-            if let Some((ch, i)) = overlay[tr * pw + c] {
+            // A continuation cell is already covered on screen by its wide
+            // glyph's advance — emit nothing so cells stay in lockstep.
+            if let Some(OverlayCell::Continuation) = overlay[tr * pw + c] {
+                continue;
+            }
+            if let Some(OverlayCell::Glyph(ch, i)) = overlay[tr * pw + c] {
                 let style = palette.style_for(panes[i].id, panes[i].focused);
                 put_bg(
                     &mut out,
@@ -673,12 +728,48 @@ mod tests {
         );
     }
 
+    /// The visible text of each output line with CSI escape sequences
+    /// stripped — what the terminal would actually show, glyph by glyph.
+    fn visible_lines(out: &str) -> Vec<String> {
+        out.lines()
+            .map(|line| {
+                line.chars()
+                    .scan(0u8, |csi, c| {
+                        // 0 = text, 1 = saw ESC, 2 = inside CSI
+                        let kept = match (*csi, c) {
+                            (0, '\u{1b}') => {
+                                *csi = 1;
+                                None
+                            }
+                            (1, '[') => {
+                                *csi = 2;
+                                None
+                            }
+                            (1, _) => {
+                                *csi = 0;
+                                None
+                            }
+                            (2, c) if ('\u{40}'..='\u{7e}').contains(&c) => {
+                                *csi = 0;
+                                None
+                            }
+                            (2, _) => None,
+                            (_, c) => Some(c),
+                        };
+                        Some(kept)
+                    })
+                    .flatten()
+                    .collect()
+            })
+            .collect()
+    }
+
     #[test]
-    fn labels_with_wide_glyphs_are_dropped_not_corrupted() {
-        // A CJK rename summarizes to multi-column chars. The char-indexed
-        // overlay would advance the cursor one cell per char while the terminal
-        // advances two, mis-centering the label and corrupting the next cell.
-        // Such labels must be dropped wholesale until width-aware placement (#7).
+    fn labels_with_wide_glyphs_are_placed_width_aware() {
+        // A CJK rename summarizes to multi-column chars. Placement is by
+        // display column: each wide glyph occupies two cells (the second is a
+        // continuation the emitter skips), so the label is centered by width
+        // and every row keeps exactly the block's display width (#57).
         let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "実装中", false)];
         let out = render(
             &panes,
@@ -689,10 +780,50 @@ mod tests {
             None,
             GradientMode::Off,
         );
+        let lines = visible_lines(&out);
+        // 6-column label centered in the 10-column inner span: 3 block cells
+        // each side.
         assert!(
-            !out.contains('実'),
-            "wide-glyph label must be dropped, not placed"
+            lines.contains(&"▀▀▀実装中▀▀▀".to_string()),
+            "expected the centered CJK label, got {lines:?}"
         );
+        for (row, line) in lines.iter().enumerate() {
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(line.as_str()),
+                12,
+                "row {row} must keep the block's display width, got {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_glyph_labels_truncate_without_splitting_at_the_edge() {
+        // At 7 columns the inner span is 5: `summarize` keeps "実装" (4 cols)
+        // plus the ellipsis. The trailing 中 must vanish entirely — a wide
+        // glyph is never split into a half-rendered cell at the edge (#57).
+        let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "実装中", false)];
+        let out = render(
+            &panes,
+            &test_palette(),
+            7,
+            3,
+            LabelMode::All,
+            None,
+            GradientMode::Off,
+        );
+        let lines = visible_lines(&out);
+        assert!(
+            lines.iter().any(|l| l.contains("実装…")),
+            "expected the truncated CJK label, got {lines:?}"
+        );
+        assert!(!out.contains('中'), "the dropped glyph must not leak");
+        for (row, line) in lines.iter().enumerate() {
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(line.as_str()),
+                7,
+                "row {row} must keep the block's display width, got {line:?}"
+            );
+        }
     }
 
     #[test]
@@ -730,14 +861,11 @@ mod tests {
     }
 
     #[test]
-    fn badge_with_wide_glyphs_is_dropped_not_corrupted() {
+    fn badge_with_wide_glyphs_is_stamped_width_aware() {
         // `shortcut_prefix` is user-configurable, so a badge can carry a
-        // fullwidth glyph (`符` advances two terminal columns). The stamping
-        // loop writes one char per cell, so a wide glyph would desync the cells
-        // from the cursor and corrupt the row. The block here is wide enough to
-        // host a single-column badge, so width is not the reason for the drop —
-        // the wide glyph is. The badge must be dropped wholesale, mirroring the
-        // wide-glyph label guard.
+        // fullwidth glyph (`符` advances two terminal columns). Stamping is by
+        // display column — the wide glyph takes two cells and the row keeps
+        // exactly the block's display width (#57).
         let panes = one_focused();
         let out = render(
             &panes,
@@ -748,9 +876,38 @@ mod tests {
             Some("符1"),
             GradientMode::Off,
         );
+        let lines = visible_lines(&out);
+        assert!(
+            lines[0].contains("符1"),
+            "expected the wide-glyph badge, got {lines:?}"
+        );
+        for (row, line) in lines.iter().enumerate() {
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(line.as_str()),
+                10,
+                "row {row} must keep the block's display width, got {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn badge_with_wide_glyphs_is_dropped_when_it_does_not_fit() {
+        // Fitting is judged in display columns, not chars: `符符` is 2 chars
+        // but 4 columns, which the 1-col margin pushes past a 4-col block.
+        // The badge drops wholesale rather than splitting a glyph (#57).
+        let panes = one_focused();
+        let out = render(
+            &panes,
+            &test_palette(),
+            4,
+            3,
+            LabelMode::None,
+            Some("符符"),
+            GradientMode::Off,
+        );
         assert!(
             !out.contains('符'),
-            "wide-glyph badge must be dropped, not placed"
+            "a badge wider than the block must be dropped, not split"
         );
     }
 

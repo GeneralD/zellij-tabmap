@@ -7,11 +7,25 @@
 //! glyph (when the leading command is recognized and icons are enabled) or a
 //! width-budgeted text label.
 //!
-//! All width accounting is in *display columns* via `unicode-width`, so a CJK
-//! or wide glyph that occupies two cells is counted as two, never one. The
-//! module has no zellij dependency and is unit-tested natively.
+//! All width accounting is in *display columns* summed per char (see
+//! [`charwise_width`]), so a CJK or wide glyph that occupies two cells is
+//! counted as two, never one. The module has no zellij dependency and is
+//! unit-tested natively.
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
+
+/// Display width of `s` as the sum of its chars' individual widths.
+///
+/// This deliberately differs from `UnicodeWidthStr::width`, which prices an
+/// emoji ZWJ sequence (`👩\u{200D}💻`) as one 2-column glyph. The minimap
+/// emits labels char by char and skips zero-width chars (a joiner it emitted
+/// would make a sequence-collapsing terminal advance 2 columns where the
+/// overlay claimed 4), so the parts render side by side and the honest width
+/// is the per-char sum. Centering, truncation, and cell claiming must all
+/// price a label the same way or wide sequences mis-center and underflow.
+pub fn charwise_width(s: &str) -> usize {
+    s.chars().filter_map(UnicodeWidthChar::width).sum()
+}
 
 /// Map a known command name to its Nerd Font glyph, or `None` if unrecognized.
 ///
@@ -56,7 +70,7 @@ pub fn summarize(title: &str, available: usize, icons: bool) -> String {
     let token = basename(leading_token(trimmed));
     if icons {
         if let Some(glyph) = icon_for(token) {
-            if UnicodeWidthStr::width(glyph) <= available {
+            if charwise_width(glyph) <= available {
                 return glyph.to_string();
             }
         }
@@ -108,7 +122,7 @@ fn is_command_title(title: &str) -> bool {
 /// (2-column) glyph is never split, so the kept content can fall a column short
 /// of the budget — e.g. `"あ…"` uses only 3 of a 4-column budget.
 fn truncated_to_width(s: &str, available: usize) -> String {
-    if UnicodeWidthStr::width(s) <= available {
+    if charwise_width(s) <= available {
         return s.to_string();
     }
     let (budget, ellipsis) = if available >= 4 {
@@ -127,18 +141,6 @@ fn truncated_to_width(s: &str, available: usize) -> String {
         })
         .collect::<String>();
     format!("{kept}{ellipsis}")
-}
-
-/// Whether `label` is safe for a char-indexed (one-cell-per-char) overlay —
-/// every character occupies exactly one display column.
-///
-/// The minimap places labels by character index (one terminal cell per char),
-/// which is only correct when each char is a single column. A summarized label
-/// can still be wider than one column per char (a CJK rename, or an icon glyph
-/// once `icons` is enabled), so the renderer uses this to drop such labels
-/// rather than corrupt the row until width-aware placement lands.
-pub fn is_single_column(label: &str) -> bool {
-    label.chars().all(|c| UnicodeWidthChar::width(c) == Some(1))
 }
 
 #[cfg(test)]
@@ -230,20 +232,33 @@ mod tests {
     }
 
     #[test]
+    fn charwise_width_prices_zwj_sequences_per_char() {
+        // `UnicodeWidthStr::width` prices 👩\u{200D}💻 as one 2-column glyph,
+        // but the minimap emits it decomposed (the joiner is skipped), so the
+        // honest budget is the per-char sum: 2 + 0 + 2.
+        assert_eq!(charwise_width("👩\u{200D}💻"), 4);
+        assert_eq!(charwise_width("実装中"), 6);
+        assert_eq!(charwise_width("cargo"), 5);
+        assert_eq!(charwise_width(""), 0);
+    }
+
+    #[test]
+    fn summarize_budgets_zwj_sequences_by_charwise_width() {
+        // The whole sequence is 4 columns charwise; a 4-column budget keeps it
+        // entire, while a 2-column budget keeps only the leading half (plus
+        // the zero-width joiner, which costs nothing and is skipped at
+        // emission). The result must never claim more cells than `available`.
+        assert_eq!(summarize("👩\u{200D}💻", 4, false), "👩\u{200D}💻");
+        let narrowed = summarize("👩\u{200D}💻", 2, false);
+        assert!(charwise_width(&narrowed) <= 2, "got {narrowed:?}");
+        assert!(narrowed.contains('👩') && !narrowed.contains('💻'));
+    }
+
+    #[test]
     fn is_command_title_rejects_a_blank_title() {
         // `summarize` trims and returns early on empty input, but the helper
         // itself must stay total: no leading token → not a command.
         assert!(!is_command_title(""));
         assert!(!is_command_title("   "));
-    }
-
-    #[test]
-    fn is_single_column_flags_wide_glyphs() {
-        // ASCII and the 1-column ellipsis are safe for char-indexed placement.
-        assert!(is_single_column("cargo"));
-        assert!(is_single_column("car…"));
-        assert!(is_single_column(""));
-        // A CJK title occupies two columns per char — unsafe for that path.
-        assert!(!is_single_column("実装中"));
     }
 }

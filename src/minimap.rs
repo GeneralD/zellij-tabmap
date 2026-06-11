@@ -12,7 +12,7 @@
 //! and prints the ANSI string this module returns. Per-pane colors come from
 //! the theme-derived [`Palette`], keyed on each pane's stable id.
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 use crate::color::Palette;
 // Re-exported so the historical `minimap::Rgb` path keeps resolving (the
@@ -310,11 +310,14 @@ pub fn render(
             // Placement is by display column (#57): the label is centered by
             // its display width and each glyph claims one cell per column it
             // spans (see [`OverlayCell`]), so a CJK rename overlays like any
-            // ASCII title. Zero-width chars are skipped — the per-column
-            // overlay has no cell to host a combining mark. `summarize` keeps
-            // the label within `inner`, so the edge guard below only defends
-            // against a wide glyph straddling the region's right border.
-            let label_width = UnicodeWidthStr::width(label.as_str());
+            // ASCII title. Zero-width chars are skipped — emitting a joiner
+            // would let a sequence-collapsing terminal advance fewer columns
+            // than the overlay claimed — so width is priced per char
+            // ([`crate::title::charwise_width`]) to match what is emitted.
+            // `summarize` budgets with the same pricing, so the label always
+            // fits `inner` and the edge guard below only defends against a
+            // wide glyph straddling the region's right border.
+            let label_width = crate::title::charwise_width(&label);
             let row = trow0 + cell_text_rows / 2;
             if label_width >= 1 && row < text_rows {
                 let start = px0 + 1 + (inner - label_width) / 2;
@@ -786,6 +789,47 @@ mod tests {
         assert!(
             lines.contains(&"▀▀▀実装中▀▀▀".to_string()),
             "expected the centered CJK label, got {lines:?}"
+        );
+        for (row, line) in lines.iter().enumerate() {
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(line.as_str()),
+                12,
+                "row {row} must keep the block's display width, got {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn emoji_zwj_label_renders_decomposed_but_width_consistent() {
+        // An emoji ZWJ sequence (👩\u{200D}💻) decomposes on the overlay: the
+        // joiner is zero-width, so emitting it would let a sequence-collapsing
+        // terminal advance 2 columns where the overlay claimed 4 — the exact
+        // desync #57 fixes. Skipping zero-width chars keeps the claimed cells
+        // equal to the terminal's advance for what is actually emitted, and
+        // `charwise_width` prices the label the same way (👩=2 + 💻=2 = 4, not
+        // `UnicodeWidthStr`'s sequence-aware 2), so centering matches: the
+        // parts render side by side, off-spec visually but never corrupting
+        // the row or the margins. This test pins that trade-off.
+        let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "👩\u{200D}💻", false)];
+        let out = render(
+            &panes,
+            &test_palette(),
+            12,
+            3,
+            LabelMode::All,
+            None,
+            GradientMode::Off,
+        );
+        let lines = visible_lines(&out);
+        // Both halves are emitted, centered by the 4-column char-sum width …
+        assert!(
+            lines.contains(&"▀▀▀▀👩💻▀▀▀▀".to_string()),
+            "expected the decomposed emoji label, got {lines:?}"
+        );
+        // … and the joiner itself never reaches the output.
+        assert!(
+            !out.contains('\u{200D}'),
+            "a zero-width joiner must not be emitted into the overlay"
         );
         for (row, line) in lines.iter().enumerate() {
             assert_eq!(

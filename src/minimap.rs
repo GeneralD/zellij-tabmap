@@ -21,9 +21,16 @@ pub use crate::color::Rgb;
 
 /// Tokyonight background (`#1a1b26`) — painted on empty space. Shared with
 /// [`crate::tab_block`], which paints its glyph/hint rungs on the same canvas.
-pub(crate) const BG: Rgb = (26, 27, 38);
-/// Dark text color for labels drawn over a (light) pane fill.
-const LABEL_FG: Rgb = (16, 17, 26);
+/// Canonical value lives in [`crate::color::CANVAS`] (the dim target, #59).
+pub(crate) const BG: Rgb = crate::color::CANVAS;
+/// White text for all active-tab labels and badges (#59): on a vivid fill
+/// white is the most legible and prominent choice. Shared with
+/// [`crate::tab_block`], whose narrow rungs (L3/L4) use it for the active tab.
+pub(crate) const ACTIVE_FG: Rgb = (255, 255, 255);
+/// Blend fraction that subdues inactive labels toward the pane fill (#59):
+/// enough to visually recede while remaining readable. A visual parameter —
+/// retune freely; not a correctness constant.
+pub(crate) const INACTIVE_LABEL_BLEND: u8 = 30;
 
 pub(crate) const RESET: &str = "\x1b[0m";
 
@@ -158,7 +165,7 @@ fn fill_at(
     px: usize,
     py: usize,
 ) -> Rgb {
-    let fill = palette.style_for(panes[i].id, panes[i].focused).fill;
+    let fill = palette.color_for(panes[i].id);
     if gradient == GradientMode::Off {
         return fill;
     }
@@ -212,14 +219,19 @@ fn pixel_color(
 /// string of `text_rows` lines, each terminated by a reset and newline. `mode`
 /// selects which summarized pane titles are overlaid where width allows (see
 /// [`LabelMode`]). `badge`, when present, is the tab's shortcut hint stamped into
-/// the block's top-left in dark text over the underlying cell color — the pane
-/// fill, or the focus ring where it overlaps a focused pane's outline — so it
-/// reads as a label *inside* the color block; it is dropped when the block is
-/// too narrow to host its display width.
+/// the block's top-left over the underlying cell color — the pane fill, or the
+/// focus ring where it overlaps a focused pane's outline — so it reads as a
+/// label *inside* the color block; it is dropped when the block is too narrow
+/// to host its display width.
 /// Empty input yields an all-background block, with the badge still stamped
 /// over it when one is given and fits. `gradient` selects the per-pane fill
 /// sweep (see [`GradientMode`]); `Off` reproduces the historical flat fills
-/// byte-for-byte.
+/// byte-for-byte. `active` marks the bar's selected tab (#59): its badge and
+/// every pane label render pure white ([`ACTIVE_FG`]) — the focused one also
+/// bold — and its focus ring is drawn. Inactive blocks suppress the highlight
+/// entirely — no ring, no bold — and subdue text toward the pane fill by
+/// [`INACTIVE_LABEL_BLEND`], so the active tab reads at a glance.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     panes: &[PaneRect],
     palette: &Palette,
@@ -228,6 +240,7 @@ pub fn render(
     mode: LabelMode,
     badge: Option<&str>,
     gradient: GradientMode,
+    active: bool,
 ) -> String {
     let pw = cols;
     let ph = text_rows * 2;
@@ -273,8 +286,10 @@ pub fn render(
         let chh = py1 - py0;
 
         // Focus emphasis: bright outline if the region is big enough to read an
-        // outline (≥3×3 px), otherwise brighten the whole (tiny) region.
-        if p.focused {
+        // outline (≥3×3 px), otherwise brighten the whole (tiny) region. Drawn
+        // only on the bar's selected tab (#59) — an inactive tab's focused
+        // pane carries no highlight at all.
+        if active && p.focused {
             let outline = cw >= 3 && chh >= 3;
             for py in py0..py1 {
                 for px in px0..px1 {
@@ -359,8 +374,8 @@ pub fn render(
     // Fitting is judged on the resulting per-column length; a badge wider than
     // the block is dropped wholesale rather than split mid-glyph.
     let badge_cells: Vec<Option<char>> = badge
-        .map(|b| {
-            b.chars()
+        .map(|text| {
+            text.chars()
                 .filter_map(|ch| {
                     UnicodeWidthChar::width(ch)
                         .filter(|w| *w >= 1)
@@ -385,7 +400,14 @@ pub fn render(
                 };
                 let fill = pixel_color(&grid, &ring, panes, palette, &bounds, gradient, pw, c, 0);
                 put_bg(&mut out, fill);
-                put_fg(&mut out, LABEL_FG);
+                // Active tab: white badge — vivid fill + white = maximum contrast.
+                // Inactive tab: muted toward the fill — recedes gracefully (#59).
+                let badge_fg = if active {
+                    ACTIVE_FG
+                } else {
+                    crate::color::mixed(ACTIVE_FG, fill, INACTIVE_LABEL_BLEND)
+                };
+                put_fg(&mut out, badge_fg);
                 out.push_str("\x1b[1m");
                 out.push(ch);
                 out.push_str("\x1b[22m");
@@ -397,13 +419,19 @@ pub fn render(
                 continue;
             }
             if let Some(OverlayCell::Glyph(ch, i)) = overlay[tr * pw + c] {
-                let style = palette.style_for(panes[i].id, panes[i].focused);
-                put_bg(
-                    &mut out,
-                    fill_at(panes, palette, &bounds, gradient, i, c, 2 * tr),
-                );
-                put_fg(&mut out, LABEL_FG);
-                if style.emphasized {
+                // Active tab: white label on vivid fill — prominent. Focused pane
+                // also bold for maximum emphasis. Inactive tab: text muted toward
+                // the pane fill so it recedes without becoming unreadable (#59).
+                let highlighted = active && panes[i].focused;
+                let label_fill = fill_at(panes, palette, &bounds, gradient, i, c, 2 * tr);
+                put_bg(&mut out, label_fill);
+                let label_fg = if active {
+                    ACTIVE_FG
+                } else {
+                    crate::color::mixed(ACTIVE_FG, label_fill, INACTIVE_LABEL_BLEND)
+                };
+                put_fg(&mut out, label_fg);
+                if highlighted {
                     out.push_str("\x1b[1m");
                     out.push(ch);
                     out.push_str("\x1b[22m");
@@ -462,6 +490,10 @@ mod tests {
         format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
     }
 
+    fn bg(c: Rgb) -> String {
+        format!("\x1b[48;2;{};{};{}m", c.0, c.1, c.2)
+    }
+
     fn one_focused() -> Vec<PaneRect> {
         vec![PaneRect::new(0, 0, 0, 100, 40, "nvim", true)]
     }
@@ -476,6 +508,7 @@ mod tests {
             LabelMode::None,
             None,
             GradientMode::Off,
+            true,
         );
         assert_eq!(out.lines().count(), 3);
     }
@@ -498,6 +531,7 @@ mod tests {
             LabelMode::None,
             None,
             GradientMode::Off,
+            true,
         );
         let (r, g, b) = palette.color_for(1);
         assert!(
@@ -516,6 +550,7 @@ mod tests {
             LabelMode::None,
             None,
             GradientMode::Off,
+            true,
         );
         assert!(out.contains("\x1b[38;2;"), "expected a truecolor fg escape");
         assert!(out.contains("\x1b[48;2;"), "expected a truecolor bg escape");
@@ -533,6 +568,7 @@ mod tests {
             LabelMode::None,
             None,
             GradientMode::Off,
+            true,
         );
         assert!(
             out.contains(&fg(palette.ring_for(0))),
@@ -558,6 +594,7 @@ mod tests {
                 LabelMode::None,
                 None,
                 GradientMode::Off,
+                true,
             )
         };
         let id1 = fg(palette.color_for(1));
@@ -588,7 +625,8 @@ mod tests {
                 3,
                 LabelMode::None,
                 None,
-                GradientMode::Off
+                GradientMode::Off,
+                true
             )
             .is_empty()
         );
@@ -600,7 +638,8 @@ mod tests {
                 0,
                 LabelMode::None,
                 None,
-                GradientMode::Off
+                GradientMode::Off,
+                true
             )
             .is_empty()
         );
@@ -616,6 +655,7 @@ mod tests {
             LabelMode::None,
             None,
             GradientMode::Off,
+            true,
         );
         assert_eq!(out.lines().count(), 2);
         let (r, g, b) = BG;
@@ -638,6 +678,7 @@ mod tests {
             LabelMode::All,
             None,
             GradientMode::Off,
+            true,
         );
         assert!(wide.contains('c'), "expected label text in a wide block");
         // Too narrow (cw < 4 after normalization): no label, only block glyphs.
@@ -649,6 +690,7 @@ mod tests {
             LabelMode::All,
             None,
             GradientMode::Off,
+            true,
         );
         assert!(!narrow.contains('c'), "narrow block should drop the label");
     }
@@ -666,6 +708,7 @@ mod tests {
             LabelMode::All,
             None,
             GradientMode::Off,
+            true,
         );
         assert!(
             wide.contains('~'),
@@ -692,6 +735,7 @@ mod tests {
             LabelMode::All,
             None,
             GradientMode::Off,
+            true,
         );
         for ch in ['a', 'b', 'c'] {
             assert!(
@@ -720,6 +764,7 @@ mod tests {
             LabelMode::All,
             None,
             GradientMode::Off,
+            true,
         );
         assert!(
             out.contains('z'),
@@ -782,6 +827,7 @@ mod tests {
             LabelMode::All,
             None,
             GradientMode::Off,
+            true,
         );
         let lines = visible_lines(&out);
         // 6-column label centered in the 10-column inner span: 3 block cells
@@ -819,6 +865,7 @@ mod tests {
             LabelMode::All,
             None,
             GradientMode::Off,
+            true,
         );
         let lines = visible_lines(&out);
         // Both halves are emitted, centered by the 4-column char-sum width …
@@ -854,6 +901,7 @@ mod tests {
             LabelMode::All,
             None,
             GradientMode::Off,
+            true,
         );
         let lines = visible_lines(&out);
         assert!(
@@ -887,6 +935,7 @@ mod tests {
             LabelMode::None,
             Some("⌘ 1"),
             GradientMode::Off,
+            true,
         );
         assert!(wide.contains('⌘'), "wide block should host the badge");
         let narrow = render(
@@ -897,10 +946,111 @@ mod tests {
             LabelMode::None,
             Some("⌘ 1"),
             GradientMode::Off,
+            true,
         );
         assert!(
             !narrow.contains('⌘'),
             "too-narrow block must drop the badge"
+        );
+    }
+
+    #[test]
+    fn active_badge_text_is_white_and_inactive_is_muted() {
+        // #59: active badge = pure white over the pane fill — vivid fill + white
+        // gives maximum contrast. Inactive badge = white blended toward the fill
+        // by INACTIVE_LABEL_BLEND so it recedes. No background chip anywhere.
+        // LabelMode::None keeps labels out, so the badge is the only text source.
+        let panes = one_focused();
+        let palette = test_palette();
+        let render_badge = |active: bool| {
+            render(
+                &panes,
+                &palette,
+                10,
+                3,
+                LabelMode::None,
+                Some("⌘ 1"),
+                GradientMode::Off,
+                active,
+            )
+        };
+        let active = render_badge(true);
+        let inactive = render_badge(false);
+        assert!(
+            active.contains(&fg(ACTIVE_FG)),
+            "the active block's badge text must be white — stands out on vivid fill (#59)"
+        );
+        assert!(
+            !active.contains(&bg(palette.accent())),
+            "the badge must not paint an accent background chip"
+        );
+        // Inactive badge is blended toward the pane fill. Since active=false
+        // suppresses the ring, the badge background is the plain pane fill.
+        let fill = palette.color_for(0); // one_focused() → id=0
+        let muted = crate::color::mixed(ACTIVE_FG, fill, INACTIVE_LABEL_BLEND);
+        assert!(
+            inactive.contains(&fg(muted)),
+            "an inactive badge must be muted toward the pane fill (#59)"
+        );
+        assert!(
+            !inactive.contains(&fg(ACTIVE_FG)),
+            "an inactive badge must not be pure white — it should be subdued"
+        );
+    }
+
+    #[test]
+    fn focus_highlight_paints_only_the_active_tab() {
+        // #59: the focused pane in the *active* tab renders white bold text —
+        // the single most prominent label on the bar. Inactive tabs suppress
+        // the highlight entirely (no ring, no bold) and mute text toward the
+        // pane fill, so only the active tab's cursor location stands out.
+        let panes = one_focused();
+        let palette = test_palette();
+        let render_tab = |active: bool| {
+            render(
+                &panes,
+                &palette,
+                12,
+                3,
+                LabelMode::Focused,
+                None,
+                GradientMode::Off,
+                active,
+            )
+        };
+        let active = render_tab(true);
+        let inactive = render_tab(false);
+        assert!(
+            active.contains(&fg(ACTIVE_FG)),
+            "the active tab's focused label must be white — stands out on vivid fill (#59)"
+        );
+        assert!(
+            active.contains("\x1b[1m"),
+            "the active tab's focused label must be bold"
+        );
+        assert!(
+            active.contains(&fg(palette.ring_for(0))),
+            "the active tab keeps the focus ring"
+        );
+        assert!(
+            inactive.contains('n'),
+            "the inactive tab still labels its focused pane"
+        );
+        // Inactive label is blended toward the pane fill (ring suppressed).
+        let fill = palette.color_for(0); // one_focused() → id=0
+        let muted = crate::color::mixed(ACTIVE_FG, fill, INACTIVE_LABEL_BLEND);
+        assert!(
+            inactive.contains(&fg(muted)),
+            "the inactive focused label must be muted toward the pane fill (#59)"
+        );
+        assert!(
+            !inactive.contains(&fg(ACTIVE_FG)),
+            "inactive label must not be pure white — it should be subdued"
+        );
+        assert!(!inactive.contains("\x1b[1m"), "no bold on an inactive tab");
+        assert!(
+            !inactive.contains(&fg(palette.ring_for(0))),
+            "no focus ring on an inactive tab"
         );
     }
 
@@ -919,6 +1069,7 @@ mod tests {
             LabelMode::None,
             Some("符1"),
             GradientMode::Off,
+            true,
         );
         let lines = visible_lines(&out);
         assert!(
@@ -948,6 +1099,7 @@ mod tests {
             LabelMode::None,
             Some("符符"),
             GradientMode::Off,
+            true,
         );
         assert!(
             !out.contains('符'),
@@ -972,6 +1124,7 @@ mod tests {
             LabelMode::None,
             None,
             GradientMode::Off,
+            true,
         );
         let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
         assert!(out.contains(&fg(palette.color_for(1))));
@@ -989,6 +1142,7 @@ mod tests {
             LabelMode::None,
             None,
             GradientMode::Sheen,
+            true,
         );
         let base = fg(palette.color_for(1));
         let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
@@ -1013,6 +1167,7 @@ mod tests {
             LabelMode::None,
             None,
             GradientMode::Weave,
+            true,
         );
         let fill = palette.color_for(1);
         let stop = crate::color::gradient_at(fill, 100);
@@ -1036,6 +1191,7 @@ mod tests {
             LabelMode::None,
             None,
             GradientMode::Sheen,
+            true,
         );
         assert!(out.starts_with(&fg(palette.color_for(1))));
     }

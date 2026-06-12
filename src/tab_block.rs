@@ -27,7 +27,7 @@
 //! cursor positioning; framing into the plugin pane stays in
 //! [`crate::paint::compose`] so width accounting and the layer boundary hold.
 
-use crate::color::{Palette, Rgb};
+use crate::color::{self, Palette, Rgb};
 use crate::minimap::{self, GradientMode, LabelMode, PaneRect};
 use unicode_width::UnicodeWidthChar;
 
@@ -129,7 +129,11 @@ pub fn level_for(width: usize) -> Level {
 /// Assemble `panes` into a three-row block of exactly `width` columns at tab
 /// `position`, choosing detail via the ladder. `prefix` is the configured
 /// shortcut glyph, used only by the L4 hint rung. `gradient` is the configured
-/// fill sweep, used only by the grid rungs (L0–L2).
+/// fill sweep, used only by the grid rungs (L0–L2). `active` marks the bar's
+/// selected tab: its shortcut text renders white and its focus ring draws,
+/// while inactive blocks suppress the focus highlight (#59) — dimming the
+/// *inactive* blocks is the caller's concern, applied through the palette it
+/// hands in.
 pub fn assemble(
     panes: &[PaneRect],
     palette: &Palette,
@@ -137,34 +141,46 @@ pub fn assemble(
     position: usize,
     prefix: &str,
     gradient: GradientMode,
+    active: bool,
 ) -> TabBlock {
     // #32: stamp the `⌘N` shortcut *inside* the color block as a top-left badge
-    // (dark text over the block's own colors) rather than a separate gutter, so
+    // (text over the block's own colors) rather than a separate gutter, so
     // the shortcut shows on comfortably-sized tabs. The minimap self-skips the
     // badge when the block is too narrow to host it, so the grid rungs degrade
     // cleanly; the narrowest rungs (L3 glyph, L4 hint) carry the number on their
     // own as before.
     let hint = hint_text(position, prefix);
+    let badge = Some(hint.as_str());
     let lines = match level_for(width) {
-        Level::L0 => grid_lines(panes, palette, width, LabelMode::All, Some(&hint), gradient),
+        Level::L0 => grid_lines(
+            panes,
+            palette,
+            width,
+            LabelMode::All,
+            badge,
+            gradient,
+            active,
+        ),
         Level::L1 => grid_lines(
             panes,
             palette,
             width,
             LabelMode::Focused,
-            Some(&hint),
+            badge,
             gradient,
+            active,
         ),
         Level::L2 => grid_lines(
             panes,
             palette,
             width,
             LabelMode::None,
-            Some(&hint),
+            badge,
             gradient,
+            active,
         ),
-        Level::L3 => glyph_lines(panes, palette, width),
-        Level::L4 => hint_lines(position, prefix, palette, width),
+        Level::L3 => glyph_lines(panes, width, active),
+        Level::L4 => hint_lines(position, prefix, width, active),
     };
     TabBlock {
         lines,
@@ -190,7 +206,9 @@ pub fn hint_text(position: usize, prefix: &str) -> String {
 
 /// L0–L2: delegate the color grid to the minimap with the rung's label policy.
 /// `badge`, when present, is the shortcut hint stamped into the block's top-left
-/// (the minimap drops it if the block is too narrow to host it).
+/// (the minimap drops it if the block is too narrow to host it), white when
+/// the block is the active tab (#59).
+#[allow(clippy::too_many_arguments)]
 fn grid_lines(
     panes: &[PaneRect],
     palette: &Palette,
@@ -198,34 +216,47 @@ fn grid_lines(
     mode: LabelMode,
     badge: Option<&str>,
     gradient: GradientMode,
+    active: bool,
 ) -> [StyledLine; ROWS] {
-    let block = minimap::render(panes, palette, width, ROWS, mode, badge, gradient);
+    let block = minimap::render(panes, palette, width, ROWS, mode, badge, gradient, active);
     three_rows(block.lines().map(str::to_string), width)
 }
 
 /// L3: a single representative split/grid glyph centered on the canvas.
-fn glyph_lines(panes: &[PaneRect], palette: &Palette, width: usize) -> [StyledLine; ROWS] {
+fn glyph_lines(panes: &[PaneRect], width: usize, active: bool) -> [StyledLine; ROWS] {
     let glyph = representative_glyph(panes);
+    let fg = rung_text_fg(active);
     [
         StyledLine(blank_row(width)),
-        StyledLine(text_row(&glyph.to_string(), palette.hint(), width)),
+        StyledLine(text_row(&glyph.to_string(), fg, width)),
         StyledLine(blank_row(width)),
     ]
 }
 
 /// L4: the shortcut hint only, fitted to the budget, centered on the canvas.
-fn hint_lines(
-    position: usize,
-    prefix: &str,
-    palette: &Palette,
-    width: usize,
-) -> [StyledLine; ROWS] {
+fn hint_lines(position: usize, prefix: &str, width: usize, active: bool) -> [StyledLine; ROWS] {
     let hint = fit_hint(position, prefix, width);
+    let fg = rung_text_fg(active);
     [
         StyledLine(blank_row(width)),
-        StyledLine(text_row(&hint, palette.hint(), width)),
+        StyledLine(text_row(&hint, fg, width)),
         StyledLine(blank_row(width)),
     ]
+}
+
+/// Text color of the narrow rungs (L3 glyph, L4 hint) (#59): the active tab's
+/// single text element is pure white — stands out on the vivid fill. Inactive
+/// tabs mute white toward the canvas fill so the text recedes gracefully.
+fn rung_text_fg(active: bool) -> Rgb {
+    if active {
+        minimap::ACTIVE_FG
+    } else {
+        color::mixed(
+            minimap::ACTIVE_FG,
+            minimap::BG,
+            minimap::INACTIVE_LABEL_BLEND,
+        )
+    }
 }
 
 /// Fit the shortcut hint into `width` columns: when the full `prefix + number`
@@ -477,6 +508,7 @@ mod tests {
                 0,
                 "\u{2318}",
                 GradientMode::Off,
+                false,
             );
             for (row, line) in block.lines.iter().enumerate() {
                 assert!(
@@ -517,7 +549,15 @@ mod tests {
         // One width per rung, plus boundaries, plus the degenerate zero.
         for (name, panes) in &layouts {
             for width in [0, 1, 2, 3, 4, 5, 9, 10, 15, 16, 20, 24] {
-                let block = assemble(panes, &palette, width, 3, "\u{2318}", GradientMode::Off);
+                let block = assemble(
+                    panes,
+                    &palette,
+                    width,
+                    3,
+                    "\u{2318}",
+                    GradientMode::Off,
+                    false,
+                );
                 for (row, line) in block.lines.iter().enumerate() {
                     assert_eq!(
                         measured(line),
@@ -554,7 +594,15 @@ mod tests {
         // "Cmd+3" is 5 columns but the L4 slot is 2: drop the prefix to "3" and
         // keep the row exactly at budget rather than overflowing and wrapping.
         let palette = test_palette();
-        let block = assemble(&one_pane("x"), &palette, 2, 2, "Cmd+", GradientMode::Off);
+        let block = assemble(
+            &one_pane("x"),
+            &palette,
+            2,
+            2,
+            "Cmd+",
+            GradientMode::Off,
+            false,
+        );
         for line in &block.lines {
             assert_eq!(measured(line), 2);
         }
@@ -570,7 +618,15 @@ mod tests {
         // even that overflows, so the number itself is truncated to "1" rather
         // than wrapping past the pane edge. Last resort, but width stays exact.
         let palette = test_palette();
-        let block = assemble(&one_pane("x"), &palette, 1, 9, "Cmd+", GradientMode::Off);
+        let block = assemble(
+            &one_pane("x"),
+            &palette,
+            1,
+            9,
+            "Cmd+",
+            GradientMode::Off,
+            false,
+        );
         for line in &block.lines {
             assert_eq!(measured(line), 1, "a 1-column slot must stay 1 column");
         }
@@ -597,6 +653,7 @@ mod tests {
             0,
             "\u{2318}",
             GradientMode::Off,
+            false,
         );
         for line in &block.lines {
             for ch in ['a', 'b', 'c'] {
@@ -624,6 +681,7 @@ mod tests {
             0,
             "\u{2318}",
             GradientMode::Off,
+            false,
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(joined.contains('a'), "focused pane's label should appear");
@@ -650,12 +708,113 @@ mod tests {
             0,
             "\u{2318}",
             GradientMode::Off,
+            false,
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(
             joined.contains('\u{2318}'),
             "an L0 grid must stamp the ⌘ badge inside the block"
         );
+    }
+
+    #[test]
+    fn active_block_badge_is_white_inactive_is_muted() {
+        // #59: the active tab's badge renders in pure white on its vivid fill —
+        // maximum contrast. An inactive block mutes the badge text toward the
+        // pane fill so it recedes. No accent chip anywhere.
+        let palette = test_palette();
+        let block_for = |active: bool| -> String {
+            assemble(
+                &vec![PaneRect::new(0, 0, 0, 100, 40, "shell", false)],
+                &palette,
+                16,
+                0,
+                "\u{2318}",
+                GradientMode::Off,
+                active,
+            )
+            .lines
+            .iter()
+            .map(StyledLine::as_str)
+            .collect()
+        };
+        let white_fg = {
+            let (r, g, b) = minimap::ACTIVE_FG;
+            format!("\x1b[38;2;{r};{g};{b}m")
+        };
+        let accent_bg = {
+            let (r, g, b) = palette.accent();
+            format!("\x1b[48;2;{r};{g};{b}m")
+        };
+        // Inactive badge is blended toward the pane fill (no ring on unfocused pane).
+        let muted_fg = {
+            let fill = palette.color_for(0);
+            let c = crate::color::mixed(minimap::ACTIVE_FG, fill, minimap::INACTIVE_LABEL_BLEND);
+            format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
+        };
+        let active = block_for(true);
+        let inactive = block_for(false);
+        assert!(
+            active.contains(&white_fg),
+            "the active block's badge text must be white — stands out on vivid fill (#59)"
+        );
+        assert!(
+            !active.contains(&accent_bg),
+            "the active block must not paint an accent chip"
+        );
+        assert!(
+            inactive.contains(&muted_fg),
+            "an inactive badge must be muted toward the pane fill (#59)"
+        );
+        assert!(
+            !inactive.contains(&white_fg),
+            "an inactive badge must not be pure white — it should be subdued"
+        );
+    }
+
+    #[test]
+    fn narrow_rungs_are_white_when_active_muted_when_inactive() {
+        // #59: the L3 glyph and L4 hint are the tab's only text at narrow
+        // widths. Active: pure white text on vivid fill — stands out. Inactive:
+        // text muted toward the canvas fill — recedes gracefully.
+        let palette = test_palette();
+        let white_fg = {
+            let (r, g, b) = minimap::ACTIVE_FG;
+            format!("\x1b[38;2;{r};{g};{b}m")
+        };
+        // Inactive rung text is blended toward the canvas (BG).
+        let muted_fg = {
+            let c = crate::color::mixed(
+                minimap::ACTIVE_FG,
+                minimap::BG,
+                minimap::INACTIVE_LABEL_BLEND,
+            );
+            format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
+        };
+        for width in [4, 2] {
+            let row_for = |active: bool| -> String {
+                assemble(
+                    &one_pane("x"),
+                    &palette,
+                    width,
+                    0,
+                    "\u{2318}",
+                    GradientMode::Off,
+                    active,
+                )
+                .lines[1]
+                    .as_str()
+                    .to_string()
+            };
+            assert!(
+                row_for(true).contains(&white_fg),
+                "width {width}: the active rung text must be white (#59)"
+            );
+            assert!(
+                row_for(false).contains(&muted_fg),
+                "width {width}: an inactive rung text must be muted toward the canvas (#59)"
+            );
+        }
     }
 
     #[test]
@@ -666,8 +825,24 @@ mod tests {
             PaneRect::new(1, 50, 0, 50, 40, "cargo", false),
         ];
         for width in [2, 4, 7, 12, 24] {
-            let first = assemble(&panes, &palette, width, 1, "\u{2318}", GradientMode::Off);
-            let second = assemble(&panes, &palette, width, 1, "\u{2318}", GradientMode::Off);
+            let first = assemble(
+                &panes,
+                &palette,
+                width,
+                1,
+                "\u{2318}",
+                GradientMode::Off,
+                false,
+            );
+            let second = assemble(
+                &panes,
+                &palette,
+                width,
+                1,
+                "\u{2318}",
+                GradientMode::Off,
+                false,
+            );
             assert_eq!(first, second, "width {width} must render identically");
         }
     }
@@ -686,8 +861,24 @@ mod tests {
         let forward = [left.clone(), right.clone()];
         let reversed = [right, left];
         for width in [4, 12, 24] {
-            let a = assemble(&forward, &palette, width, 1, "\u{2318}", GradientMode::Off);
-            let b = assemble(&reversed, &palette, width, 1, "\u{2318}", GradientMode::Off);
+            let a = assemble(
+                &forward,
+                &palette,
+                width,
+                1,
+                "\u{2318}",
+                GradientMode::Off,
+                false,
+            );
+            let b = assemble(
+                &reversed,
+                &palette,
+                width,
+                1,
+                "\u{2318}",
+                GradientMode::Off,
+                false,
+            );
             assert_eq!(
                 a, b,
                 "width {width}: pane list order must not change the render"

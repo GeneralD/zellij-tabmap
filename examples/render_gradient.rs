@@ -34,6 +34,7 @@ fn main() {
                 LabelMode::All,
                 Some("\u{2318} 1"),
                 mode,
+                true,
             )
         );
     }

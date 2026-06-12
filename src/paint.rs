@@ -40,7 +40,13 @@ pub fn bar(
     palette: &Palette,
     prefix: &str,
     gradient: GradientMode,
+    inactive_dim: bool,
 ) -> String {
+    // #59: inactive tabs render through the canvas-receded palette while the
+    // active tab keeps full vibrancy, so the selected tab reads at a glance.
+    // Derived once per frame, not per tab; `inactive_dim: false` opts out and
+    // reproduces the historical equally-vivid strip.
+    let dimmed = inactive_dim.then(|| palette.dimmed());
     let blocks: Vec<TabBlock> = layout
         .tabs
         .iter()
@@ -49,7 +55,19 @@ pub fn bar(
                 .get(&hit.position)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            tab_block::assemble(panes, palette, hit.width, hit.position, prefix, gradient)
+            let tab_palette = match &dimmed {
+                Some(dim) if !hit.active => dim,
+                _ => palette,
+            };
+            tab_block::assemble(
+                panes,
+                tab_palette,
+                hit.width,
+                hit.position,
+                prefix,
+                gradient,
+                hit.active,
+            )
         })
         .collect();
     let placed: Vec<(usize, &TabBlock)> = layout
@@ -119,6 +137,7 @@ pub fn compose(rows: usize, placed: &[(usize, &TabBlock)], markers: &[(usize, &s
 mod tests {
     use super::*;
     use crate::line::{Overflow, TabHit};
+    use crate::minimap;
     use crate::tab_block::StyledLine;
 
     /// A three-row block with the given row texts, for `compose` placement tests.
@@ -233,6 +252,7 @@ mod tests {
             &Palette::default(),
             "\u{2318}",
             GradientMode::Off,
+            false,
         );
         for row in 1..=3 {
             assert!(
@@ -259,6 +279,7 @@ mod tests {
             &Palette::default(),
             "\u{2318}",
             GradientMode::Off,
+            false,
         );
         assert!(out.contains("\u{2318}4"), "position 3 → ⌘4");
         assert!(out.contains("\u{2318}5"), "position 4 → ⌘5");
@@ -291,6 +312,7 @@ mod tests {
             &Palette::default(),
             "\u{2318}",
             GradientMode::Off,
+            false,
         );
         assert!(
             out.contains("\u{2318}2"),
@@ -299,6 +321,93 @@ mod tests {
         assert!(
             !out.contains("\u{2318}1"),
             "active tab (width 16) is an L0 grid — its ⌘1 is a split badge, not a contiguous hint"
+        );
+    }
+
+    /// Truecolor foreground escape for `c`, as the emitter writes it.
+    fn fg(c: crate::color::Rgb) -> String {
+        format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
+    }
+
+    /// Truecolor background escape for `c`, as the emitter writes it.
+    fn bg(c: crate::color::Rgb) -> String {
+        format!("\x1b[48;2;{};{};{}m", c.0, c.1, c.2)
+    }
+
+    /// Two single-pane tabs — tab 0 active at an L0 width, tab 1 inactive at an
+    /// L2 width — so both render color grids whose fills witness the palette
+    /// each tab was assembled with (#59).
+    fn two_tab_fixture() -> (Palette, BTreeMap<usize, Vec<PaneRect>>, LineLayout) {
+        let palette = Palette::new(
+            vec![(10, 20, 30), (40, 50, 60), (70, 80, 90)],
+            (200, 100, 50),
+        );
+        let mut panes = BTreeMap::new();
+        panes.insert(0, vec![PaneRect::new(0, 0, 0, 10, 10, "", false)]);
+        panes.insert(1, vec![PaneRect::new(1, 0, 0, 10, 10, "", false)]);
+        let lo = layout(vec![hit(0, 0, 16, true), hit(1, 18, 6, false)], None, None);
+        (palette, panes, lo)
+    }
+
+    #[test]
+    fn bar_dims_inactive_tab_fills_and_keeps_the_active_vivid() {
+        // #59: with `inactive_dim` on, an inactive tab's pane fills recede to
+        // the dimmed palette while the active tab keeps full vibrancy — and
+        // the active block's badge text turns white, proving the active flag
+        // reached `assemble`.
+        let (palette, panes, lo) = two_tab_fixture();
+        let out = bar(
+            3,
+            &lo,
+            &panes,
+            &palette,
+            "\u{2318}",
+            GradientMode::Off,
+            true,
+        );
+        assert!(
+            out.contains(&fg(palette.color_for(0))),
+            "the active tab keeps its vivid fill"
+        );
+        assert!(
+            out.contains(&fg(palette.dimmed().color_for(1))),
+            "an inactive tab's fill recedes to the dimmed palette"
+        );
+        assert!(
+            !out.contains(&fg(palette.color_for(1))),
+            "an inactive tab must not render its vivid fill"
+        );
+        assert!(
+            out.contains(&fg(minimap::ACTIVE_FG)),
+            "the active tab's badge text is white — stands out on vivid fill (#59)"
+        );
+        assert!(
+            !out.contains(&bg(palette.accent())),
+            "no accent chip remains anywhere on the bar"
+        );
+    }
+
+    #[test]
+    fn bar_inactive_dim_off_keeps_every_tab_vivid() {
+        // The opt-out: `inactive_dim: false` keeps the historical
+        // equally-vivid strip — no dimmed fill anywhere.
+        let (palette, panes, lo) = two_tab_fixture();
+        let out = bar(
+            3,
+            &lo,
+            &panes,
+            &palette,
+            "\u{2318}",
+            GradientMode::Off,
+            false,
+        );
+        assert!(
+            out.contains(&fg(palette.color_for(1))),
+            "an inactive tab keeps its vivid fill when dimming is off"
+        );
+        assert!(
+            !out.contains(&fg(palette.dimmed().color_for(1))),
+            "no dimmed fill may appear when dimming is off"
         );
     }
 
@@ -324,6 +433,7 @@ mod tests {
             &Palette::default(),
             "\u{2318}",
             GradientMode::Off,
+            false,
         );
         // Middle row (row 2): left marker at col 1, right marker at col 8.
         assert!(out.contains("\u{1b}[2;1H\u{2190} +2 "));

@@ -43,6 +43,10 @@ pub struct Config {
     /// — the polished out-of-the-box look; `off` restores the flat
     /// v0.1.0-style fills. See [`GradientMode`].
     pub gradient: GradientMode,
+    /// Whether inactive tabs render dimmed (receded toward the canvas) so the
+    /// active tab reads selected at a glance (#59). On by default; `false`
+    /// restores the equally-vivid pre-0.6 strip.
+    pub inactive_dim: bool,
 }
 
 impl Config {
@@ -67,6 +71,9 @@ impl Config {
     /// Default gradient mode — `Sheen`, the polished out-of-the-box look.
     /// Set `off` to restore the flat v0.1.0-style fills.
     pub const DEFAULT_GRADIENT: GradientMode = GradientMode::Sheen;
+    /// Default inactive-tab dimming — on, so the active tab reads selected
+    /// out of the box (#59). Set `false` to restore the equally-vivid strip.
+    pub const DEFAULT_INACTIVE_DIM: bool = true;
 
     /// Parse the configuration map, falling back to a default for any missing or
     /// malformed value. Total: never panics on bad input.
@@ -100,6 +107,10 @@ impl Config {
                 .get("gradient")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_GRADIENT),
+            inactive_dim: configuration
+                .get("inactive_dim")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_INACTIVE_DIM),
         }
     }
 }
@@ -134,6 +145,7 @@ mod tests {
         assert!(!config.gutter);
         assert!(!config.reorder);
         assert_eq!(config.gradient, GradientMode::Sheen);
+        assert!(config.inactive_dim);
     }
 
     #[test]
@@ -234,6 +246,17 @@ mod tests {
     #[test]
     fn parses_explicit_zero_tab_gap() {
         assert_eq!(config_from(&[("tab_gap", "0")]).tab_gap, 0);
+    }
+
+    #[test]
+    fn parses_explicit_inactive_dim_off() {
+        assert!(!config_from(&[("inactive_dim", "false")]).inactive_dim);
+    }
+
+    #[test]
+    fn malformed_inactive_dim_falls_back() {
+        assert!(config_from(&[("inactive_dim", "no")]).inactive_dim);
+        assert!(config_from(&[("inactive_dim", "")]).inactive_dim);
     }
 
     #[test]

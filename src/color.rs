@@ -26,6 +26,12 @@ const BLACK: Rgb = (0, 0, 0);
 /// focus color rather than an invisible one.
 const DEFAULT_ACCENT: Rgb = (215, 95, 0);
 
+/// Tokyonight background (`#1a1b26`) — the canvas every block sits on.
+/// Canonical home; [`crate::minimap`] re-exposes it as its `BG`. Also the
+/// target of [`Palette::dimmed`]: inactive tabs recede *toward the canvas*,
+/// not toward plain black, so they sink into the bar instead of graying out.
+pub(crate) const CANVAS: Rgb = (26, 27, 38);
+
 /// Convert an xterm-256 palette index to RGB.
 ///
 /// Mirrors zellij's own `eightbit_to_rgb`, which is not re-exported to
@@ -82,7 +88,7 @@ fn luma((r, g, b): Rgb) -> u8 {
 
 /// Blend `from` toward `to` by `percent` (`0` = `from`, `100` = `to`), per
 /// channel. Overflow-safe: the lerp runs in `i32` and lands back in `0..=255`.
-fn mixed(from: Rgb, to: Rgb, percent: u8) -> Rgb {
+pub(crate) fn mixed(from: Rgb, to: Rgb, percent: u8) -> Rgb {
     let lerp = |a: u8, b: u8| (a as i32 + (b as i32 - a as i32) * percent as i32 / 100) as u8;
     (lerp(from.0, to.0), lerp(from.1, to.1), lerp(from.2, to.2))
 }
@@ -94,8 +100,10 @@ fn mixed(from: Rgb, to: Rgb, percent: u8) -> Rgb {
 /// does not pin one explicitly (issue #32).
 fn derived_ring(fill: Rgb) -> Rgb {
     /// Mix fraction toward white/black. A visual parameter tuned for a ring that
-    /// reads as an outline at minimap scale, not a correctness constant.
-    const SHIFT_PERCENT: u8 = 18;
+    /// reads as a clear outline at minimap scale — high enough to stand out
+    /// against the fill without washing out to pure white/black, not a
+    /// correctness constant.
+    const SHIFT_PERCENT: u8 = 55;
     let target = if luma(fill) < 128 {
         (255, 255, 255)
     } else {
@@ -165,22 +173,11 @@ pub(crate) fn gradient_at(fill: Rgb, percent: u8) -> Rgb {
     mixed_linear(fill, target, SWEEP_PERCENT * percent as f32 / 100.0)
 }
 
-/// Resolved drawing attributes for one pane.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PaneStyle {
-    /// Block fill color.
-    pub fill: Rgb,
-    /// Focus-outline color — `Some` only for the focused pane.
-    pub ring: Option<Rgb>,
-    /// Whether the pane's label should render emphasized (bold).
-    pub emphasized: bool,
-}
-
 /// A theme-derived color assignment for panes.
 ///
 /// `slots` is cycled by pane id, so identity maps to a stable color across
 /// repaints — focus does **not** repaint a pane's fill (issue #47): the pane
-/// keeps its identity hue and the ring outline (plus the emphasized label)
+/// keeps its identity hue and the ring outline (plus the highlighted label)
 /// is what marks focus. The ring is derived **from the pane's own fill** as a
 /// luminance-shifted shade ([`derived_ring`]), so a blue pane gets a
 /// slightly-different-blue outline rather than a theme-wide accent ring. The
@@ -190,6 +187,7 @@ pub struct PaneStyle {
 pub struct Palette {
     slots: Vec<Rgb>,
     hint: Rgb,
+    accent: Rgb,
 }
 
 impl Default for Palette {
@@ -225,7 +223,11 @@ impl Palette {
             visible
         };
         let hint = derived_ring(accent);
-        Self { slots, hint }
+        Self {
+            slots,
+            hint,
+            accent,
+        }
     }
 
     /// Pre-theme stopgap built from zellij's default style codes, so the
@@ -253,23 +255,40 @@ impl Palette {
         self.hint
     }
 
+    /// The theme accent (post-sentinel-fallback, so always visible). It seeds
+    /// the [`hint`](Self::hint) shade and survives as the single-slot fallback
+    /// fill; the raw value is exposed so tests can pin that it never leaks
+    /// into the render as a background (#59).
+    pub fn accent(&self) -> Rgb {
+        self.accent
+    }
+
+    /// The inactive-tab variant of this palette (#59): every slot — and the
+    /// hint/accent it seeds text from — receded toward [`CANVAS`] by
+    /// [`Self::DIM_PERCENT`], so inactive blocks sink into the bar while the
+    /// active tab keeps full vibrancy. A recolor, not a re-keying: slot order
+    /// is preserved, so identity→color mapping survives, and rings derive
+    /// from the dimmed fills automatically.
+    pub fn dimmed(&self) -> Self {
+        let receded = |c: Rgb| mixed(c, CANVAS, Self::DIM_PERCENT);
+        Self {
+            slots: self.slots.iter().map(|&c| receded(c)).collect(),
+            hint: receded(self.hint),
+            accent: receded(self.accent),
+        }
+    }
+
+    /// Mix fraction toward the canvas for [`Self::dimmed`]. A visual parameter
+    /// tuned so inactive tabs read as "not selected" at minimap scale while
+    /// their pane hues stay tellable — not a correctness constant.
+    const DIM_PERCENT: u8 = 45;
+
     /// Focus-ring color for a pane: a luminance-shifted shade of the pane's
     /// **own fill** (issue #47), so the outline stays in the pane's hue
     /// family — a blue pane is ringed in a slightly different blue. Never
     /// equal to the fill ([`derived_ring`]).
     pub fn ring_for(&self, pane_id: usize) -> Rgb {
         derived_ring(self.color_for(pane_id))
-    }
-
-    /// Drawing attributes for a pane, keyed on its stable `pane_id`. The fill
-    /// is the pane's identity hue regardless of focus — focus is marked by the
-    /// fill-derived ring outline and the emphasized label only (issue #47).
-    pub fn style_for(&self, pane_id: usize, focused: bool) -> PaneStyle {
-        PaneStyle {
-            fill: self.color_for(pane_id),
-            ring: focused.then(|| self.ring_for(pane_id)),
-            emphasized: focused,
-        }
     }
 }
 
@@ -370,49 +389,12 @@ mod tests {
     }
 
     #[test]
-    fn focus_keeps_slot_fill_with_ring_and_emphasis() -> R {
-        // Focus must not repaint the pane: identity hue stays, the ring and
-        // the emphasized label are what mark focus (issue #47).
-        let p = palette();
-        let focused = p.style_for(0, true);
-        assert_eq!(focused.fill, p.color_for(0));
-        assert_eq!(focused.ring, Some(p.ring_for(0)));
-        assert!(focused.emphasized);
-        Ok(())
-    }
-
-    #[test]
-    fn unfocused_uses_slot_color_no_ring_no_emphasis() -> R {
-        let p = palette();
-        let style = p.style_for(1, false);
-        assert_eq!(style.fill, p.color_for(1));
-        assert_eq!(style.ring, None);
-        assert!(!style.emphasized);
-        Ok(())
-    }
-
-    #[test]
-    fn focus_is_marked_by_ring_not_fill() -> R {
-        let p = palette();
-        // The headline guarantee: focus never changes the fill — the ring is
-        // the only structural difference between the two styles (issue #47).
-        assert_eq!(p.style_for(0, true).fill, p.style_for(0, false).fill);
-        assert!(p.style_for(0, true).ring.is_some());
-        assert!(p.style_for(0, false).ring.is_none());
-        Ok(())
-    }
-
-    #[test]
     fn focus_always_carries_a_ring_even_if_fill_collides() -> R {
         // The ring shade is never equal to the fill it derives from, so even
         // a one-slot palette keeps a focused pane distinguishable from a
         // same-colored neighbor.
         let collide = Palette::new(vec![(9, 9, 9)], (9, 9, 9));
-        let focused = collide.style_for(0, true);
-        let neighbor = collide.style_for(0, false);
-        assert_eq!(focused.fill, neighbor.fill);
-        assert!(focused.ring.is_some());
-        assert_ne!(focused.ring, Some(focused.fill));
+        assert_ne!(collide.ring_for(0), collide.color_for(0));
         Ok(())
     }
 
@@ -526,6 +508,80 @@ mod tests {
     fn from_eightbit_system_colors() -> R {
         assert_eq!(from_eightbit(0), (0, 0, 0));
         assert_eq!(from_eightbit(15), (255, 255, 255));
+        Ok(())
+    }
+
+    /// `value` lies on the closed per-channel segment between `from` and `to`.
+    fn channel_between(from: Rgb, to: Rgb, value: Rgb) -> bool {
+        let on = |a: u8, b: u8, v: u8| (a.min(b)..=a.max(b)).contains(&v);
+        on(from.0, to.0, value.0) && on(from.1, to.1, value.1) && on(from.2, to.2, value.2)
+    }
+
+    #[test]
+    fn accent_is_the_post_fallback_accent() -> R {
+        // The raw (post-sentinel-swap) accent is exposed for the active tab's
+        // badge cue (#59): a real accent comes back as-is, a sentinel one as
+        // the visible default — mirroring the hint's seeding rule.
+        let p = Palette::new(vec![(10, 20, 30)], (200, 100, 50));
+        assert_eq!(p.accent(), (200, 100, 50));
+        let q = Palette::new(vec![(10, 20, 30)], (0, 0, 0));
+        assert_eq!(q.accent(), DEFAULT_ACCENT);
+        Ok(())
+    }
+
+    #[test]
+    fn dimmed_moves_every_slot_toward_the_canvas() -> R {
+        // The inactive-tab treatment (#59): every slot recedes toward the
+        // canvas color — never reaching it (the block must stay visible),
+        // never moving away from it.
+        let p = palette();
+        let d = p.dimmed();
+        for id in 0..3 {
+            let orig = p.color_for(id);
+            let dim = d.color_for(id);
+            assert_ne!(dim, orig, "slot {id}: dimming must change the fill");
+            assert_ne!(dim, CANVAS, "slot {id}: a dimmed fill must stay visible");
+            assert!(
+                channel_between(orig, CANVAS, dim),
+                "slot {id}: {dim:?} must lie between {orig:?} and {CANVAS:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn dimmed_preserves_identity_keying() -> R {
+        // Dimming is a recolor, not a re-keying: the same pane id must land on
+        // the same (dimmed) slot, and the modulo cycle must be untouched.
+        let p = palette();
+        let d = p.dimmed();
+        assert_eq!(d.color_for(0), d.color_for(3));
+        assert_eq!(d.color_for(1), d.color_for(4));
+        assert_ne!(d.color_for(0), d.color_for(1));
+        Ok(())
+    }
+
+    #[test]
+    fn dimmed_hint_recedes_with_the_slots() -> R {
+        // The L3 glyph / L4 hint text must dim with its block, or a narrow
+        // inactive tab would keep a full-vibrancy hint while its neighbors
+        // recede.
+        let p = palette();
+        let d = p.dimmed();
+        assert_ne!(d.hint(), p.hint());
+        assert!(channel_between(p.hint(), CANVAS, d.hint()));
+        Ok(())
+    }
+
+    #[test]
+    fn dimmed_ring_derives_from_the_dimmed_fill() -> R {
+        // Rings are derived per pane from the palette's own fill, so the
+        // dimmed palette's ring must track the dimmed slot — not the
+        // original one.
+        let p = palette();
+        let d = p.dimmed();
+        assert_eq!(d.ring_for(0), derived_ring(d.color_for(0)));
+        assert_ne!(d.ring_for(0), p.ring_for(0));
         Ok(())
     }
 

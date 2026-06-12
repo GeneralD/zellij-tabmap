@@ -74,6 +74,7 @@ default_tab_template {
             reorder "false"                             // drag a tab to reorder; "true" also needs RunActionsAsUser
             tab_gap "2"                                 // cleared columns between tab blocks; "0" packs them flush
             gradient "sheen"                            // pane fill sweep: "sheen" (L→R, default) / "weave" (alternating rows) / "off" (flat)
+            inactive_dim "true"                         // dim inactive tabs so the active one stands out; "false" to opt out
         }
     }
     children
@@ -94,6 +95,8 @@ plugin location="file:/absolute/path/to/zellij-tabmap.wasm"
 > **`tab_gap` — space between tabs.** Leaves the given number of cleared columns between adjacent tab blocks so the boundary between screens reads clearly (default `2`). Set `0` to pack the blocks flush.
 >
 > **`gradient` — per-pane fill sweep.** `sheen` (default) sweeps each pane block's fill left-to-right from its base color toward a luminance-shifted shade (lighter for dark themes, darker for light ones); `weave` alternates the sweep direction on each half-block pixel row for a woven texture. The focus ring, labels, and the `⌘N` badge stay solid on top, so readability is unchanged. Set `off` for flat fills.
+>
+> **`inactive_dim` — visual cue for the active tab.** When `true` (default), inactive tabs are dimmed toward the terminal background so the active tab stands out clearly: its pane fills stay vivid, its shortcut badge and focused pane label are drawn in white, and no focus ring appears on other tabs. Set `false` to disable the dimming and treat all tabs with equal intensity.
 >
 > **First-run permission note**: the bar needs two permissions — `ReadApplicationState` (pane/tab layout data) and `ChangeApplicationState` (click-to-switch) — but when loaded from `default_tab_template` it gets no usable permission prompt and appears inert on first launch (see the upstream issue [zellij#4982](https://github.com/zellij-org/zellij/issues/4982), which tracks this dead-end for background plugins). To grant the permissions, load the plugin **once in a regular pane** — the bar stays selectable until the permission flow resolves, so the prompt can be focused and answered there, and the grant is cached per URL:
 >

@@ -137,6 +137,7 @@ pub fn compose(rows: usize, placed: &[(usize, &TabBlock)], markers: &[(usize, &s
 mod tests {
     use super::*;
     use crate::line::{Overflow, TabHit};
+    use crate::minimap;
     use crate::tab_block::StyledLine;
 
     /// A three-row block with the given row texts, for `compose` placement tests.
@@ -377,8 +378,8 @@ mod tests {
             "an inactive tab must not render its vivid fill"
         );
         assert!(
-            out.contains(&fg((255, 255, 255))),
-            "the active tab's badge text turns white"
+            out.contains(&fg(minimap::LABEL_FG)),
+            "the active tab's badge text is dark — stands out on vivid fill"
         );
         assert!(
             !out.contains(&bg(palette.accent())),

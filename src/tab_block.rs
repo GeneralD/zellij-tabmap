@@ -179,8 +179,8 @@ pub fn assemble(
             gradient,
             active,
         ),
-        Level::L3 => glyph_lines(panes, palette, width, active),
-        Level::L4 => hint_lines(position, prefix, palette, width, active),
+        Level::L3 => glyph_lines(panes, width, active),
+        Level::L4 => hint_lines(position, prefix, width, active),
     };
     TabBlock {
         lines,
@@ -222,16 +222,10 @@ fn grid_lines(
     three_rows(block.lines().map(str::to_string), width)
 }
 
-/// L3: a single representative split/grid glyph centered on the canvas, white
-/// on the active tab (#59).
-fn glyph_lines(
-    panes: &[PaneRect],
-    palette: &Palette,
-    width: usize,
-    active: bool,
-) -> [StyledLine; ROWS] {
+/// L3: a single representative split/grid glyph centered on the canvas.
+fn glyph_lines(panes: &[PaneRect], width: usize, active: bool) -> [StyledLine; ROWS] {
     let glyph = representative_glyph(panes);
-    let fg = rung_text_fg(palette, active);
+    let fg = rung_text_fg(active);
     [
         StyledLine(blank_row(width)),
         StyledLine(text_row(&glyph.to_string(), fg, width)),
@@ -239,17 +233,10 @@ fn glyph_lines(
     ]
 }
 
-/// L4: the shortcut hint only, fitted to the budget, centered on the canvas,
-/// white on the active tab (#59).
-fn hint_lines(
-    position: usize,
-    prefix: &str,
-    palette: &Palette,
-    width: usize,
-    active: bool,
-) -> [StyledLine; ROWS] {
+/// L4: the shortcut hint only, fitted to the budget, centered on the canvas.
+fn hint_lines(position: usize, prefix: &str, width: usize, active: bool) -> [StyledLine; ROWS] {
     let hint = fit_hint(position, prefix, width);
-    let fg = rung_text_fg(palette, active);
+    let fg = rung_text_fg(active);
     [
         StyledLine(blank_row(width)),
         StyledLine(text_row(&hint, fg, width)),
@@ -257,13 +244,15 @@ fn hint_lines(
     ]
 }
 
-/// Text color of the narrow rungs (L3 glyph, L4 hint): the active tab carries
-/// the white cue (#59); inactive tabs keep the palette's hint shade.
-fn rung_text_fg(palette: &Palette, active: bool) -> Rgb {
+/// Text color of the narrow rungs (L3 glyph, L4 hint): the active tab's single
+/// text element carries the dark cue (#59) — dark on vivid fill stands out.
+/// Inactive tabs use white — white on the dimmed fill recedes gracefully.
+fn rung_text_fg(active: bool) -> Rgb {
     if active {
-        return minimap::ACTIVE_FG;
+        minimap::LABEL_FG
+    } else {
+        minimap::ACTIVE_FG
     }
-    palette.hint()
 }
 
 /// Fit the shortcut hint into `width` columns: when the full `prefix + number`
@@ -725,12 +714,11 @@ mod tests {
     }
 
     #[test]
-    fn active_block_renders_its_badge_white() {
-        // #59: the active tab's grid rung renders its shortcut badge in white
-        // text over the block's own colors, while an inactive block keeps the
-        // historical dark text — and never paints the accent as a background
-        // (the round-1 chip is gone). White is unique to the badge here: the
-        // pane is unfocused, so no white can come from a focused label.
+    fn active_block_badge_is_dark_inactive_is_white() {
+        // #59: the active tab's badge renders in dark text on its vivid fill —
+        // maximum contrast, stands out. An inactive block flips to white: white
+        // over the dimmed fill recedes, never competing with the active badge.
+        // No accent chip anywhere (round-1 is gone).
         let palette = test_palette();
         let block_for = |active: bool| -> String {
             assemble(
@@ -747,6 +735,10 @@ mod tests {
             .map(StyledLine::as_str)
             .collect()
         };
+        let dark_fg = {
+            let (r, g, b) = minimap::LABEL_FG;
+            format!("\x1b[38;2;{r};{g};{b}m")
+        };
         let white_fg = {
             let (r, g, b) = minimap::ACTIVE_FG;
             format!("\x1b[38;2;{r};{g};{b}m")
@@ -758,25 +750,33 @@ mod tests {
         let active = block_for(true);
         let inactive = block_for(false);
         assert!(
-            active.contains(&white_fg),
-            "the active block's badge text must be white"
+            active.contains(&dark_fg),
+            "the active block's badge text must be dark — stands out on vivid fill"
         );
         assert!(
             !active.contains(&accent_bg),
             "the active block must not paint an accent chip"
         );
         assert!(
-            !inactive.contains(&white_fg),
-            "an inactive block keeps the dark badge text"
+            inactive.contains(&white_fg),
+            "an inactive badge must be white — recedes on dimmed fill"
+        );
+        assert!(
+            !inactive.contains(&dark_fg),
+            "an inactive badge must not use the active-cue dark color"
         );
     }
 
     #[test]
-    fn narrow_rungs_render_their_text_white_only_when_active() {
+    fn narrow_rungs_are_dark_when_active_white_when_inactive() {
         // #59: the L3 glyph and L4 hint are the tab's only text at narrow
-        // widths, so they carry the white cue too; inactive blocks keep the
-        // palette's hint shade.
+        // widths. Active: dark text on vivid fill — stands out. Inactive: white
+        // text on dimmed fill — recedes.
         let palette = test_palette();
+        let dark_fg = {
+            let (r, g, b) = minimap::LABEL_FG;
+            format!("\x1b[38;2;{r};{g};{b}m")
+        };
         let white_fg = {
             let (r, g, b) = minimap::ACTIVE_FG;
             format!("\x1b[38;2;{r};{g};{b}m")
@@ -797,12 +797,12 @@ mod tests {
                     .to_string()
             };
             assert!(
-                row_for(true).contains(&white_fg),
-                "width {width}: the active rung text must be white"
+                row_for(true).contains(&dark_fg),
+                "width {width}: the active rung text must be dark"
             );
             assert!(
-                !row_for(false).contains(&white_fg),
-                "width {width}: an inactive rung keeps the hint shade"
+                row_for(false).contains(&white_fg),
+                "width {width}: an inactive rung text must be white"
             );
         }
     }

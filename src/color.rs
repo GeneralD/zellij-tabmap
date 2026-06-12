@@ -100,8 +100,10 @@ fn mixed(from: Rgb, to: Rgb, percent: u8) -> Rgb {
 /// does not pin one explicitly (issue #32).
 fn derived_ring(fill: Rgb) -> Rgb {
     /// Mix fraction toward white/black. A visual parameter tuned for a ring that
-    /// reads as an outline at minimap scale, not a correctness constant.
-    const SHIFT_PERCENT: u8 = 18;
+    /// reads as a clear outline at minimap scale — high enough to stand out
+    /// against the fill without washing out to pure white/black, not a
+    /// correctness constant.
+    const SHIFT_PERCENT: u8 = 55;
     let target = if luma(fill) < 128 {
         (255, 255, 255)
     } else {

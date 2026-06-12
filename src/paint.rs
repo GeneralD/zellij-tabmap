@@ -378,8 +378,8 @@ mod tests {
             "an inactive tab must not render its vivid fill"
         );
         assert!(
-            out.contains(&fg(minimap::LABEL_FG)),
-            "the active tab's badge text is dark — stands out on vivid fill"
+            out.contains(&fg(minimap::ACTIVE_FG)),
+            "the active tab's badge text is white — stands out on vivid fill (#59)"
         );
         assert!(
             !out.contains(&bg(palette.accent())),

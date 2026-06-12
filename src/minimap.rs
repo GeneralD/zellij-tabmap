@@ -23,15 +23,14 @@ pub use crate::color::Rgb;
 /// [`crate::tab_block`], which paints its glyph/hint rungs on the same canvas.
 /// Canonical value lives in [`crate::color::CANVAS`] (the dim target, #59).
 pub(crate) const BG: Rgb = crate::color::CANVAS;
-/// Dark text color for the selected tab's badge and its focused pane's label
-/// (#59). Dark on a vivid fill gives maximum contrast — the one spot on the
-/// bar where the user's cursor lives. Shared with [`crate::tab_block`].
-pub(crate) const LABEL_FG: Rgb = (16, 17, 26);
-/// White text for every other label (#59): the active tab's non-focused panes
-/// and all inactive-tab panes. White over a dimmed fill reads as "present but
-/// receded"; white over a vivid fill reads as "visible but not the focus".
-/// Shared with [`crate::tab_block`], whose narrow rungs (L3/L4) use it too.
+/// White text for all active-tab labels and badges (#59): on a vivid fill
+/// white is the most legible and prominent choice. Shared with
+/// [`crate::tab_block`], whose narrow rungs (L3/L4) use it for the active tab.
 pub(crate) const ACTIVE_FG: Rgb = (255, 255, 255);
+/// Blend fraction that subdues inactive labels toward the pane fill (#59):
+/// enough to visually recede while remaining readable. A visual parameter —
+/// retune freely; not a correctness constant.
+pub(crate) const INACTIVE_LABEL_BLEND: u8 = 30;
 
 pub(crate) const RESET: &str = "\x1b[0m";
 
@@ -228,9 +227,10 @@ fn pixel_color(
 /// over it when one is given and fits. `gradient` selects the per-pane fill
 /// sweep (see [`GradientMode`]); `Off` reproduces the historical flat fills
 /// byte-for-byte. `active` marks the bar's selected tab (#59): its badge and
-/// focused-pane label render white ([`ACTIVE_FG`]) and its focus ring is
-/// drawn, while an inactive block suppresses the focus highlight entirely —
-/// no ring, no bold, dark text — so the loud cue belongs to one tab only.
+/// every pane label render pure white ([`ACTIVE_FG`]) — the focused one also
+/// bold — and its focus ring is drawn. Inactive blocks suppress the highlight
+/// entirely — no ring, no bold — and subdue text toward the pane fill by
+/// [`INACTIVE_LABEL_BLEND`], so the active tab reads at a glance.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     panes: &[PaneRect],
@@ -388,10 +388,6 @@ pub fn render(
         })
         .unwrap_or_default();
     let badge_fits = !badge_cells.is_empty() && BADGE_COL + badge_cells.len() <= pw;
-    // Active tab badge: dark text on vivid fill — maximum contrast, signals
-    // "this tab is selected" (#59). Inactive badge: white text on the dimmed
-    // fill — readable but receded, doesn't compete with the active badge.
-    let badge_fg = if active { LABEL_FG } else { ACTIVE_FG };
 
     let mut out = String::with_capacity(text_rows * pw * 24);
     for tr in 0..text_rows {
@@ -404,6 +400,13 @@ pub fn render(
                 };
                 let fill = pixel_color(&grid, &ring, panes, palette, &bounds, gradient, pw, c, 0);
                 put_bg(&mut out, fill);
+                // Active tab: white badge — vivid fill + white = maximum contrast.
+                // Inactive tab: muted toward the fill — recedes gracefully (#59).
+                let badge_fg = if active {
+                    ACTIVE_FG
+                } else {
+                    crate::color::mixed(ACTIVE_FG, fill, INACTIVE_LABEL_BLEND)
+                };
                 put_fg(&mut out, badge_fg);
                 out.push_str("\x1b[1m");
                 out.push(ch);
@@ -416,16 +419,18 @@ pub fn render(
                 continue;
             }
             if let Some(OverlayCell::Glyph(ch, i)) = overlay[tr * pw + c] {
-                // Active tab's focused pane: dark bold text — stands out the
-                // most. Everything else (non-focused panes, inactive tabs): white
-                // text, which reads as "present but not primary" over vivid fills
-                // and as "ghostly" over dimmed inactive fills (#59).
+                // Active tab: white label on vivid fill — prominent. Focused pane
+                // also bold for maximum emphasis. Inactive tab: text muted toward
+                // the pane fill so it recedes without becoming unreadable (#59).
                 let highlighted = active && panes[i].focused;
-                put_bg(
-                    &mut out,
-                    fill_at(panes, palette, &bounds, gradient, i, c, 2 * tr),
-                );
-                put_fg(&mut out, if highlighted { LABEL_FG } else { ACTIVE_FG });
+                let label_fill = fill_at(panes, palette, &bounds, gradient, i, c, 2 * tr);
+                put_bg(&mut out, label_fill);
+                let label_fg = if active {
+                    ACTIVE_FG
+                } else {
+                    crate::color::mixed(ACTIVE_FG, label_fill, INACTIVE_LABEL_BLEND)
+                };
+                put_fg(&mut out, label_fg);
                 if highlighted {
                     out.push_str("\x1b[1m");
                     out.push(ch);
@@ -950,13 +955,11 @@ mod tests {
     }
 
     #[test]
-    fn active_badge_text_is_white_and_inactive_stays_dark() {
-        // #59: the active tab's cue is *white badge text* over the block's own
-        // colors — no background chip (a chip of the accent's hue vanished on
-        // a pane fill of the same hue, and read as noise elsewhere). An
-        // inactive block keeps the historical dark text, and the accent never
-        // leaks in as a background. LabelMode::None keeps labels out, so the
-        // badge is the only possible text source.
+    fn active_badge_text_is_white_and_inactive_is_muted() {
+        // #59: active badge = pure white over the pane fill — vivid fill + white
+        // gives maximum contrast. Inactive badge = white blended toward the fill
+        // by INACTIVE_LABEL_BLEND so it recedes. No background chip anywhere.
+        // LabelMode::None keeps labels out, so the badge is the only text source.
         let panes = one_focused();
         let palette = test_palette();
         let render_badge = |active: bool| {
@@ -974,30 +977,33 @@ mod tests {
         let active = render_badge(true);
         let inactive = render_badge(false);
         assert!(
-            active.contains(&fg(LABEL_FG)),
-            "the active block's badge text must be dark — stands out on vivid fill"
+            active.contains(&fg(ACTIVE_FG)),
+            "the active block's badge text must be white — stands out on vivid fill (#59)"
         );
         assert!(
             !active.contains(&bg(palette.accent())),
             "the badge must not paint an accent background chip"
         );
+        // Inactive badge is blended toward the pane fill. Since active=false
+        // suppresses the ring, the badge background is the plain pane fill.
+        let fill = palette.color_for(0); // one_focused() → id=0
+        let muted = crate::color::mixed(ACTIVE_FG, fill, INACTIVE_LABEL_BLEND);
         assert!(
-            inactive.contains(&fg(ACTIVE_FG)),
-            "an inactive badge must be white — recedes on dimmed fill"
+            inactive.contains(&fg(muted)),
+            "an inactive badge must be muted toward the pane fill (#59)"
         );
         assert!(
-            !inactive.contains(&fg(LABEL_FG)),
-            "an inactive badge must not use the active-cue dark color"
+            !inactive.contains(&fg(ACTIVE_FG)),
+            "an inactive badge must not be pure white — it should be subdued"
         );
     }
 
     #[test]
     fn focus_highlight_paints_only_the_active_tab() {
-        // #59: the focused pane in the *active* tab reads as dark bold text on
-        // its vivid fill — the single most prominent label on the bar. Inactive
-        // tabs suppress the highlight entirely (no ring, no bold): their focused
-        // pane renders white, the same as every other non-highlighted label, so
-        // only the cursor's location stands out.
+        // #59: the focused pane in the *active* tab renders white bold text —
+        // the single most prominent label on the bar. Inactive tabs suppress
+        // the highlight entirely (no ring, no bold) and mute text toward the
+        // pane fill, so only the active tab's cursor location stands out.
         let panes = one_focused();
         let palette = test_palette();
         let render_tab = |active: bool| {
@@ -1015,8 +1021,8 @@ mod tests {
         let active = render_tab(true);
         let inactive = render_tab(false);
         assert!(
-            active.contains(&fg(LABEL_FG)),
-            "the active tab's focused label must be dark — stands out on vivid fill"
+            active.contains(&fg(ACTIVE_FG)),
+            "the active tab's focused label must be white — stands out on vivid fill (#59)"
         );
         assert!(
             active.contains("\x1b[1m"),
@@ -1030,13 +1036,16 @@ mod tests {
             inactive.contains('n'),
             "the inactive tab still labels its focused pane"
         );
+        // Inactive label is blended toward the pane fill (ring suppressed).
+        let fill = palette.color_for(0); // one_focused() → id=0
+        let muted = crate::color::mixed(ACTIVE_FG, fill, INACTIVE_LABEL_BLEND);
         assert!(
-            inactive.contains(&fg(ACTIVE_FG)),
-            "the inactive focused label is white — recedes on dimmed fill"
+            inactive.contains(&fg(muted)),
+            "the inactive focused label must be muted toward the pane fill (#59)"
         );
         assert!(
-            !inactive.contains(&fg(LABEL_FG)),
-            "no dark highlight on an inactive tab"
+            !inactive.contains(&fg(ACTIVE_FG)),
+            "inactive label must not be pure white — it should be subdued"
         );
         assert!(!inactive.contains("\x1b[1m"), "no bold on an inactive tab");
         assert!(

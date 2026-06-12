@@ -27,7 +27,7 @@
 //! cursor positioning; framing into the plugin pane stays in
 //! [`crate::paint::compose`] so width accounting and the layer boundary hold.
 
-use crate::color::{Palette, Rgb};
+use crate::color::{self, Palette, Rgb};
 use crate::minimap::{self, GradientMode, LabelMode, PaneRect};
 use unicode_width::UnicodeWidthChar;
 
@@ -244,14 +244,18 @@ fn hint_lines(position: usize, prefix: &str, width: usize, active: bool) -> [Sty
     ]
 }
 
-/// Text color of the narrow rungs (L3 glyph, L4 hint): the active tab's single
-/// text element carries the dark cue (#59) — dark on vivid fill stands out.
-/// Inactive tabs use white — white on the dimmed fill recedes gracefully.
+/// Text color of the narrow rungs (L3 glyph, L4 hint) (#59): the active tab's
+/// single text element is pure white — stands out on the vivid fill. Inactive
+/// tabs mute white toward the canvas fill so the text recedes gracefully.
 fn rung_text_fg(active: bool) -> Rgb {
     if active {
-        minimap::LABEL_FG
-    } else {
         minimap::ACTIVE_FG
+    } else {
+        color::mixed(
+            minimap::ACTIVE_FG,
+            minimap::BG,
+            minimap::INACTIVE_LABEL_BLEND,
+        )
     }
 }
 
@@ -714,11 +718,10 @@ mod tests {
     }
 
     #[test]
-    fn active_block_badge_is_dark_inactive_is_white() {
-        // #59: the active tab's badge renders in dark text on its vivid fill —
-        // maximum contrast, stands out. An inactive block flips to white: white
-        // over the dimmed fill recedes, never competing with the active badge.
-        // No accent chip anywhere (round-1 is gone).
+    fn active_block_badge_is_white_inactive_is_muted() {
+        // #59: the active tab's badge renders in pure white on its vivid fill —
+        // maximum contrast. An inactive block mutes the badge text toward the
+        // pane fill so it recedes. No accent chip anywhere.
         let palette = test_palette();
         let block_for = |active: bool| -> String {
             assemble(
@@ -735,10 +738,6 @@ mod tests {
             .map(StyledLine::as_str)
             .collect()
         };
-        let dark_fg = {
-            let (r, g, b) = minimap::LABEL_FG;
-            format!("\x1b[38;2;{r};{g};{b}m")
-        };
         let white_fg = {
             let (r, g, b) = minimap::ACTIVE_FG;
             format!("\x1b[38;2;{r};{g};{b}m")
@@ -747,39 +746,50 @@ mod tests {
             let (r, g, b) = palette.accent();
             format!("\x1b[48;2;{r};{g};{b}m")
         };
+        // Inactive badge is blended toward the pane fill (no ring on unfocused pane).
+        let muted_fg = {
+            let fill = palette.color_for(0);
+            let c = crate::color::mixed(minimap::ACTIVE_FG, fill, minimap::INACTIVE_LABEL_BLEND);
+            format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
+        };
         let active = block_for(true);
         let inactive = block_for(false);
         assert!(
-            active.contains(&dark_fg),
-            "the active block's badge text must be dark — stands out on vivid fill"
+            active.contains(&white_fg),
+            "the active block's badge text must be white — stands out on vivid fill (#59)"
         );
         assert!(
             !active.contains(&accent_bg),
             "the active block must not paint an accent chip"
         );
         assert!(
-            inactive.contains(&white_fg),
-            "an inactive badge must be white — recedes on dimmed fill"
+            inactive.contains(&muted_fg),
+            "an inactive badge must be muted toward the pane fill (#59)"
         );
         assert!(
-            !inactive.contains(&dark_fg),
-            "an inactive badge must not use the active-cue dark color"
+            !inactive.contains(&white_fg),
+            "an inactive badge must not be pure white — it should be subdued"
         );
     }
 
     #[test]
-    fn narrow_rungs_are_dark_when_active_white_when_inactive() {
+    fn narrow_rungs_are_white_when_active_muted_when_inactive() {
         // #59: the L3 glyph and L4 hint are the tab's only text at narrow
-        // widths. Active: dark text on vivid fill — stands out. Inactive: white
-        // text on dimmed fill — recedes.
+        // widths. Active: pure white text on vivid fill — stands out. Inactive:
+        // text muted toward the canvas fill — recedes gracefully.
         let palette = test_palette();
-        let dark_fg = {
-            let (r, g, b) = minimap::LABEL_FG;
-            format!("\x1b[38;2;{r};{g};{b}m")
-        };
         let white_fg = {
             let (r, g, b) = minimap::ACTIVE_FG;
             format!("\x1b[38;2;{r};{g};{b}m")
+        };
+        // Inactive rung text is blended toward the canvas (BG).
+        let muted_fg = {
+            let c = crate::color::mixed(
+                minimap::ACTIVE_FG,
+                minimap::BG,
+                minimap::INACTIVE_LABEL_BLEND,
+            );
+            format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
         };
         for width in [4, 2] {
             let row_for = |active: bool| -> String {
@@ -797,12 +807,12 @@ mod tests {
                     .to_string()
             };
             assert!(
-                row_for(true).contains(&dark_fg),
-                "width {width}: the active rung text must be dark"
+                row_for(true).contains(&white_fg),
+                "width {width}: the active rung text must be white (#59)"
             );
             assert!(
-                row_for(false).contains(&white_fg),
-                "width {width}: an inactive rung text must be white"
+                row_for(false).contains(&muted_fg),
+                "width {width}: an inactive rung text must be muted toward the canvas (#59)"
             );
         }
     }

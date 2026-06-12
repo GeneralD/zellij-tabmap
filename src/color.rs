@@ -88,7 +88,7 @@ fn luma((r, g, b): Rgb) -> u8 {
 
 /// Blend `from` toward `to` by `percent` (`0` = `from`, `100` = `to`), per
 /// channel. Overflow-safe: the lerp runs in `i32` and lands back in `0..=255`.
-fn mixed(from: Rgb, to: Rgb, percent: u8) -> Rgb {
+pub(crate) fn mixed(from: Rgb, to: Rgb, percent: u8) -> Rgb {
     let lerp = |a: u8, b: u8| (a as i32 + (b as i32 - a as i32) * percent as i32 / 100) as u8;
     (lerp(from.0, to.0), lerp(from.1, to.1), lerp(from.2, to.2))
 }

@@ -4,7 +4,7 @@
 //! (or substitute your host target to override the wasm32-wasip1 default).
 
 use zellij_tabmap::color::Palette;
-use zellij_tabmap::minimap::{Badge, GradientMode, LabelMode, PaneRect, render};
+use zellij_tabmap::minimap::{GradientMode, LabelMode, PaneRect, render};
 
 fn main() {
     let panes = vec![
@@ -32,11 +32,9 @@ fn main() {
                 width,
                 3,
                 LabelMode::All,
-                Some(Badge {
-                    text: "\u{2318} 1",
-                    accented: false,
-                }),
+                Some("\u{2318} 1"),
                 mode,
+                true,
             )
         );
     }

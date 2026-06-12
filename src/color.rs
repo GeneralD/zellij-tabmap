@@ -171,22 +171,11 @@ pub(crate) fn gradient_at(fill: Rgb, percent: u8) -> Rgb {
     mixed_linear(fill, target, SWEEP_PERCENT * percent as f32 / 100.0)
 }
 
-/// Resolved drawing attributes for one pane.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PaneStyle {
-    /// Block fill color.
-    pub fill: Rgb,
-    /// Focus-outline color — `Some` only for the focused pane.
-    pub ring: Option<Rgb>,
-    /// Whether the pane's label should render emphasized (bold).
-    pub emphasized: bool,
-}
-
 /// A theme-derived color assignment for panes.
 ///
 /// `slots` is cycled by pane id, so identity maps to a stable color across
 /// repaints — focus does **not** repaint a pane's fill (issue #47): the pane
-/// keeps its identity hue and the ring outline (plus the emphasized label)
+/// keeps its identity hue and the ring outline (plus the highlighted label)
 /// is what marks focus. The ring is derived **from the pane's own fill** as a
 /// luminance-shifted shade ([`derived_ring`]), so a blue pane gets a
 /// slightly-different-blue outline rather than a theme-wide accent ring. The
@@ -264,9 +253,10 @@ impl Palette {
         self.hint
     }
 
-    /// The theme accent (post-sentinel-fallback, so always visible). Used as
-    /// the active tab's badge text color (#59) — the one place the raw accent
-    /// surfaces directly rather than through a derived shade.
+    /// The theme accent (post-sentinel-fallback, so always visible). It seeds
+    /// the [`hint`](Self::hint) shade and survives as the single-slot fallback
+    /// fill; the raw value is exposed so tests can pin that it never leaks
+    /// into the render as a background (#59).
     pub fn accent(&self) -> Rgb {
         self.accent
     }
@@ -297,17 +287,6 @@ impl Palette {
     /// equal to the fill ([`derived_ring`]).
     pub fn ring_for(&self, pane_id: usize) -> Rgb {
         derived_ring(self.color_for(pane_id))
-    }
-
-    /// Drawing attributes for a pane, keyed on its stable `pane_id`. The fill
-    /// is the pane's identity hue regardless of focus — focus is marked by the
-    /// fill-derived ring outline and the emphasized label only (issue #47).
-    pub fn style_for(&self, pane_id: usize, focused: bool) -> PaneStyle {
-        PaneStyle {
-            fill: self.color_for(pane_id),
-            ring: focused.then(|| self.ring_for(pane_id)),
-            emphasized: focused,
-        }
     }
 }
 
@@ -408,49 +387,12 @@ mod tests {
     }
 
     #[test]
-    fn focus_keeps_slot_fill_with_ring_and_emphasis() -> R {
-        // Focus must not repaint the pane: identity hue stays, the ring and
-        // the emphasized label are what mark focus (issue #47).
-        let p = palette();
-        let focused = p.style_for(0, true);
-        assert_eq!(focused.fill, p.color_for(0));
-        assert_eq!(focused.ring, Some(p.ring_for(0)));
-        assert!(focused.emphasized);
-        Ok(())
-    }
-
-    #[test]
-    fn unfocused_uses_slot_color_no_ring_no_emphasis() -> R {
-        let p = palette();
-        let style = p.style_for(1, false);
-        assert_eq!(style.fill, p.color_for(1));
-        assert_eq!(style.ring, None);
-        assert!(!style.emphasized);
-        Ok(())
-    }
-
-    #[test]
-    fn focus_is_marked_by_ring_not_fill() -> R {
-        let p = palette();
-        // The headline guarantee: focus never changes the fill — the ring is
-        // the only structural difference between the two styles (issue #47).
-        assert_eq!(p.style_for(0, true).fill, p.style_for(0, false).fill);
-        assert!(p.style_for(0, true).ring.is_some());
-        assert!(p.style_for(0, false).ring.is_none());
-        Ok(())
-    }
-
-    #[test]
     fn focus_always_carries_a_ring_even_if_fill_collides() -> R {
         // The ring shade is never equal to the fill it derives from, so even
         // a one-slot palette keeps a focused pane distinguishable from a
         // same-colored neighbor.
         let collide = Palette::new(vec![(9, 9, 9)], (9, 9, 9));
-        let focused = collide.style_for(0, true);
-        let neighbor = collide.style_for(0, false);
-        assert_eq!(focused.fill, neighbor.fill);
-        assert!(focused.ring.is_some());
-        assert_ne!(focused.ring, Some(focused.fill));
+        assert_ne!(collide.ring_for(0), collide.color_for(0));
         Ok(())
     }
 

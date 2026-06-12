@@ -1,5 +1,6 @@
 //! Standalone visual harness for #59: renders a full three-tab bar so the
-//! active-tab cues (inactive dimming + accented badge) can be eyeballed.
+//! active-tab cues (inactive dimming + white badge/label text + suppressed
+//! inactive focus highlight) can be eyeballed.
 //! Not part of the plugin — run with e.g.
 //! `cargo run --example render_active_cue --target aarch64-apple-darwin`
 //! (substitute your host triple to override the wasm32-wasip1 default).

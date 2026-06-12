@@ -28,7 +28,7 @@
 //! [`crate::paint::compose`] so width accounting and the layer boundary hold.
 
 use crate::color::{Palette, Rgb};
-use crate::minimap::{self, Badge, GradientMode, LabelMode, PaneRect};
+use crate::minimap::{self, GradientMode, LabelMode, PaneRect};
 use unicode_width::UnicodeWidthChar;
 
 /// Text-row height of every tab block — the bar is pinned to three rows, a
@@ -130,8 +130,10 @@ pub fn level_for(width: usize) -> Level {
 /// `position`, choosing detail via the ladder. `prefix` is the configured
 /// shortcut glyph, used only by the L4 hint rung. `gradient` is the configured
 /// fill sweep, used only by the grid rungs (L0–L2). `active` marks the bar's
-/// selected tab: its grid badge draws accented (#59) — dimming the *inactive*
-/// blocks is the caller's concern, applied through the palette it hands in.
+/// selected tab: its shortcut text renders white and its focus ring draws,
+/// while inactive blocks suppress the focus highlight (#59) — dimming the
+/// *inactive* blocks is the caller's concern, applied through the palette it
+/// hands in.
 pub fn assemble(
     panes: &[PaneRect],
     palette: &Palette,
@@ -142,36 +144,43 @@ pub fn assemble(
     active: bool,
 ) -> TabBlock {
     // #32: stamp the `⌘N` shortcut *inside* the color block as a top-left badge
-    // (dark text over the block's own colors) rather than a separate gutter, so
+    // (text over the block's own colors) rather than a separate gutter, so
     // the shortcut shows on comfortably-sized tabs. The minimap self-skips the
     // badge when the block is too narrow to host it, so the grid rungs degrade
     // cleanly; the narrowest rungs (L3 glyph, L4 hint) carry the number on their
     // own as before.
     let hint = hint_text(position, prefix);
-    let badge = Badge {
-        text: &hint,
-        accented: active,
-    };
+    let badge = Some(hint.as_str());
     let lines = match level_for(width) {
-        Level::L0 => grid_lines(panes, palette, width, LabelMode::All, Some(badge), gradient),
+        Level::L0 => grid_lines(
+            panes,
+            palette,
+            width,
+            LabelMode::All,
+            badge,
+            gradient,
+            active,
+        ),
         Level::L1 => grid_lines(
             panes,
             palette,
             width,
             LabelMode::Focused,
-            Some(badge),
+            badge,
             gradient,
+            active,
         ),
         Level::L2 => grid_lines(
             panes,
             palette,
             width,
             LabelMode::None,
-            Some(badge),
+            badge,
             gradient,
+            active,
         ),
-        Level::L3 => glyph_lines(panes, palette, width),
-        Level::L4 => hint_lines(position, prefix, palette, width),
+        Level::L3 => glyph_lines(panes, palette, width, active),
+        Level::L4 => hint_lines(position, prefix, palette, width, active),
     };
     TabBlock {
         lines,
@@ -197,43 +206,64 @@ pub fn hint_text(position: usize, prefix: &str) -> String {
 
 /// L0–L2: delegate the color grid to the minimap with the rung's label policy.
 /// `badge`, when present, is the shortcut hint stamped into the block's top-left
-/// (the minimap drops it if the block is too narrow to host it), accented when
+/// (the minimap drops it if the block is too narrow to host it), white when
 /// the block is the active tab (#59).
+#[allow(clippy::too_many_arguments)]
 fn grid_lines(
     panes: &[PaneRect],
     palette: &Palette,
     width: usize,
     mode: LabelMode,
-    badge: Option<Badge>,
+    badge: Option<&str>,
     gradient: GradientMode,
+    active: bool,
 ) -> [StyledLine; ROWS] {
-    let block = minimap::render(panes, palette, width, ROWS, mode, badge, gradient);
+    let block = minimap::render(panes, palette, width, ROWS, mode, badge, gradient, active);
     three_rows(block.lines().map(str::to_string), width)
 }
 
-/// L3: a single representative split/grid glyph centered on the canvas.
-fn glyph_lines(panes: &[PaneRect], palette: &Palette, width: usize) -> [StyledLine; ROWS] {
+/// L3: a single representative split/grid glyph centered on the canvas, white
+/// on the active tab (#59).
+fn glyph_lines(
+    panes: &[PaneRect],
+    palette: &Palette,
+    width: usize,
+    active: bool,
+) -> [StyledLine; ROWS] {
     let glyph = representative_glyph(panes);
+    let fg = rung_text_fg(palette, active);
     [
         StyledLine(blank_row(width)),
-        StyledLine(text_row(&glyph.to_string(), palette.hint(), width)),
+        StyledLine(text_row(&glyph.to_string(), fg, width)),
         StyledLine(blank_row(width)),
     ]
 }
 
-/// L4: the shortcut hint only, fitted to the budget, centered on the canvas.
+/// L4: the shortcut hint only, fitted to the budget, centered on the canvas,
+/// white on the active tab (#59).
 fn hint_lines(
     position: usize,
     prefix: &str,
     palette: &Palette,
     width: usize,
+    active: bool,
 ) -> [StyledLine; ROWS] {
     let hint = fit_hint(position, prefix, width);
+    let fg = rung_text_fg(palette, active);
     [
         StyledLine(blank_row(width)),
-        StyledLine(text_row(&hint, palette.hint(), width)),
+        StyledLine(text_row(&hint, fg, width)),
         StyledLine(blank_row(width)),
     ]
+}
+
+/// Text color of the narrow rungs (L3 glyph, L4 hint): the active tab carries
+/// the white cue (#59); inactive tabs keep the palette's hint shade.
+fn rung_text_fg(palette: &Palette, active: bool) -> Rgb {
+    if active {
+        return minimap::ACTIVE_FG;
+    }
+    palette.hint()
 }
 
 /// Fit the shortcut hint into `width` columns: when the full `prefix + number`
@@ -695,16 +725,16 @@ mod tests {
     }
 
     #[test]
-    fn active_block_stamps_an_accented_badge() {
-        // #59: the active tab's grid rung renders its badge as an
-        // accent-colored chip so the selected tab carries a colored cue; an
-        // inactive block keeps the historical fill-backed badge. The accent
-        // escape is unique to the badge here — fills/rings derive from the
-        // slots, never the accent.
+    fn active_block_renders_its_badge_white() {
+        // #59: the active tab's grid rung renders its shortcut badge in white
+        // text over the block's own colors, while an inactive block keeps the
+        // historical dark text — and never paints the accent as a background
+        // (the round-1 chip is gone). White is unique to the badge here: the
+        // pane is unfocused, so no white can come from a focused label.
         let palette = test_palette();
-        let block_for = |active: bool| {
+        let block_for = |active: bool| -> String {
             assemble(
-                &one_pane("shell"),
+                &vec![PaneRect::new(0, 0, 0, 100, 40, "shell", false)],
                 &palette,
                 16,
                 0,
@@ -712,29 +742,69 @@ mod tests {
                 GradientMode::Off,
                 active,
             )
+            .lines
+            .iter()
+            .map(StyledLine::as_str)
+            .collect()
+        };
+        let white_fg = {
+            let (r, g, b) = minimap::ACTIVE_FG;
+            format!("\x1b[38;2;{r};{g};{b}m")
         };
         let accent_bg = {
             let (r, g, b) = palette.accent();
             format!("\x1b[48;2;{r};{g};{b}m")
         };
-        let active: String = block_for(true)
-            .lines
-            .iter()
-            .map(StyledLine::as_str)
-            .collect();
-        let inactive: String = block_for(false)
-            .lines
-            .iter()
-            .map(StyledLine::as_str)
-            .collect();
+        let active = block_for(true);
+        let inactive = block_for(false);
         assert!(
-            active.contains(&accent_bg),
-            "the active block's badge must draw the accent chip"
+            active.contains(&white_fg),
+            "the active block's badge text must be white"
         );
         assert!(
-            !inactive.contains(&accent_bg),
-            "an inactive block must not leak the accent"
+            !active.contains(&accent_bg),
+            "the active block must not paint an accent chip"
         );
+        assert!(
+            !inactive.contains(&white_fg),
+            "an inactive block keeps the dark badge text"
+        );
+    }
+
+    #[test]
+    fn narrow_rungs_render_their_text_white_only_when_active() {
+        // #59: the L3 glyph and L4 hint are the tab's only text at narrow
+        // widths, so they carry the white cue too; inactive blocks keep the
+        // palette's hint shade.
+        let palette = test_palette();
+        let white_fg = {
+            let (r, g, b) = minimap::ACTIVE_FG;
+            format!("\x1b[38;2;{r};{g};{b}m")
+        };
+        for width in [4, 2] {
+            let row_for = |active: bool| -> String {
+                assemble(
+                    &one_pane("x"),
+                    &palette,
+                    width,
+                    0,
+                    "\u{2318}",
+                    GradientMode::Off,
+                    active,
+                )
+                .lines[1]
+                    .as_str()
+                    .to_string()
+            };
+            assert!(
+                row_for(true).contains(&white_fg),
+                "width {width}: the active rung text must be white"
+            );
+            assert!(
+                !row_for(false).contains(&white_fg),
+                "width {width}: an inactive rung keeps the hint shade"
+            );
+        }
     }
 
     #[test]

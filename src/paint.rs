@@ -352,8 +352,8 @@ mod tests {
     fn bar_dims_inactive_tab_fills_and_keeps_the_active_vivid() {
         // #59: with `inactive_dim` on, an inactive tab's pane fills recede to
         // the dimmed palette while the active tab keeps full vibrancy — and
-        // the active block's badge draws its accent chip, proving the active
-        // flag reached `assemble`.
+        // the active block's badge text turns white, proving the active flag
+        // reached `assemble`.
         let (palette, panes, lo) = two_tab_fixture();
         let out = bar(
             3,
@@ -377,8 +377,12 @@ mod tests {
             "an inactive tab must not render its vivid fill"
         );
         assert!(
-            out.contains(&bg(palette.accent())),
-            "the active tab's badge draws its accent chip"
+            out.contains(&fg((255, 255, 255))),
+            "the active tab's badge text turns white"
+        );
+        assert!(
+            !out.contains(&bg(palette.accent())),
+            "no accent chip remains anywhere on the bar"
         );
     }
 

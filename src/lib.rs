@@ -938,12 +938,9 @@ mod tests {
         assert_eq!(p.color_for(2), (70, 80, 90));
         assert_eq!(p.color_for(3), (10, 20, 30));
 
-        // Focus keeps the pane's slot fill (issue #47); the ring is derived
-        // from that fill as a luminance-shifted shade, so the outline stays
-        // in the pane's own hue family rather than tracking the theme accent.
-        let focused = p.style_for(0, true);
-        assert_eq!(focused.fill, (10, 20, 30));
-        assert_eq!(focused.ring, Some(p.ring_for(0)));
-        assert_ne!(focused.ring, Some(focused.fill));
+        // The ring is derived from the pane's own fill as a luminance-shifted
+        // shade (issue #47), so the outline stays in the pane's hue family
+        // rather than tracking the theme accent.
+        assert_ne!(p.ring_for(0), p.color_for(0));
     }
 }

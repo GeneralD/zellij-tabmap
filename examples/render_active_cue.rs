@@ -30,10 +30,12 @@ fn main() {
     let inactive_dim = std::env::args().nth(1).as_deref() != Some("no-dim");
     let layout = line::pack(100, 0, 24, 3, 1, Alignment::Center, 2);
     let mut panes = BTreeMap::new();
+    // Every tab carries a focused pane, as in a live zellij session — the
+    // inactive tabs' focused panes must show NO highlight (#59).
     panes.insert(
         0,
         vec![
-            PaneRect::new(0, 0, 0, 60, 40, "nvim", false),
+            PaneRect::new(0, 0, 0, 60, 40, "nvim", true),
             PaneRect::new(1, 60, 0, 60, 40, "zsh", false),
         ],
     );
@@ -45,7 +47,7 @@ fn main() {
             PaneRect::new(4, 0, 20, 60, 20, "git", false),
         ],
     );
-    panes.insert(2, vec![PaneRect::new(5, 0, 0, 120, 40, "docs", false)]);
+    panes.insert(2, vec![PaneRect::new(5, 0, 0, 120, 40, "docs", true)]);
     print!(
         "{}",
         paint::bar(

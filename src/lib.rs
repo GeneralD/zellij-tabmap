@@ -251,6 +251,7 @@ impl ZellijPlugin for State {
                 &self.palette,
                 &self.config.shortcut_prefix,
                 self.config.gradient,
+                self.config.inactive_dim,
             )
         );
 

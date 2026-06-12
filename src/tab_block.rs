@@ -28,7 +28,7 @@
 //! [`crate::paint::compose`] so width accounting and the layer boundary hold.
 
 use crate::color::{Palette, Rgb};
-use crate::minimap::{self, GradientMode, LabelMode, PaneRect};
+use crate::minimap::{self, Badge, GradientMode, LabelMode, PaneRect};
 use unicode_width::UnicodeWidthChar;
 
 /// Text-row height of every tab block — the bar is pinned to three rows, a
@@ -129,7 +129,9 @@ pub fn level_for(width: usize) -> Level {
 /// Assemble `panes` into a three-row block of exactly `width` columns at tab
 /// `position`, choosing detail via the ladder. `prefix` is the configured
 /// shortcut glyph, used only by the L4 hint rung. `gradient` is the configured
-/// fill sweep, used only by the grid rungs (L0–L2).
+/// fill sweep, used only by the grid rungs (L0–L2). `active` marks the bar's
+/// selected tab: its grid badge draws accented (#59) — dimming the *inactive*
+/// blocks is the caller's concern, applied through the palette it hands in.
 pub fn assemble(
     panes: &[PaneRect],
     palette: &Palette,
@@ -137,6 +139,7 @@ pub fn assemble(
     position: usize,
     prefix: &str,
     gradient: GradientMode,
+    active: bool,
 ) -> TabBlock {
     // #32: stamp the `⌘N` shortcut *inside* the color block as a top-left badge
     // (dark text over the block's own colors) rather than a separate gutter, so
@@ -145,14 +148,18 @@ pub fn assemble(
     // cleanly; the narrowest rungs (L3 glyph, L4 hint) carry the number on their
     // own as before.
     let hint = hint_text(position, prefix);
+    let badge = Badge {
+        text: &hint,
+        accented: active,
+    };
     let lines = match level_for(width) {
-        Level::L0 => grid_lines(panes, palette, width, LabelMode::All, Some(&hint), gradient),
+        Level::L0 => grid_lines(panes, palette, width, LabelMode::All, Some(badge), gradient),
         Level::L1 => grid_lines(
             panes,
             palette,
             width,
             LabelMode::Focused,
-            Some(&hint),
+            Some(badge),
             gradient,
         ),
         Level::L2 => grid_lines(
@@ -160,7 +167,7 @@ pub fn assemble(
             palette,
             width,
             LabelMode::None,
-            Some(&hint),
+            Some(badge),
             gradient,
         ),
         Level::L3 => glyph_lines(panes, palette, width),
@@ -190,13 +197,14 @@ pub fn hint_text(position: usize, prefix: &str) -> String {
 
 /// L0–L2: delegate the color grid to the minimap with the rung's label policy.
 /// `badge`, when present, is the shortcut hint stamped into the block's top-left
-/// (the minimap drops it if the block is too narrow to host it).
+/// (the minimap drops it if the block is too narrow to host it), accented when
+/// the block is the active tab (#59).
 fn grid_lines(
     panes: &[PaneRect],
     palette: &Palette,
     width: usize,
     mode: LabelMode,
-    badge: Option<&str>,
+    badge: Option<Badge>,
     gradient: GradientMode,
 ) -> [StyledLine; ROWS] {
     let block = minimap::render(panes, palette, width, ROWS, mode, badge, gradient);
@@ -477,6 +485,7 @@ mod tests {
                 0,
                 "\u{2318}",
                 GradientMode::Off,
+                false,
             );
             for (row, line) in block.lines.iter().enumerate() {
                 assert!(
@@ -517,7 +526,15 @@ mod tests {
         // One width per rung, plus boundaries, plus the degenerate zero.
         for (name, panes) in &layouts {
             for width in [0, 1, 2, 3, 4, 5, 9, 10, 15, 16, 20, 24] {
-                let block = assemble(panes, &palette, width, 3, "\u{2318}", GradientMode::Off);
+                let block = assemble(
+                    panes,
+                    &palette,
+                    width,
+                    3,
+                    "\u{2318}",
+                    GradientMode::Off,
+                    false,
+                );
                 for (row, line) in block.lines.iter().enumerate() {
                     assert_eq!(
                         measured(line),
@@ -554,7 +571,15 @@ mod tests {
         // "Cmd+3" is 5 columns but the L4 slot is 2: drop the prefix to "3" and
         // keep the row exactly at budget rather than overflowing and wrapping.
         let palette = test_palette();
-        let block = assemble(&one_pane("x"), &palette, 2, 2, "Cmd+", GradientMode::Off);
+        let block = assemble(
+            &one_pane("x"),
+            &palette,
+            2,
+            2,
+            "Cmd+",
+            GradientMode::Off,
+            false,
+        );
         for line in &block.lines {
             assert_eq!(measured(line), 2);
         }
@@ -570,7 +595,15 @@ mod tests {
         // even that overflows, so the number itself is truncated to "1" rather
         // than wrapping past the pane edge. Last resort, but width stays exact.
         let palette = test_palette();
-        let block = assemble(&one_pane("x"), &palette, 1, 9, "Cmd+", GradientMode::Off);
+        let block = assemble(
+            &one_pane("x"),
+            &palette,
+            1,
+            9,
+            "Cmd+",
+            GradientMode::Off,
+            false,
+        );
         for line in &block.lines {
             assert_eq!(measured(line), 1, "a 1-column slot must stay 1 column");
         }
@@ -597,6 +630,7 @@ mod tests {
             0,
             "\u{2318}",
             GradientMode::Off,
+            false,
         );
         for line in &block.lines {
             for ch in ['a', 'b', 'c'] {
@@ -624,6 +658,7 @@ mod tests {
             0,
             "\u{2318}",
             GradientMode::Off,
+            false,
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(joined.contains('a'), "focused pane's label should appear");
@@ -650,11 +685,54 @@ mod tests {
             0,
             "\u{2318}",
             GradientMode::Off,
+            false,
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(
             joined.contains('\u{2318}'),
             "an L0 grid must stamp the ⌘ badge inside the block"
+        );
+    }
+
+    #[test]
+    fn active_block_stamps_an_accented_badge() {
+        // #59: the active tab's grid rung stamps its badge text in the palette
+        // accent so the selected tab carries a colored cue; an inactive block
+        // keeps the historical dark badge text. The accent escape is unique to
+        // the badge here — fills/rings derive from the slots, never the accent.
+        let palette = test_palette();
+        let block_for = |active: bool| {
+            assemble(
+                &one_pane("shell"),
+                &palette,
+                16,
+                0,
+                "\u{2318}",
+                GradientMode::Off,
+                active,
+            )
+        };
+        let accent_fg = {
+            let (r, g, b) = palette.accent();
+            format!("\x1b[38;2;{r};{g};{b}m")
+        };
+        let active: String = block_for(true)
+            .lines
+            .iter()
+            .map(StyledLine::as_str)
+            .collect();
+        let inactive: String = block_for(false)
+            .lines
+            .iter()
+            .map(StyledLine::as_str)
+            .collect();
+        assert!(
+            active.contains(&accent_fg),
+            "the active block's badge must draw in the accent"
+        );
+        assert!(
+            !inactive.contains(&accent_fg),
+            "an inactive block must not leak the accent"
         );
     }
 
@@ -666,8 +744,24 @@ mod tests {
             PaneRect::new(1, 50, 0, 50, 40, "cargo", false),
         ];
         for width in [2, 4, 7, 12, 24] {
-            let first = assemble(&panes, &palette, width, 1, "\u{2318}", GradientMode::Off);
-            let second = assemble(&panes, &palette, width, 1, "\u{2318}", GradientMode::Off);
+            let first = assemble(
+                &panes,
+                &palette,
+                width,
+                1,
+                "\u{2318}",
+                GradientMode::Off,
+                false,
+            );
+            let second = assemble(
+                &panes,
+                &palette,
+                width,
+                1,
+                "\u{2318}",
+                GradientMode::Off,
+                false,
+            );
             assert_eq!(first, second, "width {width} must render identically");
         }
     }
@@ -686,8 +780,24 @@ mod tests {
         let forward = [left.clone(), right.clone()];
         let reversed = [right, left];
         for width in [4, 12, 24] {
-            let a = assemble(&forward, &palette, width, 1, "\u{2318}", GradientMode::Off);
-            let b = assemble(&reversed, &palette, width, 1, "\u{2318}", GradientMode::Off);
+            let a = assemble(
+                &forward,
+                &palette,
+                width,
+                1,
+                "\u{2318}",
+                GradientMode::Off,
+                false,
+            );
+            let b = assemble(
+                &reversed,
+                &palette,
+                width,
+                1,
+                "\u{2318}",
+                GradientMode::Off,
+                false,
+            );
             assert_eq!(
                 a, b,
                 "width {width}: pane list order must not change the render"

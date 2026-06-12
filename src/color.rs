@@ -26,6 +26,12 @@ const BLACK: Rgb = (0, 0, 0);
 /// focus color rather than an invisible one.
 const DEFAULT_ACCENT: Rgb = (215, 95, 0);
 
+/// Tokyonight background (`#1a1b26`) — the canvas every block sits on.
+/// Canonical home; [`crate::minimap`] re-exposes it as its `BG`. Also the
+/// target of [`Palette::dimmed`]: inactive tabs recede *toward the canvas*,
+/// not toward plain black, so they sink into the bar instead of graying out.
+pub(crate) const CANVAS: Rgb = (26, 27, 38);
+
 /// Convert an xterm-256 palette index to RGB.
 ///
 /// Mirrors zellij's own `eightbit_to_rgb`, which is not re-exported to
@@ -190,6 +196,7 @@ pub struct PaneStyle {
 pub struct Palette {
     slots: Vec<Rgb>,
     hint: Rgb,
+    accent: Rgb,
 }
 
 impl Default for Palette {
@@ -225,7 +232,11 @@ impl Palette {
             visible
         };
         let hint = derived_ring(accent);
-        Self { slots, hint }
+        Self {
+            slots,
+            hint,
+            accent,
+        }
     }
 
     /// Pre-theme stopgap built from zellij's default style codes, so the
@@ -252,6 +263,33 @@ impl Palette {
     pub fn hint(&self) -> Rgb {
         self.hint
     }
+
+    /// The theme accent (post-sentinel-fallback, so always visible). Used as
+    /// the active tab's badge text color (#59) — the one place the raw accent
+    /// surfaces directly rather than through a derived shade.
+    pub fn accent(&self) -> Rgb {
+        self.accent
+    }
+
+    /// The inactive-tab variant of this palette (#59): every slot — and the
+    /// hint/accent it seeds text from — receded toward [`CANVAS`] by
+    /// [`Self::DIM_PERCENT`], so inactive blocks sink into the bar while the
+    /// active tab keeps full vibrancy. A recolor, not a re-keying: slot order
+    /// is preserved, so identity→color mapping survives, and rings derive
+    /// from the dimmed fills automatically.
+    pub fn dimmed(&self) -> Self {
+        let receded = |c: Rgb| mixed(c, CANVAS, Self::DIM_PERCENT);
+        Self {
+            slots: self.slots.iter().map(|&c| receded(c)).collect(),
+            hint: receded(self.hint),
+            accent: receded(self.accent),
+        }
+    }
+
+    /// Mix fraction toward the canvas for [`Self::dimmed`]. A visual parameter
+    /// tuned so inactive tabs read as "not selected" at minimap scale while
+    /// their pane hues stay tellable — not a correctness constant.
+    const DIM_PERCENT: u8 = 45;
 
     /// Focus-ring color for a pane: a luminance-shifted shade of the pane's
     /// **own fill** (issue #47), so the outline stays in the pane's hue
@@ -526,6 +564,80 @@ mod tests {
     fn from_eightbit_system_colors() -> R {
         assert_eq!(from_eightbit(0), (0, 0, 0));
         assert_eq!(from_eightbit(15), (255, 255, 255));
+        Ok(())
+    }
+
+    /// `value` lies on the closed per-channel segment between `from` and `to`.
+    fn channel_between(from: Rgb, to: Rgb, value: Rgb) -> bool {
+        let on = |a: u8, b: u8, v: u8| (a.min(b)..=a.max(b)).contains(&v);
+        on(from.0, to.0, value.0) && on(from.1, to.1, value.1) && on(from.2, to.2, value.2)
+    }
+
+    #[test]
+    fn accent_is_the_post_fallback_accent() -> R {
+        // The raw (post-sentinel-swap) accent is exposed for the active tab's
+        // badge cue (#59): a real accent comes back as-is, a sentinel one as
+        // the visible default — mirroring the hint's seeding rule.
+        let p = Palette::new(vec![(10, 20, 30)], (200, 100, 50));
+        assert_eq!(p.accent(), (200, 100, 50));
+        let q = Palette::new(vec![(10, 20, 30)], (0, 0, 0));
+        assert_eq!(q.accent(), DEFAULT_ACCENT);
+        Ok(())
+    }
+
+    #[test]
+    fn dimmed_moves_every_slot_toward_the_canvas() -> R {
+        // The inactive-tab treatment (#59): every slot recedes toward the
+        // canvas color — never reaching it (the block must stay visible),
+        // never moving away from it.
+        let p = palette();
+        let d = p.dimmed();
+        for id in 0..3 {
+            let orig = p.color_for(id);
+            let dim = d.color_for(id);
+            assert_ne!(dim, orig, "slot {id}: dimming must change the fill");
+            assert_ne!(dim, CANVAS, "slot {id}: a dimmed fill must stay visible");
+            assert!(
+                channel_between(orig, CANVAS, dim),
+                "slot {id}: {dim:?} must lie between {orig:?} and {CANVAS:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn dimmed_preserves_identity_keying() -> R {
+        // Dimming is a recolor, not a re-keying: the same pane id must land on
+        // the same (dimmed) slot, and the modulo cycle must be untouched.
+        let p = palette();
+        let d = p.dimmed();
+        assert_eq!(d.color_for(0), d.color_for(3));
+        assert_eq!(d.color_for(1), d.color_for(4));
+        assert_ne!(d.color_for(0), d.color_for(1));
+        Ok(())
+    }
+
+    #[test]
+    fn dimmed_hint_recedes_with_the_slots() -> R {
+        // The L3 glyph / L4 hint text must dim with its block, or a narrow
+        // inactive tab would keep a full-vibrancy hint while its neighbors
+        // recede.
+        let p = palette();
+        let d = p.dimmed();
+        assert_ne!(d.hint(), p.hint());
+        assert!(channel_between(p.hint(), CANVAS, d.hint()));
+        Ok(())
+    }
+
+    #[test]
+    fn dimmed_ring_derives_from_the_dimmed_fill() -> R {
+        // Rings are derived per pane from the palette's own fill, so the
+        // dimmed palette's ring must track the dimmed slot — not the
+        // original one.
+        let p = palette();
+        let d = p.dimmed();
+        assert_eq!(d.ring_for(0), derived_ring(d.color_for(0)));
+        assert_ne!(d.ring_for(0), p.ring_for(0));
         Ok(())
     }
 

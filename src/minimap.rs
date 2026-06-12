@@ -21,7 +21,8 @@ pub use crate::color::Rgb;
 
 /// Tokyonight background (`#1a1b26`) — painted on empty space. Shared with
 /// [`crate::tab_block`], which paints its glyph/hint rungs on the same canvas.
-pub(crate) const BG: Rgb = (26, 27, 38);
+/// Canonical value lives in [`crate::color::CANVAS`] (the dim target, #59).
+pub(crate) const BG: Rgb = crate::color::CANVAS;
 /// Dark text color for labels drawn over a (light) pane fill.
 const LABEL_FG: Rgb = (16, 17, 26);
 
@@ -128,6 +129,17 @@ impl std::str::FromStr for GradientMode {
     }
 }
 
+/// The `⌘N` shortcut hint stamped into a block's top-left (#32), plus how its
+/// text reads: `accented` paints it in the palette accent — the active tab's
+/// cue (#59) — while a plain badge keeps the historical dark label color.
+#[derive(Clone, Copy, Debug)]
+pub struct Badge<'a> {
+    /// The hint text (no embedded ANSI).
+    pub text: &'a str,
+    /// Whether the text draws in the palette accent instead of dark.
+    pub accented: bool,
+}
+
 /// One label-overlay cell, placed by display column.
 ///
 /// A glyph claims its leading cell plus one [`Continuation`] cell per extra
@@ -212,10 +224,11 @@ fn pixel_color(
 /// string of `text_rows` lines, each terminated by a reset and newline. `mode`
 /// selects which summarized pane titles are overlaid where width allows (see
 /// [`LabelMode`]). `badge`, when present, is the tab's shortcut hint stamped into
-/// the block's top-left in dark text over the underlying cell color — the pane
-/// fill, or the focus ring where it overlaps a focused pane's outline — so it
-/// reads as a label *inside* the color block; it is dropped when the block is
-/// too narrow to host its display width.
+/// the block's top-left over the underlying cell color — the pane fill, or the
+/// focus ring where it overlaps a focused pane's outline — so it reads as a
+/// label *inside* the color block; it is dropped when the block is too narrow
+/// to host its display width. Its text is dark, or the palette accent when the
+/// badge is [`accented`](Badge::accented) (the active tab's cue, #59).
 /// Empty input yields an all-background block, with the badge still stamped
 /// over it when one is given and fits. `gradient` selects the per-pane fill
 /// sweep (see [`GradientMode`]); `Off` reproduces the historical flat fills
@@ -226,7 +239,7 @@ pub fn render(
     cols: usize,
     text_rows: usize,
     mode: LabelMode,
-    badge: Option<&str>,
+    badge: Option<Badge>,
     gradient: GradientMode,
 ) -> String {
     let pw = cols;
@@ -360,7 +373,8 @@ pub fn render(
     // the block is dropped wholesale rather than split mid-glyph.
     let badge_cells: Vec<Option<char>> = badge
         .map(|b| {
-            b.chars()
+            b.text
+                .chars()
                 .filter_map(|ch| {
                     UnicodeWidthChar::width(ch)
                         .filter(|w| *w >= 1)
@@ -373,6 +387,12 @@ pub fn render(
         })
         .unwrap_or_default();
     let badge_fits = !badge_cells.is_empty() && BADGE_COL + badge_cells.len() <= pw;
+    // The active tab's badge text carries the accent (#59); a plain badge
+    // keeps the historical dark label color.
+    let badge_fg = match badge {
+        Some(Badge { accented: true, .. }) => palette.accent(),
+        _ => LABEL_FG,
+    };
 
     let mut out = String::with_capacity(text_rows * pw * 24);
     for tr in 0..text_rows {
@@ -385,7 +405,7 @@ pub fn render(
                 };
                 let fill = pixel_color(&grid, &ring, panes, palette, &bounds, gradient, pw, c, 0);
                 put_bg(&mut out, fill);
-                put_fg(&mut out, LABEL_FG);
+                put_fg(&mut out, badge_fg);
                 out.push_str("\x1b[1m");
                 out.push(ch);
                 out.push_str("\x1b[22m");
@@ -885,7 +905,10 @@ mod tests {
             10,
             3,
             LabelMode::None,
-            Some("⌘ 1"),
+            Some(Badge {
+                text: "⌘ 1",
+                accented: false,
+            }),
             GradientMode::Off,
         );
         assert!(wide.contains('⌘'), "wide block should host the badge");
@@ -895,12 +918,58 @@ mod tests {
             1,
             3,
             LabelMode::None,
-            Some("⌘ 1"),
+            Some(Badge {
+                text: "⌘ 1",
+                accented: false,
+            }),
             GradientMode::Off,
         );
         assert!(
             !narrow.contains('⌘'),
             "too-narrow block must drop the badge"
+        );
+    }
+
+    #[test]
+    fn accented_badge_paints_accent_text_plain_badge_stays_dark() {
+        // #59: the active tab's badge switches its text from the dark label
+        // color to the palette accent, so the selected tab carries a colored
+        // cue inside its block; an unaccented badge keeps the historical dark
+        // text. LabelMode::None keeps labels out, so the badge is the only
+        // possible source of either text color.
+        let panes = one_focused();
+        let palette = test_palette();
+        let render_badge = |accented: bool| {
+            render(
+                &panes,
+                &palette,
+                10,
+                3,
+                LabelMode::None,
+                Some(Badge {
+                    text: "⌘ 1",
+                    accented,
+                }),
+                GradientMode::Off,
+            )
+        };
+        let active = render_badge(true);
+        let inactive = render_badge(false);
+        assert!(
+            active.contains(&fg(palette.accent())),
+            "an accented badge must draw its text in the palette accent"
+        );
+        assert!(
+            !active.contains(&fg(LABEL_FG)),
+            "an accented badge must not also emit the dark label color"
+        );
+        assert!(
+            inactive.contains(&fg(LABEL_FG)),
+            "a plain badge keeps the historical dark text"
+        );
+        assert!(
+            !inactive.contains(&fg(palette.accent())),
+            "a plain badge must not leak the accent"
         );
     }
 
@@ -917,7 +986,10 @@ mod tests {
             10,
             3,
             LabelMode::None,
-            Some("符1"),
+            Some(Badge {
+                text: "符1",
+                accented: false,
+            }),
             GradientMode::Off,
         );
         let lines = visible_lines(&out);
@@ -946,7 +1018,10 @@ mod tests {
             4,
             3,
             LabelMode::None,
-            Some("符符"),
+            Some(Badge {
+                text: "符符",
+                accented: false,
+            }),
             GradientMode::Off,
         );
         assert!(

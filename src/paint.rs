@@ -328,6 +328,11 @@ mod tests {
         format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
     }
 
+    /// Truecolor background escape for `c`, as the emitter writes it.
+    fn bg(c: crate::color::Rgb) -> String {
+        format!("\x1b[48;2;{};{};{}m", c.0, c.1, c.2)
+    }
+
     /// Two single-pane tabs — tab 0 active at an L0 width, tab 1 inactive at an
     /// L2 width — so both render color grids whose fills witness the palette
     /// each tab was assembled with (#59).
@@ -347,7 +352,7 @@ mod tests {
     fn bar_dims_inactive_tab_fills_and_keeps_the_active_vivid() {
         // #59: with `inactive_dim` on, an inactive tab's pane fills recede to
         // the dimmed palette while the active tab keeps full vibrancy — and
-        // the active block's badge draws in the accent, proving the active
+        // the active block's badge draws its accent chip, proving the active
         // flag reached `assemble`.
         let (palette, panes, lo) = two_tab_fixture();
         let out = bar(
@@ -372,8 +377,8 @@ mod tests {
             "an inactive tab must not render its vivid fill"
         );
         assert!(
-            out.contains(&fg(palette.accent())),
-            "the active tab's badge draws accented"
+            out.contains(&bg(palette.accent())),
+            "the active tab's badge draws its accent chip"
         );
     }
 

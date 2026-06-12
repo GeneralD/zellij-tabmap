@@ -129,14 +129,15 @@ impl std::str::FromStr for GradientMode {
     }
 }
 
-/// The `⌘N` shortcut hint stamped into a block's top-left (#32), plus how its
-/// text reads: `accented` paints it in the palette accent — the active tab's
-/// cue (#59) — while a plain badge keeps the historical dark label color.
+/// The `⌘N` shortcut hint stamped into a block's top-left (#32), plus how it
+/// reads: `accented` paints the cells as an accent-colored chip — the active
+/// tab's cue (#59) — while a plain badge sits directly on the pane fill. The
+/// text is dark in both forms.
 #[derive(Clone, Copy, Debug)]
 pub struct Badge<'a> {
     /// The hint text (no embedded ANSI).
     pub text: &'a str,
-    /// Whether the text draws in the palette accent instead of dark.
+    /// Whether the cells draw as an accent-colored chip.
     pub accented: bool,
 }
 
@@ -227,8 +228,9 @@ fn pixel_color(
 /// the block's top-left over the underlying cell color — the pane fill, or the
 /// focus ring where it overlaps a focused pane's outline — so it reads as a
 /// label *inside* the color block; it is dropped when the block is too narrow
-/// to host its display width. Its text is dark, or the palette accent when the
-/// badge is [`accented`](Badge::accented) (the active tab's cue, #59).
+/// to host its display width. An [`accented`](Badge::accented) badge swaps the
+/// underlying cell color for an accent-colored background chip — the active
+/// tab's cue (#59) — while the text stays dark in both forms.
 /// Empty input yields an all-background block, with the badge still stamped
 /// over it when one is given and fits. `gradient` selects the per-pane fill
 /// sweep (see [`GradientMode`]); `Off` reproduces the historical flat fills
@@ -387,11 +389,13 @@ pub fn render(
         })
         .unwrap_or_default();
     let badge_fits = !badge_cells.is_empty() && BADGE_COL + badge_cells.len() <= pw;
-    // The active tab's badge text carries the accent (#59); a plain badge
-    // keeps the historical dark label color.
-    let badge_fg = match badge {
-        Some(Badge { accented: true, .. }) => palette.accent(),
-        _ => LABEL_FG,
+    // The active tab's badge renders as an accent-colored chip (#59): the
+    // accent as the cells' background, the text staying dark — accent *text*
+    // would vanish on a pane fill of the accent's own hue. `None` keeps the
+    // plain badge's historical background: the underlying cell color.
+    let badge_chip = match badge {
+        Some(Badge { accented: true, .. }) => Some(palette.accent()),
+        _ => None,
     };
 
     let mut out = String::with_capacity(text_rows * pw * 24);
@@ -404,8 +408,8 @@ pub fn render(
                     continue;
                 };
                 let fill = pixel_color(&grid, &ring, panes, palette, &bounds, gradient, pw, c, 0);
-                put_bg(&mut out, fill);
-                put_fg(&mut out, badge_fg);
+                put_bg(&mut out, badge_chip.unwrap_or(fill));
+                put_fg(&mut out, LABEL_FG);
                 out.push_str("\x1b[1m");
                 out.push(ch);
                 out.push_str("\x1b[22m");
@@ -480,6 +484,10 @@ mod tests {
 
     fn fg(c: Rgb) -> String {
         format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
+    }
+
+    fn bg(c: Rgb) -> String {
+        format!("\x1b[48;2;{};{};{}m", c.0, c.1, c.2)
     }
 
     fn one_focused() -> Vec<PaneRect> {
@@ -931,12 +939,14 @@ mod tests {
     }
 
     #[test]
-    fn accented_badge_paints_accent_text_plain_badge_stays_dark() {
-        // #59: the active tab's badge switches its text from the dark label
-        // color to the palette accent, so the selected tab carries a colored
-        // cue inside its block; an unaccented badge keeps the historical dark
-        // text. LabelMode::None keeps labels out, so the badge is the only
-        // possible source of either text color.
+    fn accented_badge_draws_an_accent_chip_plain_badge_keeps_the_fill() {
+        // #59: the active tab's badge renders as an accent-colored chip — the
+        // accent as the cells' *background*, the text staying dark — so the
+        // cue is readable over any pane fill (accent *text* would vanish on a
+        // fill of the accent's own hue). A plain badge keeps the historical
+        // look: dark text directly over the pane fill, no accent anywhere.
+        // LabelMode::None keeps labels out, so the badge is the only possible
+        // source of the dark text color.
         let panes = one_focused();
         let palette = test_palette();
         let render_badge = |accented: bool| {
@@ -956,19 +966,19 @@ mod tests {
         let active = render_badge(true);
         let inactive = render_badge(false);
         assert!(
-            active.contains(&fg(palette.accent())),
-            "an accented badge must draw its text in the palette accent"
+            active.contains(&bg(palette.accent())),
+            "an accented badge must paint the accent as its background chip"
         );
         assert!(
-            !active.contains(&fg(LABEL_FG)),
-            "an accented badge must not also emit the dark label color"
+            active.contains(&fg(LABEL_FG)),
+            "the accented badge's text stays dark for contrast on the chip"
         );
         assert!(
             inactive.contains(&fg(LABEL_FG)),
             "a plain badge keeps the historical dark text"
         );
         assert!(
-            !inactive.contains(&fg(palette.accent())),
+            !inactive.contains(&bg(palette.accent())),
             "a plain badge must not leak the accent"
         );
     }

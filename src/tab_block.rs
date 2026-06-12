@@ -696,10 +696,11 @@ mod tests {
 
     #[test]
     fn active_block_stamps_an_accented_badge() {
-        // #59: the active tab's grid rung stamps its badge text in the palette
-        // accent so the selected tab carries a colored cue; an inactive block
-        // keeps the historical dark badge text. The accent escape is unique to
-        // the badge here — fills/rings derive from the slots, never the accent.
+        // #59: the active tab's grid rung renders its badge as an
+        // accent-colored chip so the selected tab carries a colored cue; an
+        // inactive block keeps the historical fill-backed badge. The accent
+        // escape is unique to the badge here — fills/rings derive from the
+        // slots, never the accent.
         let palette = test_palette();
         let block_for = |active: bool| {
             assemble(
@@ -712,9 +713,9 @@ mod tests {
                 active,
             )
         };
-        let accent_fg = {
+        let accent_bg = {
             let (r, g, b) = palette.accent();
-            format!("\x1b[38;2;{r};{g};{b}m")
+            format!("\x1b[48;2;{r};{g};{b}m")
         };
         let active: String = block_for(true)
             .lines
@@ -727,11 +728,11 @@ mod tests {
             .map(StyledLine::as_str)
             .collect();
         assert!(
-            active.contains(&accent_fg),
-            "the active block's badge must draw in the accent"
+            active.contains(&accent_bg),
+            "the active block's badge must draw the accent chip"
         );
         assert!(
-            !inactive.contains(&accent_fg),
+            !inactive.contains(&accent_bg),
             "an inactive block must not leak the accent"
         );
     }

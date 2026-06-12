@@ -27,7 +27,7 @@ replaces the default one-row bar with a multi-row minimap.
   canvas color `(26, 27, 38)`.
 - Label text (pane titles, tab badge) is overlaid using ANSI TrueColor.
 
-## Three-level label brightness model
+## Three-level label brightness model (intended design)
 
 ```
 focused pane  in active tab  →  ACTIVE_FG = (255,255,255)  [pure white, bold]
@@ -40,6 +40,14 @@ any pane in inactive tab      →  mixed(ACTIVE_FG, fill, INACTIVE_LABEL_BLEND)
 
 Higher percent = text moves further from white toward the pane fill.
 
+**Note:** `ACTIVE_UNFOCUSED_BLEND` may not yet be implemented in the
+renderer. If its value is passed as empty, the active tab currently
+renders all labels at `ACTIVE_FG` (no distinction between focused and
+unfocused panes within the active tab). In that case, treat the
+"Active unfocused" row of your assessment as evaluating the current
+flat behavior, and your suggestion for `ACTIVE_UNFOCUSED_BLEND` is a
+recommended value for when the feature is implemented.
+
 ## Constants passed at invocation
 
 The trigger line carries:
@@ -49,6 +57,8 @@ tabmap-color-check: image=<path> ACTIVE_UNFOCUSED_BLEND=<n> INACTIVE_LABEL_BLEND
 ```
 
 Read the image at the given path and parse the constant values from the line.
+An empty value (e.g. `ACTIVE_UNFOCUSED_BLEND=`) means the constant is not yet
+wired into the renderer.
 
 ## Your task
 
@@ -64,12 +74,12 @@ Read the image at the given path and parse the constant values from the line.
 ```
 ASSESSMENT:
 - Active focused: <ok / too dim / too bright>
-- Active unfocused: <ok / too dim / too bright>
+- Active unfocused: <ok / too dim / too bright / not implemented>
 - Inactive: <ok / too dim / too bright>
-- Three-level contrast: <clear / marginal / insufficient>
+- Three-level contrast: <clear / marginal / insufficient / not implemented>
 
 SUGGESTED CHANGES:
-- ACTIVE_UNFOCUSED_BLEND: <keep N / change to N> — <one-line reason>
+- ACTIVE_UNFOCUSED_BLEND: <keep N / change to N / recommend N (not yet implemented)> — <one-line reason>
 - INACTIVE_LABEL_BLEND: <keep N / change to N> — <one-line reason>
 
 RATIONALE: <2-3 sentences describing what you see and why>

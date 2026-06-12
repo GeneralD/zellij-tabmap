@@ -107,7 +107,8 @@ fn main() {
             &panes,
             &palette,
             "\u{2318}",
-            GradientMode::Sheen
+            GradientMode::Sheen,
+            true,
         )
     );
 }

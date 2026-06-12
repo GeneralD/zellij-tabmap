@@ -7,6 +7,26 @@ body = """
 - {{ commit.message | upper_first | trim }}\
 {% endfor %}
 {% endfor %}
+
+---
+
+### Upgrading — add to `permissions.kdl`
+
+If you pin to a version URL, paste this block into your zellij `permissions.kdl` and restart zellij:
+
+- **macOS**: `~/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl`
+- **Linux**: `~/.cache/zellij/permissions.kdl`
+
+```kdl
+"https://github.com/GeneralD/zellij-tabmap/releases/download/{{ version }}/zellij-tabmap.wasm" {
+    ReadApplicationState
+    ChangeApplicationState
+}
+```
+
+If `reorder "true"` is set, also add `RunActionsAsUser` to that block.
+
+> Using `releases/latest/download/` in your layout? The permission is keyed to that URL and was granted once — no action needed.
 """
 trim = true
 

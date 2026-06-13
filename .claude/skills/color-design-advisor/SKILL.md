@@ -36,7 +36,7 @@ If it fails, report the error and stop.
 Write a VHS tape to a tempfile and run it. Use absolute paths (expand the
 repo root yourself before writing):
 
-```
+```text
 Output /tmp/tabmap-color-check-dummy.gif
 Set Shell "bash"
 Set Width 920
@@ -60,6 +60,7 @@ Binary path: `<repo-root>/target/<host-triple>/debug/examples/render_active_cue`
 ## Step 3 — Read current constants
 
 From `src/minimap.rs`, extract:
+
 - `ACTIVE_UNFOCUSED_BLEND` value — **may be absent** if the three-level
   brightness feature has not been implemented yet; use empty string if missing
 - `INACTIVE_LABEL_BLEND` value
@@ -72,8 +73,10 @@ gemini -p "tabmap-color-check: image=/tmp/tabmap-color-check.png ACTIVE_UNFOCUSE
 
 Pass the value of `ACTIVE_UNFOCUSED_BLEND` as empty if the constant is absent.
 This triggers the `tabmap-color-advisor` Gemini skill. If the output does NOT
-contain `ASSESSMENT:`, the skill may not have loaded — inform the user that the
-Gemini skill may need to be installed globally (see `.gemini/skills/tabmap-color-advisor/`).
+contain `ASSESSMENT:`, the skill may not have loaded — confirm Gemini was
+launched from inside this repo, since the project skill at
+`.gemini/skills/tabmap-color-advisor/` is only discovered when the cwd is the
+project (no global install needed).
 
 ## Step 5 — Present the result
 
@@ -85,11 +88,13 @@ verify that the constant actually exists in `src/minimap.rs`. If it doesn't:
 
 If the constant does exist, offer to update its value in `src/minimap.rs`.
 
-## Install note (first time)
+## Install note
 
-The Gemini skill lives at `.gemini/skills/tabmap-color-advisor/` in this repo.
-For Gemini to pick it up globally, symlink or copy it:
+No install step is needed. The Gemini skill lives at
+`.gemini/skills/tabmap-color-advisor/` in this repo and Gemini discovers it
+automatically when launched with this repo as the working directory.
 
-```bash
-ln -s "$(pwd)/.gemini/skills/tabmap-color-advisor" ~/.gemini/skills/
-```
+**Do not** symlink or copy it into `~/.gemini/skills/` — this skill is
+project-specific (it knows the tabmap minimap's exact render model and blend
+constants), so a global install would surface it in every unrelated Gemini
+session.

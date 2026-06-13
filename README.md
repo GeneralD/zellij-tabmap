@@ -62,12 +62,31 @@ cargo build --release               # .cargo/config.toml targets wasm32-wasip1
 
 ## Use it in zellij
 
-In your layout's `default_tab_template`, give the tab-bar pane a height of 3 rows and point it at the hosted release artifact. zellij fetches and caches the wasm on first use — no clone, no build:
+The robust way to run it is to **install the prebuilt wasm to a local path and load it with `file:`**: a local file loads instantly (no first-launch download wait), updates cleanly, and the permission grant persists across versions. (Prefer to try it before installing? A no-install option that loads straight from the release URL is in the collapsed note at the end of this section — handy for a first look, but it does not auto-update.)
+
+**1. Download the wasm** to a local path. Any absolute path works; `~/.config/zellij/plugins/` matches zellij's own plugin convention:
+
+```bash
+mkdir -p ~/.config/zellij/plugins
+curl -fL https://github.com/GeneralD/zellij-tabmap/releases/latest/download/zellij-tabmap.wasm -o ~/.config/zellij/plugins/zellij-tabmap.wasm
+```
+
+`-f` makes `curl` fail on an HTTP error instead of silently saving the error page as your wasm. To pin a version, swap `latest/download` for `download/vX.Y.Z`.
+
+**2. Grant permissions once.** The bar needs `ReadApplicationState` (pane/tab layout data) and `ChangeApplicationState` (click-to-switch), but a plugin loaded from `default_tab_template` gets no usable permission prompt ([zellij#4982](https://github.com/zellij-org/zellij/issues/4982) tracks this dead-end for background plugins). Load it once in a **regular pane**, where the prompt can be focused and answered (the bar stays selectable until the permission flow resolves):
+
+```bash
+zellij plugin -- file:$HOME/.config/zellij/plugins/zellij-tabmap.wasm
+```
+
+Press <kbd>y</kbd> to accept, then close the pane. The grant is keyed on the exact location string, and because the file path stays the same across versions this is a **one-time** step — a per-tag URL would need re-granting on every release. (As a fallback, add the entry by hand to `permissions.kdl` in zellij's cache directory — Linux: `~/.cache/zellij/permissions.kdl`, macOS: `~/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl` — which is read once at server startup, so manual edits apply only in a fresh session.)
+
+**3. Wire it into your layout.** In `default_tab_template`, give the tab-bar pane a height of 3 rows and point it at the file. KDL does not expand `~`, so use the **absolute** path:
 
 ```kdl
 default_tab_template {
     pane size=3 borderless=true {                       // 1 → 3 rows
-        plugin location="https://github.com/GeneralD/zellij-tabmap/releases/latest/download/zellij-tabmap.wasm" {
+        plugin location="file:/Users/you/.config/zellij/plugins/zellij-tabmap.wasm" {
             shortcut_prefix "⌘"
             active_width "24"
             align "center"                              // "center" slides to keep the active tab centered; "left" anchors the row (all-fit only)
@@ -82,13 +101,11 @@ default_tab_template {
 }
 ```
 
-The hosted URL above always tracks the newest release. To pin a specific version instead, swap it for the per-tag form — e.g. `https://github.com/GeneralD/zellij-tabmap/releases/download/v0.1.0/zellij-tabmap.wasm`.
+Restart the session. Because the wasm is already local, the bar paints on the **first** tab immediately — there is no first-launch download wait (a remote-URL plugin is blank until its initial download lands, which can read as a broken bar).
 
-Contributors hacking on the plugin can [build from source](#build-from-source) and point at the local artifact instead:
+**4. Update** later by re-running step 1 — the download overwrites the file in place. zellij reads a local file from disk at each session start, so a **fresh session** picks up the new build automatically; a remote URL, by contrast, is cached by zellij **by URL and never re-fetched**, so updates silently never arrive. An already-running session keeps serving the old build until you start a new one — there is no in-place reload for the tab bar (`zellij action start-or-reload-plugin` opens a *stray plugin pane* instead of refreshing a layout-loaded plugin, [zellij#3927](https://github.com/zellij-org/zellij/issues/3927)), so simply start a fresh session to pick up the update.
 
-```kdl
-plugin location="file:/absolute/path/to/zellij-tabmap.wasm"
-```
+Contributors hacking on the plugin [build from source](#build-from-source) and point `file:` at their own `target/wasm32-wasip1/release/zellij-tabmap.wasm` artifact instead of the downloaded wasm.
 
 > **`align` — center vs left.** When every tab fits, `align` decides how the row is anchored: `center` (default) re-centers the active block on each focus change, so the whole strip slides horizontally; `left` pins the row's **left edge** at the start of the tab area (column 0, or just after any reserved prefix columns), removing that whole-strip slide. Note `left` does not freeze every tab's column — the active tab is still drawn wider than the inactives, so the tabs drawn after it shift right as focus crosses them; only the leftmost tab is truly fixed. `align` governs the all-fit case **only** — when tabs overflow, the visible window always follows the active tab (with `← +N` / `+N →` markers) regardless of `align`, because the active tab must stay on screen. The default stays `center` so existing layouts render unchanged on update.
 >
@@ -98,15 +115,31 @@ plugin location="file:/absolute/path/to/zellij-tabmap.wasm"
 >
 > **`inactive_dim` — visual cue for the active tab.** When `true` (default), inactive tabs are dimmed toward the terminal background so the active tab stands out clearly: its pane fills stay vivid, its shortcut badge and focused pane label are drawn in white, and no focus ring appears on other tabs. Set `false` to disable the dimming and treat all tabs with equal intensity.
 >
-> **First-run permission note**: the bar needs two permissions — `ReadApplicationState` (pane/tab layout data) and `ChangeApplicationState` (click-to-switch) — but when loaded from `default_tab_template` it gets no usable permission prompt and appears inert on first launch (see the upstream issue [zellij#4982](https://github.com/zellij-org/zellij/issues/4982), which tracks this dead-end for background plugins). To grant the permissions, load the plugin **once in a regular pane** — the bar stays selectable until the permission flow resolves, so the prompt can be focused and answered there, and the grant is cached per URL:
->
-> ```bash
-> zellij plugin -- https://github.com/GeneralD/zellij-tabmap/releases/latest/download/zellij-tabmap.wasm
-> ```
->
-> Press <kbd>y</kbd> to accept and close the pane, then restart the session so the template-loaded bar picks up the grant. Note the grant is keyed on the **exact plugin URL**, so a version-pinned URL needs this once per version, while the `latest` URL needs it only once (at the cost of zellij's URL-keyed wasm cache holding back updates). As a fallback you can also add the entry by hand to `permissions.kdl` in zellij's cache directory (Linux: `~/.cache/zellij/permissions.kdl`, macOS: `~/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl`) — the file is read once at server startup, so manual edits take effect only in a fresh session.
->
-> **Enabling `reorder`** requests a third permission, `RunActionsAsUser` (for the `MoveTabByTabId` action a tab drag performs). Granting is all-or-nothing for tab-template plugins, so when you set `reorder "true"` you must grant all three permissions and reload — otherwise the bar freezes with no prompt. Left at the default (`false`), the plugin requests only the two permissions above, so an existing install keeps working unchanged across updates.
+> **Enabling `reorder`** requests a third permission, `RunActionsAsUser` (for the `MoveTabByTabId` action a tab drag performs). Granting is all-or-nothing for tab-template plugins, so when you set `reorder "true"` you must **re-run step 2** (the grant prompt then lists all three permissions) and restart — otherwise the bar freezes with no prompt. Left at the default (`false`), the plugin requests only the two permissions above, so an existing install keeps working unchanged across updates.
+
+<details>
+<summary>Load straight from the release URL (quick try — does not auto-update)</summary>
+
+For a first look without downloading anything, point the layout's `plugin location` directly at the release URL — zellij fetches and caches the wasm on first use:
+
+```kdl
+plugin location="https://github.com/GeneralD/zellij-tabmap/releases/latest/download/zellij-tabmap.wasm"
+```
+
+Grant this URL once before relying on the layout — the step-2 grant does **not** carry over, because zellij keys permissions on the exact location string and a `default_tab_template` plugin gets no usable prompt ([zellij#4982](https://github.com/zellij-org/zellij/issues/4982)). Load the URL in a regular pane (this also pre-warms the download):
+
+```bash
+zellij plugin -- https://github.com/GeneralD/zellij-tabmap/releases/latest/download/zellij-tabmap.wasm
+```
+
+Press <kbd>y</kbd> and close the pane. Two caveats still make this unsuitable as a permanent install:
+
+- **Updates never arrive.** zellij caches the downloaded wasm **by URL and never re-fetches it**, so the `latest` URL keeps serving whatever version you first loaded; clearing zellij's cache is the only way to move forward. (A version-pinned `releases/download/vX.Y.Z/` URL avoids the stale-cache problem but then needs a fresh permission grant on every release.)
+- **Blank bar on first launch.** If you skip the warm-up above, the wasm downloads on the first session for an uncached URL while the bar sits empty — and since the bar *is* the tab bar, that can read as broken until the download lands.
+
+If a fetch ever returns a non-wasm body (e.g. a 404 page when the release asset is not published yet), zellij caches that error text **as the wasm**, permanently — the log then shows `magic header not detected`. Recover by deleting both cache traces for that URL (a hashed blob directly under zellij's cache root, and the `https:/github.com/GeneralD/zellij-tabmap/releases/…` directory tree beneath it) and starting a fresh session.
+
+</details>
 
 ## Development
 

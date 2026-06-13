@@ -298,3 +298,62 @@ Order of operations for a release bump in your own layout:
 2. Only then update the layout's plugin URL.
 3. Grant the permission for the new URL (#11).
 4. Start a fresh session (#1 — permissions are read at server start).
+
+---
+
+## 13. First-launch download race: a remote-URL bar is blank until its first download lands
+
+A layout-loaded plugin at a **not-yet-cached** remote URL is downloaded on the
+first session that uses it. zellij broadcasts its one-shot initial
+`TabUpdate`/`PaneUpdate` at server start; if the download is still in flight
+then, the plugin misses that broadcast and loads with an empty `self.tabs`, so
+`render()` bails and the bar stays blank until the **next** event delivers a
+fresh `TabUpdate` — e.g. opening a second tab. The symptom reads as "the bar
+only activates on the 2nd tab, and only right after a version upgrade."
+
+This is a **one-time, first-download-only** artifact, and it is **not fixable
+in plugin code**: while the download is in flight the wasm isn't running yet,
+so zellij paints its own loading placeholder, not ours. Evidence from a real
+run (`zellij.log`): server start at 16:16:18, the freshly-pinned wasm finished
+loading at 16:16:25 (~7 s — the download); the very next session, cache warm,
+loaded the same wasm in **2.95 ms** at tab-0 spawn, with the bar present from
+the first tab.
+
+Why it surfaces right after a version bump specifically: a new tag URL (or a
+cache-cleared `latest`) is uncached, so the first session pays the download;
+every later session hits the warm URL cache (#6/#10) and loads instantly.
+
+Remedies (both sidestep the race; neither is plugin code):
+
+- **Pre-warm the URL.** The one-time permission step (`zellij plugin -- <url>`,
+  press `y`) downloads and caches the wasm as a side effect, so the later
+  template-loaded bar starts from a warm cache. This is why the README's
+  permission step incidentally hides the race for README-followers.
+- **Distribute by `file:` (preferred).** A local path loads instantly — there
+  is no download window at all — and also sidesteps the URL-cache traps
+  #10/#11: the file is re-read from disk so updates apply, and the permission
+  grant persists because the path is stable across versions. Still subject to
+  #6 (within-session wasm cache): overwrite the file, then start a **fresh
+  session** to pick it up — for the template-loaded bar there is no in-place
+  reload (`start-or-reload-plugin` spawns a stray pane, #14).
+
+---
+
+## 14. `start-or-reload-plugin` reloads a *pane* plugin in place, but spawns a stray pane for a *layout-loaded* one
+
+`zellij action start-or-reload-plugin file:<wasm>` reloads a plugin **only if
+that plugin is considered already loaded**. A plugin started from a layout —
+`default_tab_template`, a `pane { plugin }` in the layout, or `load_plugins` —
+is *not* tracked as a reloadable instance, so the action falls through to its
+"start" branch and **opens a new plugin pane** instead of refreshing the
+running one ([zellij#3927](https://github.com/zellij-org/zellij/issues/3927),
+open as of 0.4x). For the tab bar (always layout-loaded) this means a stray
+content pane, not a refreshed bar.
+
+So the `start-or-reload-plugin` advice in #6 applies **only to plugins you
+loaded into a pane yourself** (ad-hoc `zellij plugin --` / `new-pane
+--plugin` during dev). To pick up a new build of the *bar*, there is no
+in-place reload — **start a fresh session** (with `file:` the local wasm is
+re-read from disk at server start, so the fresh session has the new build;
+see #13). Don't put `start-or-reload-plugin` in user-facing update docs for a
+template-loaded plugin — it sends users into a duplicated-pane recovery path.

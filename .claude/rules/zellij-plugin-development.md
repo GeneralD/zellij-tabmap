@@ -333,5 +333,27 @@ Remedies (both sidestep the race; neither is plugin code):
   is no download window at all — and also sidesteps the URL-cache traps
   #10/#11: the file is re-read from disk so updates apply, and the permission
   grant persists because the path is stable across versions. Still subject to
-  #6 (within-session wasm cache): overwrite the file then restart the session,
-  or `zellij action start-or-reload-plugin file:<abs-path>` to force a reload.
+  #6 (within-session wasm cache): overwrite the file, then start a **fresh
+  session** to pick it up — for the template-loaded bar there is no in-place
+  reload (`start-or-reload-plugin` spawns a stray pane, #14).
+
+---
+
+## 14. `start-or-reload-plugin` reloads a *pane* plugin in place, but spawns a stray pane for a *layout-loaded* one
+
+`zellij action start-or-reload-plugin file:<wasm>` reloads a plugin **only if
+that plugin is considered already loaded**. A plugin started from a layout —
+`default_tab_template`, a `pane { plugin }` in the layout, or `load_plugins` —
+is *not* tracked as a reloadable instance, so the action falls through to its
+"start" branch and **opens a new plugin pane** instead of refreshing the
+running one ([zellij#3927](https://github.com/zellij-org/zellij/issues/3927),
+open as of 0.4x). For the tab bar (always layout-loaded) this means a stray
+content pane, not a refreshed bar.
+
+So the `start-or-reload-plugin` advice in #6 applies **only to plugins you
+loaded into a pane yourself** (ad-hoc `zellij plugin --` / `new-pane
+--plugin` during dev). To pick up a new build of the *bar*, there is no
+in-place reload — **start a fresh session** (with `file:` the local wasm is
+re-read from disk at server start, so the fresh session has the new build;
+see #13). Don't put `start-or-reload-plugin` in user-facing update docs for a
+template-loaded plugin — it sends users into a duplicated-pane recovery path.

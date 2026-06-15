@@ -23,6 +23,13 @@ use config::Config;
 /// the minimap renders 2 vertical pixels per text row → a 6px-tall canvas.
 const ROWS: usize = 3;
 
+/// The fewest text rows the bar can legibly fill. The minimap renders 2 pixel
+/// rows per text row, so 3 rows is the floor for a 6px canvas that fits a
+/// minimap plus labels. zellij assigns the row count from the layout's
+/// `pane size=N`; given fewer, `render` draws nothing rather than emit a
+/// clipped block.
+const MIN_ROWS: usize = 3;
+
 /// Plugin state: parsed configuration plus the most recent tab and pane
 /// snapshots from zellij, and the theme-derived color palette.
 #[derive(Default)]
@@ -193,13 +200,20 @@ impl ZellijPlugin for State {
         }
     }
 
-    fn render(&mut self, _rows: usize, cols: usize) {
+    fn render(&mut self, rows: usize, cols: usize) {
         // Reset the click geometry up front. If this frame bails out before
-        // drawing — no permission yet, or no active tab mid-transition — a click
-        // must find no spans to resolve against rather than the previous frame's
-        // stale ones. The success path repopulates it at the end.
+        // drawing — no permission yet, no active tab mid-transition, or too few
+        // rows to draw — a click must find no spans to resolve against rather
+        // than the previous frame's stale ones. The success path repopulates it
+        // at the end.
         self.tab_layout.clear();
         if !self.permitted {
+            return;
+        }
+        // zellij hands us the row count from the layout's `pane size=N`. Below
+        // the floor the bar can't be drawn legibly, so render nothing rather
+        // than clip a block into too little height.
+        if rows < MIN_ROWS {
             return;
         }
         let Some(active_position) = projection::active_tab(&self.tabs).map(|tab| tab.position)
@@ -549,6 +563,37 @@ mod tests {
         assert!(
             state.tab_layout.is_empty(),
             "a frame that cannot draw leaves no stale click geometry"
+        );
+    }
+
+    #[test]
+    fn render_draws_nothing_below_the_minimum_row_count() {
+        // zellij assigns the row count from the layout's `pane size=N`, which can
+        // be fewer than the bar needs. The half-block canvas needs `MIN_ROWS`
+        // text rows to be legible, so a shorter bar renders nothing — proven here
+        // by the click geometry staying empty even though permission is granted
+        // and an active tab exists (the row count is the only thing withholding
+        // the draw).
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![TabInfo {
+            position: 0,
+            active: true,
+            ..Default::default()
+        }];
+
+        state.render(MIN_ROWS - 1, 80);
+        assert!(
+            state.tab_layout.is_empty(),
+            "a bar with too few rows draws nothing and records no click geometry"
+        );
+
+        // Contrast: at the floor the very same state draws and records its spans,
+        // so the empty result above is the row guard, not a setup miss.
+        state.render(MIN_ROWS, 80);
+        assert!(
+            !state.tab_layout.is_empty(),
+            "at the minimum row count the bar draws and records click geometry"
         );
     }
 

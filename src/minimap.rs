@@ -942,6 +942,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn long_titles_truncate_and_never_overflow_the_block() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // Long titles — ASCII or fullwidth CJK — are summarized to fit and must
+        // never push a cell past the block. The guarantee: every rendered text
+        // row keeps an exact total display width of `pw`, whatever the title
+        // length or per-glyph width (a fullwidth glyph claims a glyph cell plus
+        // an empty continuation cell, and a wide glyph that would straddle the
+        // right edge is dropped wholesale). This is the bias scenario (a
+        // top/bottom split with a badge), where the new centering arithmetic
+        // runs.
+        let width = 20;
+        for title in [
+            "a-really-long-server-process-name-that-overflows",
+            "サーバープロセスのとても長い名前",
+        ] {
+            let panes = vec![
+                PaneRect::new(0, 0, 0, 100, 20, title, false),
+                PaneRect::new(1, 0, 20, 100, 20, "bot", true),
+            ];
+            let out = render(
+                &panes,
+                &test_palette(),
+                width,
+                3,
+                LabelMode::All,
+                Some("F1"),
+                GradientMode::Off,
+                true,
+            );
+            for line in visible_lines(&out) {
+                let w: usize = line.chars().filter_map(UnicodeWidthChar::width).sum();
+                assert_eq!(
+                    w, width,
+                    "row display width must equal the block width for {title:?}, got {w} in {line:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// The visible text of each output line with CSI escape sequences
     /// stripped — what the terminal would actually show, glyph by glyph.
     fn visible_lines(out: &str) -> Vec<String> {

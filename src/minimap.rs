@@ -263,6 +263,37 @@ pub fn render(
     let mut overlay = vec![None::<OverlayCell>; text_rows * pw]; // label cells
     let mut bounds = Vec::with_capacity(panes.len()); // (px0, px1) per pane
 
+    // The shortcut badge occupies the top text row's left cells, after a
+    // one-cell margin, drawn over the underlying cell color — the pane fill, or
+    // the focus ring where it sits on a focused pane's outline — so it reads
+    // inside the block, integrating with the ring rather than punching a
+    // fill-colored hole in it. It is dropped wholesale when it would not fit
+    // within the width. Computed before the pane loop so a label biased onto the
+    // badge row (#65) can clear the badge's columns.
+    const BADGE_COL: usize = 1;
+    // Stamping is by display column (#57): each badge glyph claims its leading
+    // cell (`Some`) plus one `None` continuation cell per extra column it
+    // spans, mirroring the label overlay in the pane loop below — `shortcut_prefix`
+    // is user-configurable, so a fullwidth glyph must advance two cells to stay
+    // in lockstep with the terminal's advance. Zero-width chars are skipped.
+    // Fitting is judged on the resulting per-column length; a badge wider than
+    // the block is dropped wholesale rather than split mid-glyph.
+    let badge_cells: Vec<Option<char>> = badge
+        .map(|text| {
+            text.chars()
+                .filter_map(|ch| {
+                    UnicodeWidthChar::width(ch)
+                        .filter(|w| *w >= 1)
+                        .map(|w| (ch, w))
+                })
+                .flat_map(|(ch, w)| {
+                    std::iter::once(Some(ch)).chain(std::iter::repeat_n(None, w - 1))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let badge_fits = !badge_cells.is_empty() && BADGE_COL + badge_cells.len() <= pw;
+
     for (i, p) in panes.iter().enumerate() {
         let px0 = map(p.x, minx, bw, pw).min(pw);
         let mut px1 = map(p.x + p.w, minx, bw, pw).min(pw);
@@ -322,6 +353,34 @@ pub fn render(
         };
         if want_label && cw >= 4 && cell_text_rows >= 2 && inner >= 2 {
             let label = crate::title::summarize(&p.title, inner, false);
+            let label_width = crate::title::charwise_width(&label);
+            // Row selection. A text-row label paints both half-block pixels of
+            // its cell with this pane's fill, so the centered choice (`mid`) can
+            // bleed: for a pane spanning exactly two text rows it is the lower
+            // row, whose bottom pixel (`2*mid+1`) belongs to the pane below when
+            // the region ends on an odd pixel boundary. Bias up to the pane's
+            // first text row (`trow0`) in that case — it is wholly owned (its top
+            // pixel is inside the pane, guaranteed by `2*trow0 >= py0`), so the
+            // label sits clear of the boundary. For a top-of-split pane this is
+            // row 0 (#65). The taller side of an asymmetric split (lower row
+            // fully owned) and any pane spanning ≥3 text rows are unaffected.
+            let mid = trow0 + cell_text_rows / 2;
+            let bias_up = cell_text_rows == 2 && 2 * mid + 1 >= py1 && 2 * trow0 >= py0;
+            let hi = px1.saturating_sub(1);
+            // When the bias lands on text row 0 (`mid >= 1`, so only the bias
+            // reaches it) the shortcut badge holds that row's left cells, so the
+            // label must start no earlier than one gap past it.
+            let badge_clear = BADGE_COL + badge_cells.len() + 1;
+            let dodge = bias_up && trow0 == 0 && badge_fits;
+            // Bias up only when the label then still fits to the right of the
+            // badge; otherwise keep the centered lower row, accepting the
+            // documented downward bleed rather than fragmenting the label
+            // against the badge.
+            let row = if bias_up && (!dodge || badge_clear + label_width <= hi) {
+                trow0
+            } else {
+                mid
+            };
             // Placement is by display column (#57): the label is centered by
             // its display width and each glyph claims one cell per column it
             // spans (see [`OverlayCell`]), so a CJK rename overlays like any
@@ -330,12 +389,18 @@ pub fn render(
             // than the overlay claimed — so width is priced per char
             // ([`crate::title::charwise_width`]) to match what is emitted.
             // `summarize` budgets with the same pricing, so the label always
-            // fits `inner` and the edge guard below only defends against a
-            // wide glyph straddling the region's right border.
-            let label_width = crate::title::charwise_width(&label);
-            let row = trow0 + cell_text_rows / 2;
+            // fits `inner` and the edge guard below only defends against a wide
+            // glyph straddling the region's right border.
             if label_width >= 1 && row < text_rows {
-                let start = px0 + 1 + (inner - label_width) / 2;
+                // Center on the pane's full inner width, then nudge right only
+                // as far as the badge forces — a wide pane reads centered and
+                // only a tight one shifts off-center (#65 follow-up).
+                let centered = px0 + 1 + inner.saturating_sub(label_width) / 2;
+                let start = if row == 0 && badge_fits {
+                    centered.max(badge_clear)
+                } else {
+                    centered
+                };
                 label
                     .chars()
                     .filter_map(|ch| {
@@ -358,36 +423,6 @@ pub fn render(
             }
         }
     }
-
-    // The shortcut badge occupies the top text row's left cells, after a
-    // one-cell margin, drawn over the underlying cell color — the pane fill, or
-    // the focus ring where it sits on a focused pane's outline — so it reads
-    // inside the block, integrating with the ring rather than punching a
-    // fill-colored hole in it. It is dropped wholesale when it would not fit
-    // within the width.
-    const BADGE_COL: usize = 1;
-    // Stamping is by display column (#57): each badge glyph claims its leading
-    // cell (`Some`) plus one `None` continuation cell per extra column it
-    // spans, mirroring the label overlay above — `shortcut_prefix` is
-    // user-configurable, so a fullwidth glyph must advance two cells to stay
-    // in lockstep with the terminal's advance. Zero-width chars are skipped.
-    // Fitting is judged on the resulting per-column length; a badge wider than
-    // the block is dropped wholesale rather than split mid-glyph.
-    let badge_cells: Vec<Option<char>> = badge
-        .map(|text| {
-            text.chars()
-                .filter_map(|ch| {
-                    UnicodeWidthChar::width(ch)
-                        .filter(|w| *w >= 1)
-                        .map(|w| (ch, w))
-                })
-                .flat_map(|(ch, w)| {
-                    std::iter::once(Some(ch)).chain(std::iter::repeat_n(None, w - 1))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let badge_fits = !badge_cells.is_empty() && BADGE_COL + badge_cells.len() <= pw;
 
     let mut out = String::with_capacity(text_rows * pw * 24);
     for tr in 0..text_rows {
@@ -774,6 +809,178 @@ mod tests {
             !out.contains('v'),
             "the shorter pane (1 text row) drops its label"
         );
+    }
+
+    #[test]
+    fn top_split_label_biases_to_the_first_row_and_clears_the_badge() {
+        // A top/bottom split: the top pane spans pixel rows 0..3 (text row 0
+        // wholly, plus the upper pixel of text row 1). The centered choice would
+        // put its label on text row 1, whose lower pixel belongs to the bottom
+        // pane — the downward bleed. It must instead land on text row 0, leaving
+        // the shared middle row clean. With room to spare the label stays
+        // centered on the pane's full width (it already clears the badge, so no
+        // rightward nudge): `top` lands at cols 5..8 of a 14-wide block, not
+        // pushed up against the badge. The bottom pane keeps its label on the
+        // row it fully owns (#65).
+        let panes = vec![
+            PaneRect::new(0, 0, 0, 100, 20, "top", false),
+            PaneRect::new(1, 0, 20, 100, 20, "bot", true),
+        ];
+        let out = render(
+            &panes,
+            &test_palette(),
+            14,
+            3,
+            LabelMode::All,
+            Some("F1"),
+            GradientMode::Off,
+            true,
+        );
+        let lines = visible_lines(&out);
+        assert_eq!(
+            lines[0], "▀F1▀▀top▀▀▀▀▀▀",
+            "top label belongs on the first row, centered clear of the badge, got {lines:?}"
+        );
+        assert!(
+            !lines[1].contains("top"),
+            "the label must not bleed onto the shared middle row, got {lines:?}"
+        );
+        assert!(
+            lines[2].contains("bot"),
+            "the bottom pane keeps its label on its owned row, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn top_split_label_biases_to_the_first_row_without_a_badge() {
+        // Same bias with no badge: the top label still moves to text row 0 (the
+        // bias is about avoiding the bleed, not merely dodging the badge) and,
+        // with the row free, centers across the full inner width.
+        let panes = vec![
+            PaneRect::new(0, 0, 0, 100, 20, "top", false),
+            PaneRect::new(1, 0, 20, 100, 20, "bot", true),
+        ];
+        let out = render(
+            &panes,
+            &test_palette(),
+            14,
+            3,
+            LabelMode::All,
+            None,
+            GradientMode::Off,
+            true,
+        );
+        let lines = visible_lines(&out);
+        assert_eq!(
+            lines[0], "▀▀▀▀▀top▀▀▀▀▀▀",
+            "top label centers on the first row when no badge contends, got {lines:?}"
+        );
+        assert!(
+            !lines[1].contains("top"),
+            "the label must not bleed onto the shared middle row, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn biased_top_label_falls_back_below_the_badge_when_too_narrow() {
+        // When the block is too narrow to host both the badge and the label on
+        // the first row, the label drops back to the centered lower row — the
+        // documented bleed — rather than fragmenting against the badge. Here the
+        // 5-col block leaves no room beside the 2-col badge, so the single-char
+        // label lands on text row 1 instead of row 0.
+        let panes = vec![
+            PaneRect::new(0, 0, 0, 100, 20, "x", false),
+            PaneRect::new(1, 0, 20, 100, 20, "bot", true),
+        ];
+        let out = render(
+            &panes,
+            &test_palette(),
+            5,
+            3,
+            LabelMode::All,
+            Some("F1"),
+            GradientMode::Off,
+            true,
+        );
+        let lines = visible_lines(&out);
+        assert!(
+            lines[0].contains('F') && !lines[0].contains('x'),
+            "the badge holds the first row; the label cannot fit beside it, got {lines:?}"
+        );
+        assert!(
+            lines[1].contains('x'),
+            "the label falls back to the centered lower row, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn biased_top_label_nudges_right_only_far_enough_to_clear_the_badge() {
+        // When the full-width centered position would overlap the badge, the
+        // label shifts right by just enough to clear it — not all the way into a
+        // re-centered remaining window. In a 10-wide block the 3-char label
+        // centers at col 3, which collides with the 2-col badge (occupying cols
+        // 1..3); it nudges one cell to col 4 (badge end + one gap), landing at
+        // `▀F1▀abc▀▀▀` rather than the further-right `▀F1▀▀abc▀▀`.
+        let panes = vec![
+            PaneRect::new(0, 0, 0, 100, 20, "abc", false),
+            PaneRect::new(1, 0, 20, 100, 20, "bot", true),
+        ];
+        let out = render(
+            &panes,
+            &test_palette(),
+            10,
+            3,
+            LabelMode::All,
+            Some("F1"),
+            GradientMode::Off,
+            true,
+        );
+        let lines = visible_lines(&out);
+        assert_eq!(
+            lines[0], "▀F1▀abc▀▀▀",
+            "the label nudges right only to clear the badge, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn long_titles_truncate_and_never_overflow_the_block() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // Long titles — ASCII or fullwidth CJK — are summarized to fit and must
+        // never push a cell past the block. The guarantee: every rendered text
+        // row keeps an exact total display width of `pw`, whatever the title
+        // length or per-glyph width (a fullwidth glyph claims a glyph cell plus
+        // an empty continuation cell, and a wide glyph that would straddle the
+        // right edge is dropped wholesale). This is the bias scenario (a
+        // top/bottom split with a badge), where the new centering arithmetic
+        // runs.
+        let width = 20;
+        for title in [
+            "a-really-long-server-process-name-that-overflows",
+            "サーバープロセスのとても長い名前",
+        ] {
+            let panes = vec![
+                PaneRect::new(0, 0, 0, 100, 20, title, false),
+                PaneRect::new(1, 0, 20, 100, 20, "bot", true),
+            ];
+            let out = render(
+                &panes,
+                &test_palette(),
+                width,
+                3,
+                LabelMode::All,
+                Some("F1"),
+                GradientMode::Off,
+                true,
+            );
+            for line in visible_lines(&out) {
+                let w: usize = line.chars().filter_map(UnicodeWidthChar::width).sum();
+                assert_eq!(
+                    w, width,
+                    "row display width must equal the block width for {title:?}, got {w} in {line:?}"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// The visible text of each output line with CSI escape sequences

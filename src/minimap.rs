@@ -366,25 +366,20 @@ pub fn render(
             // fully owned) and any pane spanning ≥3 text rows are unaffected.
             let mid = trow0 + cell_text_rows / 2;
             let bias_up = cell_text_rows == 2 && 2 * mid + 1 >= py1 && 2 * trow0 >= py0;
-            let row = if bias_up { trow0 } else { mid };
-            // Horizontal window for the label, normally the inner span
-            // `[px0+1, px1-1)`. The badge row (only ever reached via the bias
-            // above, since `mid >= 1`) has the shortcut badge on its left cells,
-            // so clear past the badge plus a one-cell gap. If the label then no
-            // longer fits, fall back to the centered lower row, accepting the
+            let hi = px1.saturating_sub(1);
+            // When the bias lands on text row 0 (`mid >= 1`, so only the bias
+            // reaches it) the shortcut badge holds that row's left cells, so the
+            // label must start no earlier than one gap past it.
+            let badge_clear = BADGE_COL + badge_cells.len() + 1;
+            let dodge = bias_up && trow0 == 0 && badge_fits;
+            // Bias up only when the label then still fits to the right of the
+            // badge; otherwise keep the centered lower row, accepting the
             // documented downward bleed rather than fragmenting the label
             // against the badge.
-            let dodge = row == 0 && badge_fits;
-            let lo = if dodge {
-                (BADGE_COL + badge_cells.len() + 1).max(px0 + 1)
+            let row = if bias_up && (!dodge || badge_clear + label_width <= hi) {
+                trow0
             } else {
-                px0 + 1
-            };
-            let hi = px1.saturating_sub(1);
-            let (row, lo, win) = if dodge && hi.saturating_sub(lo) < label_width {
-                (mid, px0 + 1, inner)
-            } else {
-                (row, lo, hi.saturating_sub(lo))
+                mid
             };
             // Placement is by display column (#57): the label is centered by
             // its display width and each glyph claims one cell per column it
@@ -394,10 +389,18 @@ pub fn render(
             // than the overlay claimed — so width is priced per char
             // ([`crate::title::charwise_width`]) to match what is emitted.
             // `summarize` budgets with the same pricing, so the label always
-            // fits the window and the edge guard below only defends against a
-            // wide glyph straddling the region's right border.
+            // fits `inner` and the edge guard below only defends against a wide
+            // glyph straddling the region's right border.
             if label_width >= 1 && row < text_rows {
-                let start = lo + (win - label_width) / 2;
+                // Center on the pane's full inner width, then nudge right only
+                // as far as the badge forces — a wide pane reads centered and
+                // only a tight one shifts off-center (#65 follow-up).
+                let centered = px0 + 1 + inner.saturating_sub(label_width) / 2;
+                let start = if row == 0 && badge_fits {
+                    centered.max(badge_clear)
+                } else {
+                    centered
+                };
                 label
                     .chars()
                     .filter_map(|ch| {
@@ -813,9 +816,12 @@ mod tests {
         // A top/bottom split: the top pane spans pixel rows 0..3 (text row 0
         // wholly, plus the upper pixel of text row 1). The centered choice would
         // put its label on text row 1, whose lower pixel belongs to the bottom
-        // pane — the downward bleed. It must instead land on text row 0, offset
-        // past the shortcut badge in the top-left, leaving the shared middle row
-        // clean. The bottom pane keeps its label on the row it fully owns (#65).
+        // pane — the downward bleed. It must instead land on text row 0, leaving
+        // the shared middle row clean. With room to spare the label stays
+        // centered on the pane's full width (it already clears the badge, so no
+        // rightward nudge): `top` lands at cols 5..8 of a 14-wide block, not
+        // pushed up against the badge. The bottom pane keeps its label on the
+        // row it fully owns (#65).
         let panes = vec![
             PaneRect::new(0, 0, 0, 100, 20, "top", false),
             PaneRect::new(1, 0, 20, 100, 20, "bot", true),
@@ -832,8 +838,8 @@ mod tests {
         );
         let lines = visible_lines(&out);
         assert_eq!(
-            lines[0], "▀F1▀▀▀▀top▀▀▀▀",
-            "top label belongs on the first row, offset clear of the badge, got {lines:?}"
+            lines[0], "▀F1▀▀top▀▀▀▀▀▀",
+            "top label belongs on the first row, centered clear of the badge, got {lines:?}"
         );
         assert!(
             !lines[1].contains("top"),
@@ -904,6 +910,35 @@ mod tests {
         assert!(
             lines[1].contains('x'),
             "the label falls back to the centered lower row, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn biased_top_label_nudges_right_only_far_enough_to_clear_the_badge() {
+        // When the full-width centered position would overlap the badge, the
+        // label shifts right by just enough to clear it — not all the way into a
+        // re-centered remaining window. In a 10-wide block the 3-char label
+        // centers at col 3, which collides with the 2-col badge (occupying cols
+        // 1..3); it nudges one cell to col 4 (badge end + one gap), landing at
+        // `▀F1▀abc▀▀▀` rather than the further-right `▀F1▀▀abc▀▀`.
+        let panes = vec![
+            PaneRect::new(0, 0, 0, 100, 20, "abc", false),
+            PaneRect::new(1, 0, 20, 100, 20, "bot", true),
+        ];
+        let out = render(
+            &panes,
+            &test_palette(),
+            10,
+            3,
+            LabelMode::All,
+            Some("F1"),
+            GradientMode::Off,
+            true,
+        );
+        let lines = visible_lines(&out);
+        assert_eq!(
+            lines[0], "▀F1▀abc▀▀▀",
+            "the label nudges right only to clear the badge, got {lines:?}"
         );
     }
 

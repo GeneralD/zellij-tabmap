@@ -1,8 +1,8 @@
-//! Per-tab compositor — assemble one tab into a fixed three-row block of an
-//! exact budgeted width.
+//! Per-tab compositor — assemble one tab into a block of an exact budgeted
+//! width and a caller-chosen row height.
 //!
 //! [`crate::line::pack`] hands each tab a column budget; this module turns that
-//! budget plus the tab's panes into three rendered rows via the L0–L4
+//! budget plus the tab's panes into `rows` rendered rows via the L0–L4
 //! degradation ladder (design §4.3). The detail shown is a pure function of the
 //! budgeted width:
 //!
@@ -17,7 +17,7 @@
 //! Pixel work for the grid rungs (L0–L2) is delegated to
 //! [`crate::minimap::render`] with the matching [`LabelMode`]; this module only
 //! selects the rung, draws the L3 glyph and L4 hint, and guarantees the
-//! three-row / exact-width contract. Per-pane label degradation (a too-narrow
+//! exact-height / exact-width contract. Per-pane label degradation (a too-narrow
 //! or too-short pane, or a deep vertical stack) is the minimap's concern and
 //! happens underneath every grid rung.
 //!
@@ -30,10 +30,6 @@
 use crate::color::{self, Palette, Rgb};
 use crate::minimap::{self, GradientMode, LabelMode, PaneRect};
 use unicode_width::UnicodeWidthChar;
-
-/// Text-row height of every tab block — the bar is pinned to three rows, a
-/// six-pixel canvas (two half-block pixels per row).
-const ROWS: usize = 3;
 
 /// Minimum width for the richest rung (L0): a wide active tab showing the color
 /// grid with a label on every pane that fits. Matches [`crate::line::ACTIVE_MIN`]
@@ -99,15 +95,16 @@ impl StyledLine {
     }
 }
 
-/// One tab rendered as a fixed three-row block of exactly `width` columns.
+/// One tab rendered as a block of exactly `width` columns and a caller-chosen
+/// number of rows.
 ///
 /// A tab is identified by its `position` (zellij's `TabInfo.position`); there is
 /// no separate stable tab id the way panes have one, and click-to-switch maps a
 /// column back to a position, so position is the whole identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabBlock {
-    /// The three rendered rows, top to bottom.
-    pub lines: [StyledLine; ROWS],
+    /// The rendered rows, top to bottom — one per requested row.
+    pub lines: Vec<StyledLine>,
     /// The budgeted display width every row fills.
     pub width: usize,
     /// 0-based tab position.
@@ -126,7 +123,7 @@ pub fn level_for(width: usize) -> Level {
     }
 }
 
-/// Assemble `panes` into a three-row block of exactly `width` columns at tab
+/// Assemble `panes` into a `rows`-tall block of exactly `width` columns at tab
 /// `position`, choosing detail via the ladder. `prefix` is the configured
 /// shortcut glyph, used only by the L4 hint rung. `gradient` is the configured
 /// fill sweep, used only by the grid rungs (L0–L2). `active` marks the bar's
@@ -134,10 +131,12 @@ pub fn level_for(width: usize) -> Level {
 /// while inactive blocks suppress the focus highlight (#59) — dimming the
 /// *inactive* blocks is the caller's concern, applied through the palette it
 /// hands in.
+#[allow(clippy::too_many_arguments)]
 pub fn assemble(
     panes: &[PaneRect],
     palette: &Palette,
     width: usize,
+    rows: usize,
     position: usize,
     prefix: &str,
     gradient: GradientMode,
@@ -156,6 +155,7 @@ pub fn assemble(
             panes,
             palette,
             width,
+            rows,
             LabelMode::All,
             badge,
             gradient,
@@ -165,6 +165,7 @@ pub fn assemble(
             panes,
             palette,
             width,
+            rows,
             LabelMode::Focused,
             badge,
             gradient,
@@ -174,13 +175,14 @@ pub fn assemble(
             panes,
             palette,
             width,
+            rows,
             LabelMode::None,
             badge,
             gradient,
             active,
         ),
-        Level::L3 => glyph_lines(panes, width, active),
-        Level::L4 => hint_lines(position, prefix, width, active),
+        Level::L3 => glyph_lines(panes, width, rows, active),
+        Level::L4 => hint_lines(position, prefix, width, rows, active),
     };
     TabBlock {
         lines,
@@ -213,35 +215,46 @@ fn grid_lines(
     panes: &[PaneRect],
     palette: &Palette,
     width: usize,
+    rows: usize,
     mode: LabelMode,
     badge: Option<&str>,
     gradient: GradientMode,
     active: bool,
-) -> [StyledLine; ROWS] {
-    let block = minimap::render(panes, palette, width, ROWS, mode, badge, gradient, active);
-    three_rows(block.lines().map(str::to_string), width)
+) -> Vec<StyledLine> {
+    let block = minimap::render(panes, palette, width, rows, mode, badge, gradient, active);
+    padded_rows(block.lines().map(str::to_string), width, rows)
 }
 
 /// L3: a single representative split/grid glyph centered on the canvas.
-fn glyph_lines(panes: &[PaneRect], width: usize, active: bool) -> [StyledLine; ROWS] {
+fn glyph_lines(panes: &[PaneRect], width: usize, rows: usize, active: bool) -> Vec<StyledLine> {
     let glyph = representative_glyph(panes);
-    let fg = rung_text_fg(active);
-    [
-        StyledLine(blank_row(width)),
-        StyledLine(text_row(&glyph.to_string(), fg, width)),
-        StyledLine(blank_row(width)),
-    ]
+    centered_text_block(&glyph.to_string(), rung_text_fg(active), width, rows)
 }
 
 /// L4: the shortcut hint only, fitted to the budget, centered on the canvas.
-fn hint_lines(position: usize, prefix: &str, width: usize, active: bool) -> [StyledLine; ROWS] {
+fn hint_lines(
+    position: usize,
+    prefix: &str,
+    width: usize,
+    rows: usize,
+    active: bool,
+) -> Vec<StyledLine> {
     let hint = fit_hint(position, prefix, width);
-    let fg = rung_text_fg(active);
-    [
-        StyledLine(blank_row(width)),
-        StyledLine(text_row(&hint, fg, width)),
-        StyledLine(blank_row(width)),
-    ]
+    centered_text_block(&hint, rung_text_fg(active), width, rows)
+}
+
+/// A `rows`-tall, `width`-wide background canvas with `text` (drawn in `fg`) on
+/// the vertical-center row and every other row blank. Shared by the narrow rungs
+/// (L3 glyph, L4 hint), whose single text element rides the middle row — the
+/// same row [`crate::paint::compose`] homes the overflow markers on.
+fn centered_text_block(text: &str, fg: Rgb, width: usize, rows: usize) -> Vec<StyledLine> {
+    let middle = rows / 2;
+    (0..rows)
+        .map(|row| match row == middle {
+            true => StyledLine(text_row(text, fg, width)),
+            false => StyledLine(blank_row(width)),
+        })
+        .collect()
 }
 
 /// Text color of the narrow rungs (L3 glyph, L4 hint) (#59): the active tab's
@@ -298,15 +311,19 @@ fn representative_glyph(panes: &[PaneRect]) -> char {
 
 // ---- styled-row primitives ----------------------------------------------
 
-/// Collect up to three rendered rows, backfilling any short of three with a
-/// blank canvas row so the `[_; ROWS]` contract always holds.
-fn three_rows(mut rows: impl Iterator<Item = String>, width: usize) -> [StyledLine; ROWS] {
-    let blank = || StyledLine(blank_row(width));
-    [
-        rows.next().map(StyledLine).unwrap_or_else(blank),
-        rows.next().map(StyledLine).unwrap_or_else(blank),
-        rows.next().map(StyledLine).unwrap_or_else(blank),
-    ]
+/// Collect exactly `count` rendered rows: take the rendered ones in order and
+/// backfill any shortfall with blank canvas rows (and drop any excess) so the
+/// block's height always matches the budget. The minimap yields one row per
+/// requested text row, so the backfill is a defensive belt, not the normal path.
+fn padded_rows(rows: impl Iterator<Item = String>, width: usize, count: usize) -> Vec<StyledLine> {
+    rows.map(Some)
+        .chain(std::iter::repeat(None))
+        .take(count)
+        .map(|row| {
+            row.map(StyledLine)
+                .unwrap_or_else(|| StyledLine(blank_row(width)))
+        })
+        .collect()
 }
 
 /// A full-width row of background half-blocks — the empty canvas.
@@ -494,27 +511,36 @@ mod tests {
     }
 
     #[test]
-    fn block_is_always_three_rows() {
+    fn block_fills_every_requested_row() {
         let palette = test_palette();
-        // The `[_; ROWS]` type already guarantees the *count*; this guards the
-        // *content* — every rung must fill all three rows with rendered bytes
-        // rather than leave one blank. Sweep one width per rung plus the
-        // degenerate zero.
-        for width in [0, 2, 4, 7, 12, 24] {
-            let block = assemble(
-                &one_pane("cargo"),
-                &palette,
-                width,
-                0,
-                "\u{2318}",
-                GradientMode::Off,
-                false,
-            );
-            for (row, line) in block.lines.iter().enumerate() {
-                assert!(
-                    !line.as_str().is_empty(),
-                    "width {width}, row {row}: row must carry rendered bytes, not be blank"
+        // The block must own exactly the rows it is asked for — `MIN_ROWS` (3)
+        // and taller (#66 step 2 makes the height runtime, no longer a fixed 3) —
+        // and every rung must fill each of them with rendered bytes rather than
+        // leave one blank. Sweep one width per rung plus the degenerate zero,
+        // across a range of row counts.
+        for rows in [3, 4, 5, 6] {
+            for width in [0, 2, 4, 7, 12, 24] {
+                let block = assemble(
+                    &one_pane("cargo"),
+                    &palette,
+                    width,
+                    rows,
+                    0,
+                    "\u{2318}",
+                    GradientMode::Off,
+                    false,
                 );
+                assert_eq!(
+                    block.lines.len(),
+                    rows,
+                    "rows {rows}, width {width}: the block must have exactly the requested height"
+                );
+                for (row, line) in block.lines.iter().enumerate() {
+                    assert!(
+                        !line.as_str().is_empty(),
+                        "rows {rows}, width {width}, row {row}: row must carry rendered bytes, not be blank"
+                    );
+                }
             }
         }
     }
@@ -546,24 +572,29 @@ mod tests {
             ),
             ("cjk title", one_pane("\u{5b9f}\u{88c5}\u{4e2d}")), // 実装中
         ];
-        // One width per rung, plus boundaries, plus the degenerate zero.
-        for (name, panes) in &layouts {
-            for width in [0, 1, 2, 3, 4, 5, 9, 10, 15, 16, 20, 24] {
-                let block = assemble(
-                    panes,
-                    &palette,
-                    width,
-                    3,
-                    "\u{2318}",
-                    GradientMode::Off,
-                    false,
-                );
-                for (row, line) in block.lines.iter().enumerate() {
-                    assert_eq!(
-                        measured(line),
+        // One width per rung, plus boundaries, plus the degenerate zero — and
+        // across a range of heights, since #66 makes the row count runtime and a
+        // taller block renders more rows that must each still fill the budget.
+        for rows in [3, 4, 5, 6] {
+            for (name, panes) in &layouts {
+                for width in [0, 1, 2, 3, 4, 5, 9, 10, 15, 16, 20, 24] {
+                    let block = assemble(
+                        panes,
+                        &palette,
                         width,
-                        "layout {name:?}, width {width}, row {row}: display width must equal the budget"
+                        rows,
+                        3,
+                        "\u{2318}",
+                        GradientMode::Off,
+                        false,
                     );
+                    for (row, line) in block.lines.iter().enumerate() {
+                        assert_eq!(
+                            measured(line),
+                            width,
+                            "rows {rows}, layout {name:?}, width {width}, row {row}: display width must equal the budget"
+                        );
+                    }
                 }
             }
         }
@@ -598,6 +629,7 @@ mod tests {
             &one_pane("x"),
             &palette,
             2,
+            3,
             2,
             "Cmd+",
             GradientMode::Off,
@@ -622,6 +654,7 @@ mod tests {
             &one_pane("x"),
             &palette,
             1,
+            3,
             9,
             "Cmd+",
             GradientMode::Off,
@@ -650,6 +683,7 @@ mod tests {
             &panes,
             &test_palette(),
             20,
+            3,
             0,
             "\u{2318}",
             GradientMode::Off,
@@ -678,6 +712,7 @@ mod tests {
             &panes,
             &test_palette(),
             12,
+            3,
             0,
             "\u{2318}",
             GradientMode::Off,
@@ -705,6 +740,7 @@ mod tests {
             &one_pane("shell"),
             &palette,
             16,
+            3,
             0,
             "\u{2318}",
             GradientMode::Off,
@@ -728,6 +764,7 @@ mod tests {
                 &vec![PaneRect::new(0, 0, 0, 100, 40, "shell", false)],
                 &palette,
                 16,
+                3,
                 0,
                 "\u{2318}",
                 GradientMode::Off,
@@ -797,6 +834,7 @@ mod tests {
                     &one_pane("x"),
                     &palette,
                     width,
+                    3,
                     0,
                     "\u{2318}",
                     GradientMode::Off,
@@ -829,6 +867,7 @@ mod tests {
                 &panes,
                 &palette,
                 width,
+                3,
                 1,
                 "\u{2318}",
                 GradientMode::Off,
@@ -838,6 +877,7 @@ mod tests {
                 &panes,
                 &palette,
                 width,
+                3,
                 1,
                 "\u{2318}",
                 GradientMode::Off,
@@ -865,6 +905,7 @@ mod tests {
                 &forward,
                 &palette,
                 width,
+                3,
                 1,
                 "\u{2318}",
                 GradientMode::Off,
@@ -874,6 +915,7 @@ mod tests {
                 &reversed,
                 &palette,
                 width,
+                3,
                 1,
                 "\u{2318}",
                 GradientMode::Off,

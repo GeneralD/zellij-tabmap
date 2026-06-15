@@ -19,15 +19,11 @@ use zellij_tile::prelude::*;
 
 use config::Config;
 
-/// Text-row height of the bar. The layout pins the plugin pane to `size=3`, and
-/// the minimap renders 2 vertical pixels per text row → a 6px-tall canvas.
-const ROWS: usize = 3;
-
 /// The fewest text rows the bar can legibly fill. The minimap renders 2 pixel
 /// rows per text row, so 3 rows is the floor for a 6px canvas that fits a
 /// minimap plus labels. zellij assigns the row count from the layout's
-/// `pane size=N`; given fewer, `render` draws nothing rather than emit a
-/// clipped block.
+/// `pane size=N` and the bar grows to fill whatever it is handed; given fewer
+/// than this floor, `render` draws nothing rather than emit a clipped block.
 const MIN_ROWS: usize = 3;
 
 /// Plugin state: parsed configuration plus the most recent tab and pane
@@ -259,7 +255,7 @@ impl ZellijPlugin for State {
         print!(
             "{}",
             paint::bar(
-                ROWS,
+                rows,
                 &layout,
                 &panes_by_position,
                 &self.palette,
@@ -558,7 +554,7 @@ mod tests {
             active: true,
         }];
 
-        state.render(ROWS, 80);
+        state.render(MIN_ROWS, 80);
 
         assert!(
             state.tab_layout.is_empty(),
@@ -932,7 +928,7 @@ mod tests {
             vec![content_pane(0, 1, 40, 24), content_pane(40, 1, 40, 24)],
         );
 
-        state.render(ROWS, 80);
+        state.render(MIN_ROWS, 80);
 
         assert!(!state.tab_layout.is_empty(), "the frame records its spans");
         assert!(
@@ -951,7 +947,7 @@ mod tests {
         state.tabs = vec![tab(0, 1)];
         state.tab_layout = five_block_layout();
 
-        state.render(ROWS, 80);
+        state.render(MIN_ROWS, 80);
 
         assert!(state.tab_layout.is_empty());
     }

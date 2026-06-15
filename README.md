@@ -14,10 +14,6 @@
   <img src="https://img.shields.io/badge/open%20source-%E2%9D%A4-red" alt="Open Source">
 </p>
 
-<p align="center">
-  <a href="https://codecov.io/gh/GeneralD/zellij-tabmap"><img src="https://codecov.io/gh/GeneralD/zellij-tabmap/graphs/tree.svg?token=blGigRjQcZ" alt="Coverage Tree" width="400"></a>
-</p>
-
 # zellij-tabmap
 
 A [zellij](https://zellij.dev) plugin that replaces the thin one-row tab bar with a **taller, multi-row tab bar** in which every tab is drawn as a **color-coded minimap of its own pane layout** — a tiny pixel-grid thumbnail of how that tab's terminal is split. Panes are identified by color; where a tab is wide enough, a summarized title is overlaid; the `⌘N` switch hint is shown per tab.

@@ -33,6 +33,7 @@ use crate::tab_block::{self, TabBlock};
 ///
 /// The `← +N` / `+N →` overflow markers are placed at their own columns on the
 /// middle row.
+#[allow(clippy::too_many_arguments)]
 pub fn bar(
     rows: usize,
     layout: &LineLayout,
@@ -41,6 +42,7 @@ pub fn bar(
     prefix: &str,
     gradient: GradientMode,
     inactive_dim: bool,
+    perspective: bool,
 ) -> String {
     // #59: inactive tabs render through the canvas-receded palette while the
     // active tab keeps full vibrancy, so the selected tab reads at a glance.
@@ -68,6 +70,7 @@ pub fn bar(
                 prefix,
                 gradient,
                 hit.active,
+                perspective,
             )
         })
         .collect();
@@ -273,6 +276,7 @@ mod tests {
             "\u{2318}",
             GradientMode::Off,
             false,
+            false,
         );
         for row in 1..=3 {
             assert!(
@@ -299,6 +303,7 @@ mod tests {
             &Palette::default(),
             "\u{2318}",
             GradientMode::Off,
+            false,
             false,
         );
         assert!(out.contains("\u{2318}4"), "position 3 → ⌘4");
@@ -332,6 +337,7 @@ mod tests {
             &Palette::default(),
             "\u{2318}",
             GradientMode::Off,
+            false,
             false,
         );
         assert!(
@@ -384,6 +390,7 @@ mod tests {
             "\u{2318}",
             GradientMode::Off,
             true,
+            false,
         );
         assert!(
             out.contains(&fg(palette.color_for(0))),
@@ -420,6 +427,7 @@ mod tests {
             "\u{2318}",
             GradientMode::Off,
             false,
+            false,
         );
         assert!(
             out.contains(&fg(palette.color_for(1))),
@@ -453,6 +461,7 @@ mod tests {
             &Palette::default(),
             "\u{2318}",
             GradientMode::Off,
+            false,
             false,
         );
         // Middle row (row 2): left marker at col 1, right marker at col 8.

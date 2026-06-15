@@ -262,6 +262,7 @@ impl ZellijPlugin for State {
                 &self.config.shortcut_prefix,
                 self.config.gradient,
                 self.config.inactive_dim,
+                self.config.perspective,
             )
         );
 

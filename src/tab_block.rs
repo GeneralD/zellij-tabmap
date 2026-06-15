@@ -131,6 +131,13 @@ pub fn level_for(width: usize) -> Level {
 /// while inactive blocks suppress the focus highlight (#59) — dimming the
 /// *inactive* blocks is the caller's concern, applied through the palette it
 /// hands in.
+///
+/// `perspective` is the depth cue (#66): when on **and** the bar is at least
+/// four rows tall, every *inactive* grid block recedes by one row — a half-row
+/// of background inset top and bottom — so the full-height active tab floats
+/// forward. Below four rows, or for the active tab, the block fills its full
+/// height (the historical look). The narrow rungs (L3 glyph, L4 hint) already
+/// ride a blank-framed middle row, so the cue applies only to the grid rungs.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble(
     panes: &[PaneRect],
@@ -141,7 +148,12 @@ pub fn assemble(
     prefix: &str,
     gradient: GradientMode,
     active: bool,
+    perspective: bool,
 ) -> TabBlock {
+    // Pixel rows of background to inset top and bottom of the minimap canvas: one
+    // (a half text row) for an inactive block in perspective mode at ≥4 rows,
+    // none otherwise. The minimap centers the panes in the shorter band.
+    let vinset = usize::from(perspective && rows >= 4 && !active);
     // #32: stamp the `⌘N` shortcut *inside* the color block as a top-left badge
     // (text over the block's own colors) rather than a separate gutter, so
     // the shortcut shows on comfortably-sized tabs. The minimap self-skips the
@@ -156,6 +168,7 @@ pub fn assemble(
             palette,
             width,
             rows,
+            vinset,
             LabelMode::All,
             badge,
             gradient,
@@ -166,6 +179,7 @@ pub fn assemble(
             palette,
             width,
             rows,
+            vinset,
             LabelMode::Focused,
             badge,
             gradient,
@@ -176,6 +190,7 @@ pub fn assemble(
             palette,
             width,
             rows,
+            vinset,
             LabelMode::None,
             badge,
             gradient,
@@ -216,12 +231,15 @@ fn grid_lines(
     palette: &Palette,
     width: usize,
     rows: usize,
+    vinset: usize,
     mode: LabelMode,
     badge: Option<&str>,
     gradient: GradientMode,
     active: bool,
 ) -> Vec<StyledLine> {
-    let block = minimap::render(panes, palette, width, rows, mode, badge, gradient, active);
+    let block = minimap::render(
+        panes, palette, width, rows, vinset, mode, badge, gradient, active,
+    );
     padded_rows(block.lines().map(str::to_string), width, rows)
 }
 
@@ -529,6 +547,7 @@ mod tests {
                     "\u{2318}",
                     GradientMode::Off,
                     false,
+                    false,
                 );
                 assert_eq!(
                     block.lines.len(),
@@ -587,6 +606,7 @@ mod tests {
                         "\u{2318}",
                         GradientMode::Off,
                         false,
+                        false,
                     );
                     for (row, line) in block.lines.iter().enumerate() {
                         assert_eq!(
@@ -598,6 +618,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn perspective_recedes_inactive_blocks_only_at_four_or_more_rows() {
+        // #66 step 3: perspective recedes an *inactive* grid block by a half-row
+        // top and bottom — but only once the bar is at least four rows tall.
+        // Isolate the cue by toggling it on the same inactive block: it changes
+        // a 4-row block (the recede) yet is inert at 3 rows (the gate).
+        let palette = test_palette();
+        let panes = one_pane("server");
+        let inactive = |rows, perspective| {
+            assemble(
+                &panes,
+                &palette,
+                16,
+                rows,
+                0,
+                "\u{2318}",
+                GradientMode::Off,
+                false,
+                perspective,
+            )
+            .lines
+        };
+        assert_ne!(
+            inactive(4, true),
+            inactive(4, false),
+            "perspective must recede a 4-row inactive block"
+        );
+        assert_eq!(
+            inactive(3, true),
+            inactive(3, false),
+            "perspective must be a no-op below four rows"
+        );
+    }
+
+    #[test]
+    fn perspective_leaves_the_active_block_full_height() {
+        // The active tab keeps full height under perspective — that height
+        // contrast against the receded inactive tabs *is* the depth cue — so the
+        // cue produces an identical active block whether it is on or off.
+        let palette = test_palette();
+        let panes = one_pane("server");
+        let active = |perspective| {
+            assemble(
+                &panes,
+                &palette,
+                16,
+                4,
+                0,
+                "\u{2318}",
+                GradientMode::Off,
+                true,
+                perspective,
+            )
+            .lines
+        };
+        assert_eq!(
+            active(true),
+            active(false),
+            "the active block fills full height regardless of perspective"
+        );
     }
 
     #[test]
@@ -634,6 +716,7 @@ mod tests {
             "Cmd+",
             GradientMode::Off,
             false,
+            false,
         );
         for line in &block.lines {
             assert_eq!(measured(line), 2);
@@ -658,6 +741,7 @@ mod tests {
             9,
             "Cmd+",
             GradientMode::Off,
+            false,
             false,
         );
         for line in &block.lines {
@@ -688,6 +772,7 @@ mod tests {
             "\u{2318}",
             GradientMode::Off,
             false,
+            false,
         );
         for line in &block.lines {
             for ch in ['a', 'b', 'c'] {
@@ -717,6 +802,7 @@ mod tests {
             "\u{2318}",
             GradientMode::Off,
             false,
+            false,
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(joined.contains('a'), "focused pane's label should appear");
@@ -745,6 +831,7 @@ mod tests {
             "\u{2318}",
             GradientMode::Off,
             false,
+            false,
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(
@@ -769,6 +856,7 @@ mod tests {
                 "\u{2318}",
                 GradientMode::Off,
                 active,
+                false,
             )
             .lines
             .iter()
@@ -839,6 +927,7 @@ mod tests {
                     "\u{2318}",
                     GradientMode::Off,
                     active,
+                    false,
                 )
                 .lines[1]
                     .as_str()
@@ -872,6 +961,7 @@ mod tests {
                 "\u{2318}",
                 GradientMode::Off,
                 false,
+                false,
             );
             let second = assemble(
                 &panes,
@@ -881,6 +971,7 @@ mod tests {
                 1,
                 "\u{2318}",
                 GradientMode::Off,
+                false,
                 false,
             );
             assert_eq!(first, second, "width {width} must render identically");
@@ -910,6 +1001,7 @@ mod tests {
                 "\u{2318}",
                 GradientMode::Off,
                 false,
+                false,
             );
             let b = assemble(
                 &reversed,
@@ -919,6 +1011,7 @@ mod tests {
                 1,
                 "\u{2318}",
                 GradientMode::Off,
+                false,
                 false,
             );
             assert_eq!(

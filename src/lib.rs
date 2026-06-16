@@ -208,8 +208,13 @@ impl ZellijPlugin for State {
         }
         // zellij hands us the row count from the layout's `pane size=N`. Below
         // the floor the bar can't be drawn legibly, so render nothing rather
-        // than clip a block into too little height.
+        // than clip a block into too little height. Still clear the visible rows
+        // first: zellij does not blank the pane between frames (that is why
+        // `compose` homes and erases every row), so a bail-out after a prior good
+        // frame — e.g. the terminal shrank below the floor — would otherwise leave
+        // stale tab rows lingering.
         if rows < MIN_ROWS {
+            print!("{}", paint::compose(rows, &[], &[]));
             return;
         }
         let Some(active_position) = projection::active_tab(&self.tabs).map(|tab| tab.position)

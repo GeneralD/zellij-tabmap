@@ -22,7 +22,7 @@ A [zellij](https://zellij.dev) plugin that replaces the thin one-row tab bar wit
 
 ![renderer preview](assets/demo.png)
 
-> The renderer rendered standalone in a terminal — five tabs of varied layouts (a single pane, a 2-column split, a 2×2 grid, a main+stack, and a 2-row split) drawn as color-coded pane minimaps. The active tab (`⌘3`) is **lifted forward by the perspective depth cue** while the inactive tabs recede a half-row at top and bottom; pane fills carry the **gradient sheen**, the focused pane wears its outline ring, and each tab shows its `⌘N` switch hint. Reproduce it with the [`render_demo`](examples/render_demo.rs) example. This renderer is wired into the **live** zellij tab bar, including click-to-switch — see [Status](#status).
+> The renderer rendered standalone in a terminal — five tabs of varied layouts (a single pane, a 2-column split, a 2×2 grid, a main+stack, and a 2-row split) drawn as color-coded pane minimaps. The active tab (`⌘ 3`) is **lifted forward by the perspective depth cue** while the inactive tabs recede a half-row at top and bottom; pane fills carry the **gradient sheen**, the focused pane wears its outline ring, and each tab shows its `⌘ N` switch hint. Reproduce it with the [`render_demo`](examples/render_demo.rs) example. This renderer is wired into the **live** zellij tab bar, including click-to-switch — see [Status](#status).
 
 ## Why a color half-block grid?
 

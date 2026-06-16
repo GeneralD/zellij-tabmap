@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use crate::line::Alignment;
-use crate::minimap::GradientMode;
+use crate::minimap::{GradientMode, GradientShape, GradientSpec, RadialDirection};
 
 /// Parsed plugin configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +43,19 @@ pub struct Config {
     /// — the polished out-of-the-box look; `off` restores the flat
     /// v0.1.0-style fills. See [`GradientMode`].
     pub gradient: GradientMode,
+    /// Geometry of the gradient sweep: `linear` (a straight sweep at
+    /// [`Self::gradient_angle`]) or `radial` (a circular sweep from the block's
+    /// center). Defaults to `linear`. See [`GradientShape`] (#71).
+    pub gradient_shape: GradientShape,
+    /// Linear sweep angle in degrees, `[0, 360)` — the perceived on-screen
+    /// direction: `0` left→right (the v0.5 look), `90` top→bottom, `180`
+    /// right→left, `270` bottom→top. Out-of-range or non-integer values fall
+    /// back to `0`. Ignored when `gradient_shape` is `radial` (#71).
+    pub gradient_angle: u16,
+    /// Direction of a radial sweep: `outward` (base fill at the center) or
+    /// `inward` (stop at the center). Defaults to `outward`. Ignored when
+    /// `gradient_shape` is `linear`. See [`RadialDirection`] (#71).
+    pub gradient_radial: RadialDirection,
     /// Whether inactive tabs render dimmed (receded toward the canvas) so the
     /// active tab reads selected at a glance (#59). On by default; `false`
     /// restores the equally-vivid pre-0.6 strip.
@@ -78,6 +91,14 @@ impl Config {
     /// Default gradient mode — `Sheen`, the polished out-of-the-box look.
     /// Set `off` to restore the flat v0.1.0-style fills.
     pub const DEFAULT_GRADIENT: GradientMode = GradientMode::Sheen;
+    /// Default gradient shape — `Linear`, a straight sweep. Set `radial` for a
+    /// circular sweep from each block's center (#71).
+    pub const DEFAULT_GRADIENT_SHAPE: GradientShape = GradientShape::Linear;
+    /// Default linear sweep angle — `0` degrees (left→right), preserving the
+    /// pre-#71 sheen direction byte-for-byte (#71).
+    pub const DEFAULT_GRADIENT_ANGLE: u16 = 0;
+    /// Default radial direction — `Outward`, base fill at the center (#71).
+    pub const DEFAULT_GRADIENT_RADIAL: RadialDirection = RadialDirection::Outward;
     /// Default inactive-tab dimming — on, so the active tab reads selected
     /// out of the box (#59). Set `false` to restore the equally-vivid strip.
     pub const DEFAULT_INACTIVE_DIM: bool = true;
@@ -118,6 +139,19 @@ impl Config {
                 .get("gradient")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_GRADIENT),
+            gradient_shape: configuration
+                .get("gradient_shape")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_GRADIENT_SHAPE),
+            gradient_angle: configuration
+                .get("gradient_angle")
+                .and_then(|raw| raw.parse::<u16>().ok())
+                .filter(|degrees| *degrees < 360)
+                .unwrap_or(Self::DEFAULT_GRADIENT_ANGLE),
+            gradient_radial: configuration
+                .get("gradient_radial")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_GRADIENT_RADIAL),
             inactive_dim: configuration
                 .get("inactive_dim")
                 .and_then(|raw| raw.parse().ok())
@@ -126,6 +160,17 @@ impl Config {
                 .get("perspective")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_PERSPECTIVE),
+        }
+    }
+
+    /// Bundle the gradient-related keys into the [`GradientSpec`] the renderer
+    /// consumes — mode plus its shape, angle, and radial direction (#71).
+    pub fn gradient_spec(&self) -> GradientSpec {
+        GradientSpec {
+            mode: self.gradient,
+            shape: self.gradient_shape,
+            angle: self.gradient_angle,
+            radial: self.gradient_radial,
         }
     }
 }
@@ -160,6 +205,9 @@ mod tests {
         assert!(!config.gutter);
         assert!(!config.reorder);
         assert_eq!(config.gradient, GradientMode::Sheen);
+        assert_eq!(config.gradient_shape, GradientShape::Linear);
+        assert_eq!(config.gradient_angle, 0);
+        assert_eq!(config.gradient_radial, RadialDirection::Outward);
         assert!(config.inactive_dim);
         assert!(config.perspective);
     }
@@ -216,6 +264,80 @@ mod tests {
             config_from(&[("gradient", "off")]).gradient,
             GradientMode::Off
         );
+    }
+
+    #[test]
+    fn parses_gradient_shape_and_radial_direction() {
+        let config = config_from(&[("gradient_shape", "radial"), ("gradient_radial", "inward")]);
+        assert_eq!(config.gradient_shape, GradientShape::Radial);
+        assert_eq!(config.gradient_radial, RadialDirection::Inward);
+        // Explicit linear/outward parse too.
+        let config = config_from(&[("gradient_shape", "linear"), ("gradient_radial", "outward")]);
+        assert_eq!(config.gradient_shape, GradientShape::Linear);
+        assert_eq!(config.gradient_radial, RadialDirection::Outward);
+    }
+
+    #[test]
+    fn malformed_gradient_shape_and_radial_fall_back() {
+        // Unknown / empty / wrong-case values keep the documented defaults.
+        assert_eq!(
+            config_from(&[("gradient_shape", "circle")]).gradient_shape,
+            GradientShape::Linear
+        );
+        assert_eq!(
+            config_from(&[("gradient_shape", "Radial")]).gradient_shape,
+            GradientShape::Linear
+        );
+        assert_eq!(
+            config_from(&[("gradient_radial", "out")]).gradient_radial,
+            RadialDirection::Outward
+        );
+        assert_eq!(
+            config_from(&[("gradient_radial", "")]).gradient_radial,
+            RadialDirection::Outward
+        );
+    }
+
+    #[test]
+    fn parses_gradient_angle_within_range() {
+        assert_eq!(config_from(&[("gradient_angle", "90")]).gradient_angle, 90);
+        assert_eq!(config_from(&[("gradient_angle", "45")]).gradient_angle, 45);
+        assert_eq!(config_from(&[("gradient_angle", "0")]).gradient_angle, 0);
+        // 359 is the largest in-range value; 360 is not (the range is [0, 360)).
+        assert_eq!(
+            config_from(&[("gradient_angle", "359")]).gradient_angle,
+            359
+        );
+    }
+
+    #[test]
+    fn out_of_range_or_malformed_gradient_angle_falls_back_to_zero() {
+        // 360 and beyond are out of the half-open [0, 360) range → default 0.
+        assert_eq!(config_from(&[("gradient_angle", "360")]).gradient_angle, 0);
+        assert_eq!(config_from(&[("gradient_angle", "720")]).gradient_angle, 0);
+        // Non-integer, empty, and negative values do not parse as u16 → 0.
+        assert_eq!(config_from(&[("gradient_angle", "45.5")]).gradient_angle, 0);
+        assert_eq!(
+            config_from(&[("gradient_angle", "diagonal")]).gradient_angle,
+            0
+        );
+        assert_eq!(config_from(&[("gradient_angle", "")]).gradient_angle, 0);
+        assert_eq!(config_from(&[("gradient_angle", "-90")]).gradient_angle, 0);
+    }
+
+    #[test]
+    fn gradient_spec_bundles_the_gradient_keys() {
+        let spec = config_from(&[
+            ("gradient", "weave"),
+            ("gradient_shape", "radial"),
+            ("gradient_angle", "135"),
+            ("gradient_radial", "inward"),
+        ])
+        .gradient_spec();
+        assert_eq!(spec.mode, GradientMode::Weave);
+        assert_eq!(spec.shape, GradientShape::Radial);
+        assert_eq!(spec.angle, 135);
+        assert_eq!(spec.radial, RadialDirection::Inward);
     }
 
     #[test]

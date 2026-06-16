@@ -88,7 +88,10 @@ default_tab_template {
             align "center"                              // "center" slides to keep the active tab centered; "left" anchors the row (all-fit only)
             reorder "false"                             // drag a tab to reorder; "true" also needs RunActionsAsUser
             tab_gap "2"                                 // cleared columns between tab blocks; "0" packs them flush
-            gradient "sheen"                            // pane fill sweep: "sheen" (L→R, default) / "weave" (alternating rows) / "off" (flat)
+            gradient "sheen"                            // pane fill sweep: "sheen" (default) / "weave" (alternating rows) / "off" (flat)
+            gradient_shape "linear"                     // sweep geometry: "linear" (default) / "radial" (circular, from each block's center)
+            gradient_angle "0"                          // linear direction in degrees [0,360): 0 L→R (default), 90 top→bottom, 180 R→L, 270 bottom→top
+            gradient_radial "outward"                   // radial direction: "outward" (default, base at center) / "inward" (stop at center)
             inactive_dim "true"                         // dim inactive tabs so the active one stands out; "false" to opt out
             perspective "true"                          // lift the active tab with depth (needs pane size 4+); "false" to opt out
         }
@@ -108,7 +111,9 @@ Contributors hacking on the plugin [build from source](#build-from-source) and p
 >
 > **`tab_gap` — space between tabs.** Leaves the given number of cleared columns between adjacent tab blocks so the boundary between screens reads clearly (default `2`). Set `0` to pack the blocks flush.
 >
-> **`gradient` — per-pane fill sweep.** `sheen` (default) sweeps each pane block's fill left-to-right from its base color toward a luminance-shifted shade (lighter for dark themes, darker for light ones); `weave` alternates the sweep direction on each half-block pixel row for a woven texture. The focus ring, labels, and the `⌘N` badge stay solid on top, so readability is unchanged. Set `off` for flat fills.
+> **`gradient` — per-pane fill sweep.** `sheen` (default) sweeps each pane block's fill from its base color toward a luminance-shifted shade (lighter for dark themes, darker for light ones); `weave` alternates the sweep direction on each half-block pixel row for a woven texture. The focus ring, labels, and the `⌘N` badge stay solid on top, so readability is unchanged. Set `off` for flat fills.
+>
+> **`gradient_shape` / `gradient_angle` / `gradient_radial` — sweep direction.** These steer the `sheen`/`weave` sweep (they have no effect when `gradient "off"`). `gradient_shape` is `linear` (default, a straight sweep) or `radial` (a circular sweep from each pane block's center). For `linear`, `gradient_angle` sets the **perceived on-screen** direction in whole degrees over `[0, 360)`: `0` left→right (the v0.5 look), `90` top→bottom, `180` right→left, `270` bottom→top, and any angle in between for a diagonal — out-of-range or non-integer values fall back to `0`. For `radial`, `gradient_radial` chooses `outward` (default, base fill at the center easing to the stop at the edge) or `inward` (the reverse). Because each half-block pixel is already ≈ square, angles read as the true on-screen angle — `45` is a real 45°, not skewed by the terminal cell's 1:2 aspect.
 >
 > **`inactive_dim` — visual cue for the active tab.** When `true` (default), inactive tabs are dimmed toward the terminal background so the active tab stands out clearly: its pane fills stay vivid, its shortcut badge and focused pane label are drawn in white, and no focus ring appears on other tabs. Set `false` to disable the dimming and treat all tabs with equal intensity.
 >

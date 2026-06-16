@@ -28,7 +28,7 @@
 //! [`crate::paint::compose`] so width accounting and the layer boundary hold.
 
 use crate::color::{self, Palette, Rgb};
-use crate::minimap::{self, GradientMode, LabelMode, PaneRect};
+use crate::minimap::{self, GradientSpec, LabelMode, PaneRect};
 use unicode_width::UnicodeWidthChar;
 
 /// Minimum width for the richest rung (L0): a wide active tab showing the color
@@ -146,7 +146,7 @@ pub fn assemble(
     rows: usize,
     position: usize,
     prefix: &str,
-    gradient: GradientMode,
+    gradient: GradientSpec,
     active: bool,
     perspective: bool,
 ) -> TabBlock {
@@ -234,7 +234,7 @@ fn grid_lines(
     vinset: usize,
     mode: LabelMode,
     badge: Option<&str>,
-    gradient: GradientMode,
+    gradient: GradientSpec,
     active: bool,
 ) -> Vec<StyledLine> {
     let block = minimap::render(
@@ -545,7 +545,7 @@ mod tests {
                     rows,
                     0,
                     "\u{2318}",
-                    GradientMode::Off,
+                    GradientSpec::OFF,
                     false,
                     false,
                 );
@@ -604,7 +604,7 @@ mod tests {
                         rows,
                         3,
                         "\u{2318}",
-                        GradientMode::Off,
+                        GradientSpec::OFF,
                         false,
                         false,
                     );
@@ -636,7 +636,7 @@ mod tests {
                 rows,
                 0,
                 "\u{2318}",
-                GradientMode::Off,
+                GradientSpec::OFF,
                 false,
                 perspective,
             )
@@ -669,7 +669,7 @@ mod tests {
                 4,
                 0,
                 "\u{2318}",
-                GradientMode::Off,
+                GradientSpec::OFF,
                 true,
                 perspective,
             )
@@ -714,7 +714,7 @@ mod tests {
             3,
             2,
             "Cmd+",
-            GradientMode::Off,
+            GradientSpec::OFF,
             false,
             false,
         );
@@ -740,7 +740,7 @@ mod tests {
             3,
             9,
             "Cmd+",
-            GradientMode::Off,
+            GradientSpec::OFF,
             false,
             false,
         );
@@ -770,7 +770,7 @@ mod tests {
             3,
             0,
             "\u{2318}",
-            GradientMode::Off,
+            GradientSpec::OFF,
             false,
             false,
         );
@@ -800,7 +800,7 @@ mod tests {
             3,
             0,
             "\u{2318}",
-            GradientMode::Off,
+            GradientSpec::OFF,
             false,
             false,
         );
@@ -829,7 +829,7 @@ mod tests {
             3,
             0,
             "\u{2318}",
-            GradientMode::Off,
+            GradientSpec::OFF,
             false,
             false,
         );
@@ -854,7 +854,7 @@ mod tests {
                 3,
                 0,
                 "\u{2318}",
-                GradientMode::Off,
+                GradientSpec::OFF,
                 active,
                 false,
             )
@@ -925,7 +925,7 @@ mod tests {
                     3,
                     0,
                     "\u{2318}",
-                    GradientMode::Off,
+                    GradientSpec::OFF,
                     active,
                     false,
                 )
@@ -959,7 +959,7 @@ mod tests {
                 3,
                 1,
                 "\u{2318}",
-                GradientMode::Off,
+                GradientSpec::OFF,
                 false,
                 false,
             );
@@ -970,7 +970,7 @@ mod tests {
                 3,
                 1,
                 "\u{2318}",
-                GradientMode::Off,
+                GradientSpec::OFF,
                 false,
                 false,
             );
@@ -999,7 +999,7 @@ mod tests {
                 3,
                 1,
                 "\u{2318}",
-                GradientMode::Off,
+                GradientSpec::OFF,
                 false,
                 false,
             );
@@ -1010,7 +1010,7 @@ mod tests {
                 3,
                 1,
                 "\u{2318}",
-                GradientMode::Off,
+                GradientSpec::OFF,
                 false,
                 false,
             );

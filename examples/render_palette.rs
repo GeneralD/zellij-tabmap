@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use zellij_tabmap::color::{Palette, Rgb};
 use zellij_tabmap::line::{Alignment, pack};
-use zellij_tabmap::minimap::{GradientMode, PaneRect};
+use zellij_tabmap::minimap::{GradientMode, GradientSpec, PaneRect};
 use zellij_tabmap::paint::bar;
 
 // frame_highlight of tokyo-night: base is the accent that seeds the hint text
@@ -107,7 +107,7 @@ fn main() {
             &panes,
             &palette,
             "\u{2318}",
-            GradientMode::Sheen,
+            GradientSpec::from_mode(GradientMode::Sheen),
             true,
             false,
         )

@@ -71,7 +71,7 @@ fn main() {
 
     // Center-aligned so the strip follows focus; the active tab (position 2)
     // sits in the middle and the perspective cue lifts it forward.
-    let layout = line::pack(170, 0, 30, 5, 2, Alignment::Center, 2);
+    let layout = line::pack(170, 0, line::ACTIVE_MAX, 5, 2, Alignment::Center, 2);
     print!(
         "{}",
         paint::bar(

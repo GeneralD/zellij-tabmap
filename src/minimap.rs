@@ -264,26 +264,49 @@ enum OverlayCell {
 /// reach the full stop exactly.
 const MAX_GRADIENT_STEP: f32 = 15.0;
 
-/// Position parameter `t ∈ [0, 100]` of the sample point `(px, py)` within pane
-/// block `bounds` (`(px0, px1, py0, py1)`, the half-open pixel extents) under
-/// `spec`'s shape/angle/radial, or `None` when the block degenerates to a single
-/// point along the sweep axis (no direction → flat base fill).
-///
-/// The base→stop range is spread evenly across the axis but rate-limited to
-/// [`MAX_GRADIENT_STEP`] per pixel, so short axes stop short of the full stop
-/// (see that constant). Weave's odd-row flip is applied to the *ratio* here, so
-/// both rows mirror within the same capped range.
-///
-/// `px`/`py` are continuous pixel coordinates so callers can sample off the
-/// integer grid — a label cell asks for its text-row vertical center
-/// (`2*tr + 0.5`) rather than the top pixel, keeping its single background
-/// sample faithful for vertical, diagonal, and radial sweeps.
-fn gradient_t(
-    spec: GradientSpec,
-    bounds: (usize, usize, usize, usize),
-    px: f32,
-    py: f32,
-) -> Option<u8> {
+/// Per-pane gradient invariants, derived once from a pane block's pixel bounds
+/// and the active [`GradientSpec`] so the per-pixel sample ([`sweep_t`]) never
+/// redoes the trig, projection extents, or radius. Built by [`pane_sweep`] once
+/// per pane (panes ≪ pixels), then consulted for every pixel of that pane.
+#[derive(Clone, Copy)]
+struct PaneSweep {
+    kind: SweepKind,
+    /// Per-pixel `t` ceiling — `(MAX_GRADIENT_STEP * steps).min(100)`, where
+    /// `steps` is the axis span (linear) or max radius (radial). Caps how far a
+    /// short axis can advance toward the stop (see [`MAX_GRADIENT_STEP`]).
+    max_t: f32,
+    /// `Weave` mode flips the sweep on odd pixel rows; precomputed so `sweep_t`
+    /// only checks row parity, not the whole [`GradientMode`].
+    weave: bool,
+}
+
+/// Shape-specific precomputed terms of a [`PaneSweep`]: the projection unit
+/// vector + normalization range for a linear sweep, or the center + max radius
+/// for a radial one.
+#[derive(Clone, Copy)]
+enum SweepKind {
+    /// `proj(x, y) = x*dx + y*dy`, normalized as `(proj − lo) / span`.
+    Linear {
+        dx: f32,
+        dy: f32,
+        lo: f32,
+        span: f32,
+    },
+    /// `dist = hypot(px − cx, py − cy) / max`, then directed by `radial`.
+    Radial {
+        cx: f32,
+        cy: f32,
+        max: f32,
+        radial: RadialDirection,
+    },
+}
+
+/// Precompute the per-pane gradient invariants for `spec` over pane block
+/// `bounds` (`(px0, px1, py0, py1)`, the half-open pixel extents), or `None`
+/// when the block degenerates to a single point along the sweep axis (no
+/// direction → flat base fill). Computed once per pane so [`sweep_t`] need not
+/// redo the trig / projection extents / radius for every pixel.
+fn pane_sweep(spec: GradientSpec, bounds: (usize, usize, usize, usize)) -> Option<PaneSweep> {
     let (px0, px1, py0, py1) = bounds;
     // Inclusive pixel extents — the projection/distance must span the painted
     // pixels (px1/py1 are exclusive), so a one-pixel axis collapses to lo == hi.
@@ -291,7 +314,7 @@ fn gradient_t(
     let (ylo, yhi) = (py0 as f32, py1.saturating_sub(1).max(py0) as f32);
     // `steps` is the axis length in pixels — the denominator of the even sweep
     // and the lever the per-pixel cap multiplies against.
-    let (ratio, steps) = match spec.shape {
+    let (kind, steps) = match spec.shape {
         GradientShape::Linear => {
             // Project onto the unit vector at `angle` degrees (clockwise, y down),
             // normalized against the span of the bbox corners along that axis. At
@@ -312,7 +335,7 @@ fn gradient_t(
             if span <= f32::EPSILON {
                 return None;
             }
-            ((proj(px, py) - lo) / span, span)
+            (SweepKind::Linear { dx, dy, lo, span }, span)
         }
         GradientShape::Radial => {
             let (cx, cy) = ((xlo + xhi) / 2.0, (ylo + yhi) / 2.0);
@@ -321,28 +344,63 @@ fn gradient_t(
             if max <= f32::EPSILON {
                 return None;
             }
-            let dist = (((px - cx).powi(2) + (py - cy).powi(2)).sqrt() / max).clamp(0.0, 1.0);
             (
-                match spec.radial {
-                    RadialDirection::Outward => dist,
-                    RadialDirection::Inward => 1.0 - dist,
+                SweepKind::Radial {
+                    cx,
+                    cy,
+                    max,
+                    radial: spec.radial,
                 },
                 max,
             )
+        }
+    };
+    Some(PaneSweep {
+        kind,
+        // Cap the per-pixel change: the full base→stop range needs `steps`
+        // pixels, but each pixel advances at most MAX_GRADIENT_STEP, so a short
+        // axis only reaches `MAX_GRADIENT_STEP * steps` instead of banding.
+        max_t: (MAX_GRADIENT_STEP * steps).min(100.0),
+        weave: spec.mode == GradientMode::Weave,
+    })
+}
+
+/// Position parameter `t ∈ [0, 100]` of the sample point `(px, py)` under the
+/// precomputed `sweep`.
+///
+/// The base→stop range is spread evenly across the axis but rate-limited to
+/// [`MAX_GRADIENT_STEP`] per pixel, so short axes stop short of the full stop
+/// (see that constant). Weave's odd-row flip is applied to the *ratio* here, so
+/// both rows mirror within the same capped range.
+///
+/// `px`/`py` are continuous pixel coordinates so callers can sample off the
+/// integer grid — a label cell asks for its text-row vertical center
+/// (`2*tr + 0.5`) rather than the top pixel, keeping its single background
+/// sample faithful for vertical, diagonal, and radial sweeps.
+fn sweep_t(sweep: &PaneSweep, px: f32, py: f32) -> u8 {
+    let ratio = match sweep.kind {
+        SweepKind::Linear { dx, dy, lo, span } => (px * dx + py * dy - lo) / span,
+        SweepKind::Radial {
+            cx,
+            cy,
+            max,
+            radial,
+        } => {
+            let dist = (((px - cx).powi(2) + (py - cy).powi(2)).sqrt() / max).clamp(0.0, 1.0);
+            match radial {
+                RadialDirection::Outward => dist,
+                RadialDirection::Inward => 1.0 - dist,
+            }
         }
     };
     // Weave flips the sweep on odd pixel rows. Flipping the *ratio* (not the
     // final t) keeps both rows mirrored within the capped range below; the parity
     // is taken on the integer row the sample falls in (a label centered at
     // `2*tr + 0.5` truncates to the even top row, matching its top-pixel sample).
-    let ratio = match spec.mode {
-        GradientMode::Weave if !(py as usize).is_multiple_of(2) => 1.0 - ratio,
+    let ratio = match sweep.weave {
+        true if !(py as usize).is_multiple_of(2) => 1.0 - ratio,
         _ => ratio,
     };
-    // Cap the per-pixel change: the full base→stop range needs `steps` pixels,
-    // but each pixel advances at most MAX_GRADIENT_STEP, so a short axis only
-    // reaches `MAX_GRADIENT_STEP * steps` instead of banding to the stop.
-    let max_t = (MAX_GRADIENT_STEP * steps).min(100.0);
     // Smoothstep-ease the ratio (3r² − 2r³) so the sweep eases in and out instead
     // of ramping linearly (#46). It is symmetric (s(1−r) = 1−s(r)), so the weave
     // ratio-flip above stays a clean mirror. Endpoints are fixed points, so the
@@ -350,31 +408,43 @@ fn gradient_t(
     // cap leaves `max_t` at 100.
     let ratio = ratio.clamp(0.0, 1.0);
     let eased = ratio * ratio * (3.0 - 2.0 * ratio);
-    Some((eased * max_t).round() as u8)
+    (eased * sweep.max_t).round() as u8
+}
+
+/// Test-only convenience composing [`pane_sweep`] + [`sweep_t`] into the old
+/// single-call `t` lookup, so the unit tests read against one entry point.
+/// Production paints through [`pane_sweep`] once per pane and [`sweep_t`] per
+/// pixel (the per-render precompute, so the trig / extents aren't redone each
+/// pixel).
+#[cfg(test)]
+fn gradient_t(
+    spec: GradientSpec,
+    bounds: (usize, usize, usize, usize),
+    px: f32,
+    py: f32,
+) -> Option<u8> {
+    Some(sweep_t(&pane_sweep(spec, bounds)?, px, py))
 }
 
 /// Fill color of pane `i` at the continuous sample point `(px, py)` — the base
-/// fill swept by the active [`GradientSpec`] across the pane's own pixel bounds
-/// (`bounds[i]`). A block with no sweep direction degenerates to the base fill.
+/// fill swept by the pane's precomputed [`PaneSweep`] (`sweeps[i]`). A block with
+/// no sweep direction, or an `Off` gradient (then `sweeps[i]` is `None`),
+/// degenerates to the base fill.
 fn fill_at(
     panes: &[PaneRect],
     palette: &Palette,
-    bounds: &[(usize, usize, usize, usize)],
-    gradient: GradientSpec,
+    sweeps: &[Option<PaneSweep>],
     i: usize,
     px: f32,
     py: f32,
 ) -> Rgb {
     let fill = palette.color_for(panes[i].id);
-    if gradient.mode == GradientMode::Off {
-        return fill;
-    }
-    let Some(t) = gradient_t(gradient, bounds[i], px, py) else {
+    let Some(sweep) = sweeps[i].as_ref() else {
         return fill;
     };
-    // `gradient_t` already baked in Weave's odd-row flip and the per-pixel cap,
+    // `sweep_t` already baked in Weave's odd-row flip and the per-pixel cap,
     // so every active mode just shades the base fill by the position `t`.
-    crate::color::gradient_at(fill, t)
+    crate::color::gradient_at(fill, sweep_t(sweep, px, py))
 }
 
 /// Color of the pixel at `(px, py)` in the pixel grid. `grid` stores the
@@ -388,15 +458,14 @@ fn pixel_color(
     ring: &[bool],
     panes: &[PaneRect],
     palette: &Palette,
-    bounds: &[(usize, usize, usize, usize)],
-    gradient: GradientSpec,
+    sweeps: &[Option<PaneSweep>],
     pw: usize,
     px: usize,
     py: usize,
 ) -> Rgb {
     match grid[py * pw + px] {
         Some(i) if ring[py * pw + px] => palette.ring_for(panes[i].id),
-        Some(i) => fill_at(panes, palette, bounds, gradient, i, px as f32, py as f32),
+        Some(i) => fill_at(panes, palette, sweeps, i, px as f32, py as f32),
         None => BG,
     }
 }
@@ -633,6 +702,14 @@ pub fn render(
         }
     }
 
+    // Precompute each pane's sweep invariants once (trig / projection extents /
+    // radius), so the per-pixel `sweep_t` below is a few mul-adds. `Off` skips
+    // the sweep entirely — every pane reads its flat base fill.
+    let sweeps: Vec<Option<PaneSweep>> = match gradient.mode {
+        GradientMode::Off => vec![None; bounds.len()],
+        _ => bounds.iter().map(|&b| pane_sweep(gradient, b)).collect(),
+    };
+
     let mut out = String::with_capacity(text_rows * pw * 24);
     for tr in 0..text_rows {
         for c in 0..pw {
@@ -642,7 +719,7 @@ pub fn render(
                 let Some(ch) = badge_cells[c - BADGE_COL] else {
                     continue;
                 };
-                let fill = pixel_color(&grid, &ring, panes, palette, &bounds, gradient, pw, c, 0);
+                let fill = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 0);
                 put_bg(&mut out, fill);
                 // Active tab: white badge — vivid fill + white = maximum contrast.
                 // Inactive tab: muted toward the fill — recedes gracefully (#59).
@@ -672,15 +749,8 @@ pub fn render(
                 // diagonal, or radial sweep reads correctly through the text
                 // (at angle 0 the row is irrelevant — byte-identical to the
                 // pre-#71 top-pixel sample).
-                let label_fill = fill_at(
-                    panes,
-                    palette,
-                    &bounds,
-                    gradient,
-                    i,
-                    c as f32,
-                    2.0 * tr as f32 + 0.5,
-                );
+                let label_fill =
+                    fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
                 put_bg(&mut out, label_fill);
                 let label_fg = if active {
                     ACTIVE_FG
@@ -697,28 +767,8 @@ pub fn render(
                 out.push(ch);
                 continue;
             }
-            let top = pixel_color(
-                &grid,
-                &ring,
-                panes,
-                palette,
-                &bounds,
-                gradient,
-                pw,
-                c,
-                2 * tr,
-            );
-            let bottom = pixel_color(
-                &grid,
-                &ring,
-                panes,
-                palette,
-                &bounds,
-                gradient,
-                pw,
-                c,
-                2 * tr + 1,
-            );
+            let top = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr);
+            let bottom = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr + 1);
             put_fg(&mut out, top);
             put_bg(&mut out, bottom);
             out.push('▀');

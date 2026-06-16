@@ -16,13 +16,13 @@
 
 # zellij-tabmap
 
-A [zellij](https://zellij.dev) plugin that replaces the thin one-row tab bar with a **taller, multi-row tab bar** in which every tab is drawn as a **color-coded minimap of its own pane layout** — a tiny pixel-grid thumbnail of how that tab's terminal is split. Panes are identified by color; where a tab is wide enough, a summarized title is overlaid; the `⌘N` switch hint is shown per tab.
+A [zellij](https://zellij.dev) plugin that replaces the thin one-row tab bar with a **taller, multi-row tab bar** in which every tab is drawn as a **color-coded minimap of its own pane layout** — a tiny pixel-grid thumbnail of how that tab's terminal is split. Panes are identified by color; where a tab is wide enough, a summarized title is overlaid; the `⌘N` switch hint is shown per tab. The active tab stands out — vivid fills, a focus ring on its focused pane, and an optional **perspective lift** that floats it forward.
 
 ## Preview
 
 ![renderer preview](assets/demo.png)
 
-> The renderer rendered standalone in a terminal: five sample layouts (a single pane, a 2-column split, a 2-row split, a 2×2 grid, and a main+stack) shown as color-coded minimaps — pixel-only on top, with overlaid labels below at two widths. This renderer is now wired into the **live** zellij tab bar, including click-to-switch, and shipped in [`v0.1.0`](https://github.com/GeneralD/zellij-tabmap/releases/tag/v0.1.0) as a prebuilt wasm (see [Status](#status)).
+> The renderer rendered standalone in a terminal — five tabs of varied layouts (a single pane, a 2-column split, a 2×2 grid, a main+stack, and a 2-row split) drawn as color-coded pane minimaps. The active tab (`⌘3`) is **lifted forward by the perspective depth cue** while the inactive tabs recede a half-row at top and bottom; pane fills carry the **gradient sheen**, the focused pane wears its outline ring, and each tab shows its `⌘N` switch hint. Reproduce it with the [`render_demo`](examples/render_demo.rs) example. This renderer is wired into the **live** zellij tab bar, including click-to-switch — see [Status](#status).
 
 ## Why a color half-block grid?
 
@@ -39,12 +39,12 @@ A focused pane is marked with an outline ring and a bold label — its fill keep
 
 ## Status
 
-🚧 **Early development.**
+✨ **Usable today, actively developed.** Installable from a prebuilt wasm (no build step), with gradients, active-tab cues, and perspective depth all shipped.
 
-- ✅ The minimap renderer ([`src/minimap.rs`](src/minimap.rs)) is complete and unit-tested (HSL palette, half-block grid, focus ring, label degradation). It has **no zellij dependency**, so it runs and is tested on the native host.
+- ✅ The minimap renderer ([`src/minimap.rs`](src/minimap.rs)) is feature-complete and unit-tested (HSL palette, half-block grid, gradient sheen, focus ring + active-tab emphasis, perspective depth, label degradation). It has **no zellij dependency**, so it runs and is tested on the native host.
 - ✅ The full render pipeline is wired: every tab is projected from zellij's live `PaneManifest`, packed into column spans ([`src/line.rs`](src/line.rs)), assembled into a per-tab block at its budgeted width ([`src/tab_block.rs`](src/tab_block.rs)), and composed into the multi-row bar ([`src/paint.rs`](src/paint.rs)). By default the active tab is centered, so the strip slides to follow focus; set `align "left"` to anchor the row instead. Tabs that don't fit collapse into `← +N` / `+N →` end markers.
 - ✅ Mouse click-to-switch is wired: a left click anywhere inside a tab's column span focuses that tab. The hit-test ([`src/line.rs`](src/line.rs)) maps the clicked column to the tab drawn there and converts its 0-based position to the 1-based index `switch_tab_to` expects, so it needs the `ChangeApplicationState` permission (see the first-run note below).
-- ✅ [`v0.1.0`](https://github.com/GeneralD/zellij-tabmap/releases/tag/v0.1.0) is published with a prebuilt `zellij-tabmap.wasm` asset, so you can wire the plugin in by URL without building it — see [Use it in zellij](#use-it-in-zellij).
+- ✅ The [latest release](https://github.com/GeneralD/zellij-tabmap/releases/latest) ships a prebuilt `zellij-tabmap.wasm` asset, so you can install the plugin without building it — see [Use it in zellij](#use-it-in-zellij).
 
 The full design — architecture, rendering pipeline, degradation ladder, golden-repo mapping, risks, and test strategy — lives in [`docs/design.md`](docs/design.md).
 

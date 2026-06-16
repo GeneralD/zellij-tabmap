@@ -215,6 +215,13 @@ fn pixel_color(
 
 /// Render `panes` into a `cols` × `text_rows` block (pixel rows = `2*text_rows`).
 ///
+/// `vinset` reserves that many background pixel rows at **both** the top and the
+/// bottom of the canvas, mapping the panes into the shorter middle band so the
+/// block appears to recede — the perspective depth cue for inactive tabs (#66).
+/// `0` fills the whole canvas (the default for the active tab and for bars below
+/// the perspective threshold); inactive perspective blocks pass `1`, leaving a
+/// half-row of background top and bottom.
+///
 /// Colors come from `palette`, keyed on each pane's stable id. Returns an ANSI
 /// string of `text_rows` lines, each terminated by a reset and newline. `mode`
 /// selects which summarized pane titles are overlaid where width allows (see
@@ -237,6 +244,7 @@ pub fn render(
     palette: &Palette,
     cols: usize,
     text_rows: usize,
+    vinset: usize,
     mode: LabelMode,
     badge: Option<&str>,
     gradient: GradientMode,
@@ -247,6 +255,10 @@ pub fn render(
     if pw == 0 || text_rows == 0 {
         return String::new();
     }
+    // The panes occupy the canvas minus `vinset` background pixel rows top and
+    // bottom; clamped so a degenerate over-inset can't underflow the height.
+    let content_ph = ph.saturating_sub(2 * vinset).max(1);
+    let vinset = (ph - content_ph) / 2;
 
     let minx = panes.iter().map(|p| p.x).min().unwrap_or(0);
     let miny = panes.iter().map(|p| p.y).min().unwrap_or(0);
@@ -300,8 +312,16 @@ pub fn render(
         if px1 <= px0 {
             px1 = (px0 + 1).min(pw);
         }
-        let py0 = map(p.y, miny, bh, ph).min(ph);
-        let mut py1 = map(p.y + p.h, miny, bh, ph).min(ph);
+        // Map into the content band (`content_ph` high) and shift down by the
+        // top inset, so the reserved background rows stay unpainted (#66). The
+        // start clamps one row short of the band (`content_ph - 1`, never
+        // negative since `content_ph >= 1`): `round()` can map a pane's top to
+        // exactly `content_ph`, which would shift `py0` into the bottom inset row
+        // (`vinset + content_ph`) and paint over the reserved background — a thin
+        // pane on the bottom edge is the worst case. `py1` keeps the full
+        // `content_ph` (exclusive) so a pane still reaches the band's bottom.
+        let py0 = (vinset + map(p.y, miny, bh, content_ph).min(content_ph - 1)).min(ph);
+        let mut py1 = (vinset + map(p.y + p.h, miny, bh, content_ph).min(content_ph)).min(ph);
         if py1 <= py0 {
             py1 = (py0 + 1).min(ph);
         }
@@ -540,12 +560,119 @@ mod tests {
             &test_palette(),
             10,
             3,
+            0,
             LabelMode::None,
             None,
             GradientMode::Off,
             true,
         );
         assert_eq!(out.lines().count(), 3);
+    }
+
+    #[test]
+    fn vinset_recedes_the_top_and_bottom_rows() -> Result<(), Box<dyn std::error::Error>> {
+        // #66 perspective: a one-pixel `vinset` reserves a half text row of
+        // background at the top and bottom of the canvas, mapping the panes into
+        // the shorter middle band. For a single full-tab pane in a 4-row block
+        // that means the top text row's upper pixel and the bottom text row's
+        // lower pixel become background (the recede that lifts the active tab),
+        // while the middle rows stay fully filled.
+        let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "x", false)];
+        let palette = test_palette();
+        let fill = palette.color_for(0);
+        let out = render(
+            &panes,
+            &palette,
+            4,
+            4,
+            1,
+            LabelMode::None,
+            None,
+            GradientMode::Off,
+            false,
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4);
+        // Top row ▄: upper pixel is background, lower pixel is the pane fill.
+        assert!(
+            lines[0].starts_with(&format!("{}{}", fg(BG), bg(fill))),
+            "top row must recede to background over fill: {:?}",
+            lines[0]
+        );
+        // Bottom row ▀: upper pixel is the pane fill, lower pixel is background.
+        assert!(
+            lines[3].starts_with(&format!("{}{}", fg(fill), bg(BG))),
+            "bottom row must recede to fill over background: {:?}",
+            lines[3]
+        );
+        // A middle row stays fully the pane fill — no recede.
+        assert!(
+            lines[1].starts_with(&format!("{}{}", fg(fill), bg(fill))),
+            "middle row must stay fully filled: {:?}",
+            lines[1]
+        );
+        // Contrast: with no inset the same top row is fully filled, proving the
+        // recede above is the inset and not some other effect.
+        let full = render(
+            &panes,
+            &palette,
+            4,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            GradientMode::Off,
+            false,
+        );
+        assert!(
+            full.lines()
+                .next()
+                .ok_or("a rendered row")?
+                .starts_with(&format!("{}{}", fg(fill), bg(fill))),
+            "with vinset 0 the top row fills completely"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vinset_keeps_a_thin_bottom_pane_out_of_the_reserved_row()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // #66 regression: `round()` can map a pane's top to exactly `content_ph`,
+        // which — without clamping the start to `content_ph - 1` — shifts `py0`
+        // into the reserved bottom inset row and paints over it, spoiling the
+        // recede. A thin pane hugging the bottom edge of a tall layout is the
+        // trigger: its top (`y=39` of `40`) rounds up to the band height. The
+        // bottom text row's lower pixel must stay background regardless.
+        let panes = vec![
+            PaneRect::new(0, 0, 0, 100, 39, "top", false),
+            PaneRect::new(1, 0, 39, 100, 1, "edge", false),
+        ];
+        let palette = test_palette();
+        // The thin edge pane (index 1) overwrites pane 0 at the band's last pixel,
+        // so it owns the bottom text row's upper pixel.
+        let edge_fill = palette.color_for(1);
+        let out = render(
+            &panes,
+            &palette,
+            4,
+            4,
+            1,
+            LabelMode::None,
+            None,
+            GradientMode::Off,
+            false,
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4);
+        // Bottom row must stay ▀ (fill over background); the buggy clamp painted
+        // the thin pane into the lower pixel too, turning the cell into a full █
+        // block (bg = fill instead of the reserved BG).
+        assert!(
+            lines[3].starts_with(&format!("{}{}", fg(edge_fill), bg(BG))),
+            "the reserved bottom inset must survive a thin bottom-edge pane: {:?}",
+            lines[3]
+        );
+        Ok(())
     }
 
     #[test]
@@ -563,6 +690,7 @@ mod tests {
             &palette,
             10,
             3,
+            0,
             LabelMode::None,
             None,
             GradientMode::Off,
@@ -582,6 +710,7 @@ mod tests {
             &test_palette(),
             10,
             3,
+            0,
             LabelMode::None,
             None,
             GradientMode::Off,
@@ -600,6 +729,7 @@ mod tests {
             &palette,
             10,
             3,
+            0,
             LabelMode::None,
             None,
             GradientMode::Off,
@@ -626,6 +756,7 @@ mod tests {
                 &palette,
                 12,
                 3,
+                0,
                 LabelMode::None,
                 None,
                 GradientMode::Off,
@@ -658,6 +789,7 @@ mod tests {
                 &test_palette(),
                 0,
                 3,
+                0,
                 LabelMode::None,
                 None,
                 GradientMode::Off,
@@ -670,6 +802,7 @@ mod tests {
                 &one_focused(),
                 &test_palette(),
                 10,
+                0,
                 0,
                 LabelMode::None,
                 None,
@@ -687,6 +820,7 @@ mod tests {
             &test_palette(),
             4,
             2,
+            0,
             LabelMode::None,
             None,
             GradientMode::Off,
@@ -710,6 +844,7 @@ mod tests {
             &test_palette(),
             12,
             3,
+            0,
             LabelMode::All,
             None,
             GradientMode::Off,
@@ -722,6 +857,7 @@ mod tests {
             &test_palette(),
             3,
             3,
+            0,
             LabelMode::All,
             None,
             GradientMode::Off,
@@ -740,6 +876,7 @@ mod tests {
             &test_palette(),
             12,
             3,
+            0,
             LabelMode::All,
             None,
             GradientMode::Off,
@@ -767,6 +904,7 @@ mod tests {
             &test_palette(),
             16,
             3,
+            0,
             LabelMode::All,
             None,
             GradientMode::Off,
@@ -796,6 +934,7 @@ mod tests {
             &test_palette(),
             16,
             3,
+            0,
             LabelMode::All,
             None,
             GradientMode::Off,
@@ -831,6 +970,7 @@ mod tests {
             &test_palette(),
             14,
             3,
+            0,
             LabelMode::All,
             Some("F1"),
             GradientMode::Off,
@@ -865,6 +1005,7 @@ mod tests {
             &test_palette(),
             14,
             3,
+            0,
             LabelMode::All,
             None,
             GradientMode::Off,
@@ -897,6 +1038,7 @@ mod tests {
             &test_palette(),
             5,
             3,
+            0,
             LabelMode::All,
             Some("F1"),
             GradientMode::Off,
@@ -930,6 +1072,7 @@ mod tests {
             &test_palette(),
             10,
             3,
+            0,
             LabelMode::All,
             Some("F1"),
             GradientMode::Off,
@@ -967,6 +1110,7 @@ mod tests {
                 &test_palette(),
                 width,
                 3,
+                0,
                 LabelMode::All,
                 Some("F1"),
                 GradientMode::Off,
@@ -1031,6 +1175,7 @@ mod tests {
             &test_palette(),
             12,
             3,
+            0,
             LabelMode::All,
             None,
             GradientMode::Off,
@@ -1069,6 +1214,7 @@ mod tests {
             &test_palette(),
             12,
             3,
+            0,
             LabelMode::All,
             None,
             GradientMode::Off,
@@ -1105,6 +1251,7 @@ mod tests {
             &test_palette(),
             7,
             3,
+            0,
             LabelMode::All,
             None,
             GradientMode::Off,
@@ -1139,6 +1286,7 @@ mod tests {
             &test_palette(),
             10,
             3,
+            0,
             LabelMode::None,
             Some("⌘ 1"),
             GradientMode::Off,
@@ -1150,6 +1298,7 @@ mod tests {
             &test_palette(),
             1,
             3,
+            0,
             LabelMode::None,
             Some("⌘ 1"),
             GradientMode::Off,
@@ -1175,6 +1324,7 @@ mod tests {
                 &palette,
                 10,
                 3,
+                0,
                 LabelMode::None,
                 Some("⌘ 1"),
                 GradientMode::Off,
@@ -1219,6 +1369,7 @@ mod tests {
                 &palette,
                 12,
                 3,
+                0,
                 LabelMode::Focused,
                 None,
                 GradientMode::Off,
@@ -1273,6 +1424,7 @@ mod tests {
             &test_palette(),
             10,
             3,
+            0,
             LabelMode::None,
             Some("符1"),
             GradientMode::Off,
@@ -1303,6 +1455,7 @@ mod tests {
             &test_palette(),
             4,
             3,
+            0,
             LabelMode::None,
             Some("符符"),
             GradientMode::Off,
@@ -1328,6 +1481,7 @@ mod tests {
             &palette,
             10,
             2,
+            0,
             LabelMode::None,
             None,
             GradientMode::Off,
@@ -1346,6 +1500,7 @@ mod tests {
             &palette,
             10,
             1,
+            0,
             LabelMode::None,
             None,
             GradientMode::Sheen,
@@ -1371,6 +1526,7 @@ mod tests {
             &palette,
             10,
             1,
+            0,
             LabelMode::None,
             None,
             GradientMode::Weave,
@@ -1395,6 +1551,7 @@ mod tests {
             &palette,
             1,
             1,
+            0,
             LabelMode::None,
             None,
             GradientMode::Sheen,

@@ -47,6 +47,13 @@ pub struct Config {
     /// active tab reads selected at a glance (#59). On by default; `false`
     /// restores the equally-vivid pre-0.6 strip.
     pub inactive_dim: bool,
+    /// Whether the active tab is lifted with a depth cue: in a bar at least four
+    /// rows tall every inactive tab recedes by one row (a half-row of background
+    /// inset top and bottom) while the active tab fills the full height (#66). On
+    /// by default; a no-op below four rows. The row count comes from the layout's
+    /// `pane size=N`, so this cue only shows once `size >= 4`. `false` renders
+    /// every tab at full height.
+    pub perspective: bool,
 }
 
 impl Config {
@@ -74,6 +81,10 @@ impl Config {
     /// Default inactive-tab dimming — on, so the active tab reads selected
     /// out of the box (#59). Set `false` to restore the equally-vivid strip.
     pub const DEFAULT_INACTIVE_DIM: bool = true;
+    /// Default perspective depth cue — on, so a tall enough bar (`pane size >= 4`)
+    /// lifts the active tab out of the box (#66). A no-op below four rows. Set
+    /// `false` to render every tab at full height.
+    pub const DEFAULT_PERSPECTIVE: bool = true;
 
     /// Parse the configuration map, falling back to a default for any missing or
     /// malformed value. Total: never panics on bad input.
@@ -111,6 +122,10 @@ impl Config {
                 .get("inactive_dim")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_INACTIVE_DIM),
+            perspective: configuration
+                .get("perspective")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_PERSPECTIVE),
         }
     }
 }
@@ -146,6 +161,7 @@ mod tests {
         assert!(!config.reorder);
         assert_eq!(config.gradient, GradientMode::Sheen);
         assert!(config.inactive_dim);
+        assert!(config.perspective);
     }
 
     #[test]
@@ -257,6 +273,19 @@ mod tests {
     fn malformed_inactive_dim_falls_back() {
         assert!(config_from(&[("inactive_dim", "no")]).inactive_dim);
         assert!(config_from(&[("inactive_dim", "")]).inactive_dim);
+    }
+
+    #[test]
+    fn parses_explicit_perspective_off() {
+        // The depth cue is on by default; an explicit `false` opts out.
+        assert!(!config_from(&[("perspective", "false")]).perspective);
+    }
+
+    #[test]
+    fn malformed_perspective_falls_back() {
+        // A malformed or empty value keeps the on-by-default cue.
+        assert!(config_from(&[("perspective", "sometimes")]).perspective);
+        assert!(config_from(&[("perspective", "")]).perspective);
     }
 
     #[test]

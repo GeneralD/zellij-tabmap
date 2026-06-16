@@ -33,6 +33,7 @@ use crate::tab_block::{self, TabBlock};
 ///
 /// The `← +N` / `+N →` overflow markers are placed at their own columns on the
 /// middle row.
+#[allow(clippy::too_many_arguments)]
 pub fn bar(
     rows: usize,
     layout: &LineLayout,
@@ -41,6 +42,7 @@ pub fn bar(
     prefix: &str,
     gradient: GradientMode,
     inactive_dim: bool,
+    perspective: bool,
 ) -> String {
     // #59: inactive tabs render through the canvas-receded palette while the
     // active tab keeps full vibrancy, so the selected tab reads at a glance.
@@ -63,10 +65,12 @@ pub fn bar(
                 panes,
                 tab_palette,
                 hit.width,
+                rows,
                 hit.position,
                 prefix,
                 gradient,
                 hit.active,
+                perspective,
             )
         })
         .collect();
@@ -140,10 +144,13 @@ mod tests {
     use crate::minimap;
     use crate::tab_block::StyledLine;
 
-    /// A three-row block with the given row texts, for `compose` placement tests.
-    fn block(rows: [&str; 3], width: usize, position: usize) -> TabBlock {
+    /// A block with the given row texts, for `compose` placement tests.
+    fn block(rows: &[&str], width: usize, position: usize) -> TabBlock {
         TabBlock {
-            lines: rows.map(|text| StyledLine(text.to_string())),
+            lines: rows
+                .iter()
+                .map(|text| StyledLine(text.to_string()))
+                .collect(),
             width,
             position,
         }
@@ -154,7 +161,7 @@ mod tests {
     #[test]
     fn compose_positions_each_row_at_the_block_start_column() {
         // Block at start column 4 → 1-based column 5, one cursor move per row.
-        let b = block(["R0", "R1", "R2"], 2, 0);
+        let b = block(&["R0", "R1", "R2"], 2, 0);
         let out = compose(3, &[(4, &b)], &[]);
         assert!(out.contains("\u{1b}[1;5HR0"));
         assert!(out.contains("\u{1b}[2;5HR1"));
@@ -163,7 +170,7 @@ mod tests {
 
     #[test]
     fn compose_clears_every_row_to_end_of_line() {
-        let b = block(["R0", "R1", "R2"], 2, 0);
+        let b = block(&["R0", "R1", "R2"], 2, 0);
         assert_eq!(compose(3, &[(0, &b)], &[]).matches("\u{1b}[0K").count(), 3);
     }
 
@@ -173,7 +180,7 @@ mod tests {
         // reset must precede it or a prior frame's lingering background paints
         // the cleared tail. Pinning the reset here keeps the no-bleed guarantee
         // self-contained rather than relying on every block line resetting.
-        let b = block(["R0", "R1", "R2"], 2, 0);
+        let b = block(&["R0", "R1", "R2"], 2, 0);
         let out = compose(3, &[(0, &b)], &[]);
         for n in 1..=3 {
             assert!(
@@ -185,14 +192,14 @@ mod tests {
 
     #[test]
     fn compose_has_no_trailing_newline() {
-        let b = block(["R0", "R1", "R2"], 2, 0);
+        let b = block(&["R0", "R1", "R2"], 2, 0);
         assert!(!compose(3, &[(0, &b)], &[]).ends_with('\n'));
     }
 
     #[test]
     fn compose_caps_at_the_row_budget() {
         // Two-row pane: the block's third row must not be emitted.
-        let b = block(["R0", "R1", "R2"], 2, 0);
+        let b = block(&["R0", "R1", "R2"], 2, 0);
         let out = compose(2, &[(0, &b)], &[]);
         assert_eq!(out.matches("\u{1b}[0K").count(), 2);
         assert!(out.contains("R0") && out.contains("R1"));
@@ -200,9 +207,25 @@ mod tests {
     }
 
     #[test]
+    fn compose_homes_and_clears_every_row_of_a_tall_bar() {
+        // #66 step 2: the bar height is runtime, so compose must home, reset and
+        // clear exactly `rows` rows — no longer a fixed three. A 5-row block in a
+        // 5-row pane draws all five rows, each homed at column 1.
+        let b = block(&["R0", "R1", "R2", "R3", "R4"], 2, 0);
+        let out = compose(5, &[(0, &b)], &[]);
+        assert_eq!(out.matches("\u{1b}[0K").count(), 5);
+        for n in 1..=5 {
+            assert!(
+                out.contains(&format!("\u{1b}[{n};1HR{}", n - 1)),
+                "row {n} must be homed and carry its block line"
+            );
+        }
+    }
+
+    #[test]
     fn compose_lays_blocks_left_to_right_in_order() -> Result<(), Box<dyn std::error::Error>> {
-        let a = block(["AA", "AA", "AA"], 2, 0);
-        let b = block(["BB", "BB", "BB"], 2, 1);
+        let a = block(&["AA", "AA", "AA"], 2, 0);
+        let b = block(&["BB", "BB", "BB"], 2, 1);
         let out = compose(3, &[(0, &a), (5, &b)], &[]);
         let first = out.find("\u{1b}[1;1HAA").ok_or("block A on row 1")?;
         let second = out
@@ -214,7 +237,7 @@ mod tests {
 
     #[test]
     fn compose_draws_markers_only_on_the_middle_row() {
-        let b = block(["R0", "R1", "R2"], 2, 0);
+        let b = block(&["R0", "R1", "R2"], 2, 0);
         let out = compose(3, &[(0, &b)], &[(8, "+9")]);
         // rows=3 → middle is row index 1 → 1-based row 2, start col 8+1=9.
         assert!(out.contains("\u{1b}[2;9H+9"));
@@ -253,6 +276,7 @@ mod tests {
             "\u{2318}",
             GradientMode::Off,
             false,
+            false,
         );
         for row in 1..=3 {
             assert!(
@@ -279,6 +303,7 @@ mod tests {
             &Palette::default(),
             "\u{2318}",
             GradientMode::Off,
+            false,
             false,
         );
         assert!(out.contains("\u{2318}4"), "position 3 → ⌘4");
@@ -312,6 +337,7 @@ mod tests {
             &Palette::default(),
             "\u{2318}",
             GradientMode::Off,
+            false,
             false,
         );
         assert!(
@@ -364,6 +390,7 @@ mod tests {
             "\u{2318}",
             GradientMode::Off,
             true,
+            false,
         );
         assert!(
             out.contains(&fg(palette.color_for(0))),
@@ -400,6 +427,7 @@ mod tests {
             "\u{2318}",
             GradientMode::Off,
             false,
+            false,
         );
         assert!(
             out.contains(&fg(palette.color_for(1))),
@@ -433,6 +461,7 @@ mod tests {
             &Palette::default(),
             "\u{2318}",
             GradientMode::Off,
+            false,
             false,
         );
         // Middle row (row 2): left marker at col 1, right marker at col 8.

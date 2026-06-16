@@ -31,6 +31,7 @@ fn main() {
                 &palette,
                 width,
                 3,
+                0,
                 LabelMode::All,
                 Some("\u{2318} 1"),
                 mode,

@@ -109,6 +109,7 @@ fn main() {
             "\u{2318}",
             GradientMode::Sheen,
             true,
+            false,
         )
     );
 }

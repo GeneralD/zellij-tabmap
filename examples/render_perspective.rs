@@ -1,11 +1,12 @@
-//! Standalone visual harness for #59: renders a full three-tab bar so the
-//! active-tab cues (inactive dimming + white badge/label text + suppressed
-//! inactive focus highlight) can be eyeballed.
+//! Standalone visual harness for #66: renders a **4-row** three-tab bar so the
+//! perspective depth cue can be eyeballed. With perspective on, the inactive
+//! tabs recede by a half-row of background at the top and bottom while the
+//! active tab fills all four rows and floats forward.
 //! Not part of the plugin — run with e.g.
-//! `cargo run --example render_active_cue --target aarch64-apple-darwin`
+//! `cargo run --example render_perspective --target aarch64-apple-darwin`
 //! (substitute your host triple to override the wasm32-wasip1 default).
-//! Pass `no-dim` as the first argument to preview the `inactive_dim: false`
-//! opt-out.
+//! Pass `flat` as the first argument to preview the `perspective: false`
+//! opt-out (every tab fills the full height).
 
 use std::collections::BTreeMap;
 
@@ -27,11 +28,9 @@ fn main() {
         ],
         (255, 158, 100),
     );
-    let inactive_dim = std::env::args().nth(1).as_deref() != Some("no-dim");
+    let perspective = std::env::args().nth(1).as_deref() != Some("flat");
     let layout = line::pack(100, 0, 24, 3, 1, Alignment::Center, 2);
     let mut panes = BTreeMap::new();
-    // Every tab carries a focused pane, as in a live zellij session — the
-    // inactive tabs' focused panes must show NO highlight (#59).
     panes.insert(
         0,
         vec![
@@ -51,14 +50,14 @@ fn main() {
     print!(
         "{}",
         paint::bar(
-            3,
+            4,
             &layout,
             &panes,
             &palette,
             "\u{2318} ",
             GradientMode::Sheen,
-            inactive_dim,
-            false,
+            true,
+            perspective,
         )
     );
 }

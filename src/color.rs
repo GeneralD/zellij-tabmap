@@ -162,7 +162,7 @@ pub(crate) fn gradient_at(fill: Rgb, percent: u8) -> Rgb {
     /// parameter (like [`derived_ring`]'s `SHIFT_PERCENT`), not a
     /// correctness constant — retune freely if the sheen reads too
     /// strong/weak after curve changes.
-    const SWEEP_PERCENT: f32 = 0.35;
+    const SWEEP_PERCENT: f32 = 0.60;
     let target = if luma(fill) < 128 {
         (255, 255, 255)
     } else {

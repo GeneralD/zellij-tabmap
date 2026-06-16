@@ -313,8 +313,14 @@ pub fn render(
             px1 = (px0 + 1).min(pw);
         }
         // Map into the content band (`content_ph` high) and shift down by the
-        // top inset, so the reserved background rows stay unpainted (#66).
-        let py0 = (vinset + map(p.y, miny, bh, content_ph).min(content_ph)).min(ph);
+        // top inset, so the reserved background rows stay unpainted (#66). The
+        // start clamps one row short of the band (`content_ph - 1`, never
+        // negative since `content_ph >= 1`): `round()` can map a pane's top to
+        // exactly `content_ph`, which would shift `py0` into the bottom inset row
+        // (`vinset + content_ph`) and paint over the reserved background — a thin
+        // pane on the bottom edge is the worst case. `py1` keeps the full
+        // `content_ph` (exclusive) so a pane still reaches the band's bottom.
+        let py0 = (vinset + map(p.y, miny, bh, content_ph).min(content_ph - 1)).min(ph);
         let mut py1 = (vinset + map(p.y + p.h, miny, bh, content_ph).min(content_ph)).min(ph);
         if py1 <= py0 {
             py1 = (py0 + 1).min(ph);
@@ -624,6 +630,47 @@ mod tests {
                 .ok_or("a rendered row")?
                 .starts_with(&format!("{}{}", fg(fill), bg(fill))),
             "with vinset 0 the top row fills completely"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vinset_keeps_a_thin_bottom_pane_out_of_the_reserved_row()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // #66 regression: `round()` can map a pane's top to exactly `content_ph`,
+        // which — without clamping the start to `content_ph - 1` — shifts `py0`
+        // into the reserved bottom inset row and paints over it, spoiling the
+        // recede. A thin pane hugging the bottom edge of a tall layout is the
+        // trigger: its top (`y=39` of `40`) rounds up to the band height. The
+        // bottom text row's lower pixel must stay background regardless.
+        let panes = vec![
+            PaneRect::new(0, 0, 0, 100, 39, "top", false),
+            PaneRect::new(1, 0, 39, 100, 1, "edge", false),
+        ];
+        let palette = test_palette();
+        // The thin edge pane (index 1) overwrites pane 0 at the band's last pixel,
+        // so it owns the bottom text row's upper pixel.
+        let edge_fill = palette.color_for(1);
+        let out = render(
+            &panes,
+            &palette,
+            4,
+            4,
+            1,
+            LabelMode::None,
+            None,
+            GradientMode::Off,
+            false,
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4);
+        // Bottom row must stay ▀ (fill over background); the buggy clamp painted
+        // the thin pane into the lower pixel too, turning the cell into a full █
+        // block (bg = fill instead of the reserved BG).
+        assert!(
+            lines[3].starts_with(&format!("{}{}", fg(edge_fill), bg(BG))),
+            "the reserved bottom inset must survive a thin bottom-edge pane: {:?}",
+            lines[3]
         );
         Ok(())
     }

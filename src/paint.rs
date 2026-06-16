@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use crate::color::Palette;
 use crate::line::LineLayout;
-use crate::minimap::{GradientMode, PaneRect};
+use crate::minimap::{GradientSpec, PaneRect};
 use crate::tab_block::{self, TabBlock};
 
 /// Render a packed [`LineLayout`] into the full multi-row bar string.
@@ -40,7 +40,7 @@ pub fn bar(
     panes_by_position: &BTreeMap<usize, Vec<PaneRect>>,
     palette: &Palette,
     prefix: &str,
-    gradient: GradientMode,
+    gradient: GradientSpec,
     inactive_dim: bool,
     perspective: bool,
 ) -> String {
@@ -274,7 +274,7 @@ mod tests {
             &BTreeMap::new(),
             &Palette::default(),
             "\u{2318}",
-            GradientMode::Off,
+            GradientSpec::OFF,
             false,
             false,
         );
@@ -302,7 +302,7 @@ mod tests {
             &BTreeMap::new(),
             &Palette::default(),
             "\u{2318}",
-            GradientMode::Off,
+            GradientSpec::OFF,
             false,
             false,
         );
@@ -336,7 +336,7 @@ mod tests {
             &panes,
             &Palette::default(),
             "\u{2318}",
-            GradientMode::Off,
+            GradientSpec::OFF,
             false,
             false,
         );
@@ -388,7 +388,7 @@ mod tests {
             &panes,
             &palette,
             "\u{2318}",
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
             false,
         );
@@ -425,7 +425,7 @@ mod tests {
             &panes,
             &palette,
             "\u{2318}",
-            GradientMode::Off,
+            GradientSpec::OFF,
             false,
             false,
         );
@@ -460,7 +460,7 @@ mod tests {
             &BTreeMap::new(),
             &Palette::default(),
             "\u{2318}",
-            GradientMode::Off,
+            GradientSpec::OFF,
             false,
             false,
         );

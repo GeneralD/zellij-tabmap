@@ -135,6 +135,106 @@ impl std::str::FromStr for GradientMode {
     }
 }
 
+/// Geometry of the gradient sweep (config key `gradient_shape`, #71).
+///
+/// `Linear` sweeps along a straight direction set by [`GradientSpec::angle`];
+/// `Radial` sweeps along the distance from each pane block's center.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GradientShape {
+    /// A straight sweep at [`GradientSpec::angle`] degrees.
+    #[default]
+    Linear,
+    /// A circular sweep from the block's center outward (or inward).
+    Radial,
+}
+
+impl std::str::FromStr for GradientShape {
+    type Err = ();
+
+    /// `"linear"` / `"radial"` (exact match); any other value errors so the
+    /// config parser falls back to the documented default.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "linear" => Ok(Self::Linear),
+            "radial" => Ok(Self::Radial),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Direction of a radial sweep (config key `gradient_radial`, #71).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RadialDirection {
+    /// Base fill at the center, easing toward the stop at the block's edge.
+    #[default]
+    Outward,
+    /// Stop at the center, easing toward the base fill at the block's edge.
+    Inward,
+}
+
+impl std::str::FromStr for RadialDirection {
+    type Err = ();
+
+    /// `"outward"` / `"inward"` (exact match); any other value errors so the
+    /// config parser falls back to the documented default.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "outward" => Ok(Self::Outward),
+            "inward" => Ok(Self::Inward),
+            _ => Err(()),
+        }
+    }
+}
+
+/// The full gradient configuration threaded into the renderer: the sweep
+/// [`GradientMode`] plus its direction (#71).
+///
+/// `shape`/`angle`/`radial` shape the *position parameter* `t` (0 at the base
+/// fill, 100 at the stop) that the mode then consumes:
+///
+/// * `Linear` projects each pixel onto the unit vector at `angle` degrees over
+///   the pane block's pixel bounding box. The angle is the **perceived
+///   on-screen** direction the sweep advances, measured clockwise from the
+///   positive x-axis: `0` = left→right (the classic [`GradientMode::Sheen`]
+///   look), `90` = top→bottom, `180` = right→left, `270` = bottom→top. The
+///   half-block split already makes each pixel ≈ square, so no extra cell-aspect
+///   correction is applied — the projection runs in raw pixel space.
+/// * `Radial` uses the normalized distance from the block's center; `Outward`
+///   puts the base fill at the center, `Inward` flips it.
+///
+/// The mode is orthogonal: `Off` ignores all of this, `Sheen` paints `t`
+/// straight, and `Weave` flips `t` on odd pixel rows for either shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GradientSpec {
+    pub mode: GradientMode,
+    pub shape: GradientShape,
+    /// Linear sweep angle in degrees, `[0, 360)`. Ignored for `Radial`.
+    pub angle: u16,
+    pub radial: RadialDirection,
+}
+
+impl GradientSpec {
+    /// Build a spec from a mode with the default direction (linear, angle 0,
+    /// outward) — the classic per-mode look before #71's direction controls.
+    pub const fn from_mode(mode: GradientMode) -> Self {
+        Self {
+            mode,
+            shape: GradientShape::Linear,
+            angle: 0,
+            radial: RadialDirection::Outward,
+        }
+    }
+
+    /// No sweep — flat fills, the historical look. Test/fallback convenience.
+    pub const OFF: Self = Self::from_mode(GradientMode::Off);
+    /// A left-to-right linear sheen — the default-direction polished look.
+    #[cfg(test)]
+    pub const SHEEN: Self = Self::from_mode(GradientMode::Sheen);
+    /// A left-to-right linear weave.
+    #[cfg(test)]
+    pub const WEAVE: Self = Self::from_mode(GradientMode::Weave);
+}
+
 /// One label-overlay cell, placed by display column.
 ///
 /// A glyph claims its leading cell plus one [`Continuation`] cell per extra
@@ -153,40 +253,198 @@ enum OverlayCell {
 
 // ---- core renderer ------------------------------------------------------
 
-/// Fill color of pane `i` at pixel `(px, py)` — the base fill swept by the
-/// active [`GradientMode`] across the pane's own column span (`bounds[i]`).
-/// A one-column span degenerates to the base fill (`t = 0`).
+/// Maximum change in the sweep position parameter `t` (`0..=100`) between two
+/// adjacent pixels along the gradient axis. The sweep divides the base→stop
+/// range evenly over the axis's pixels, but never lets one pixel jump more than
+/// this — equivalently, the full stop needs at least `100 / MAX_GRADIENT_STEP`
+/// pixels of span to be reached. A short axis (a near-square pane under a steep
+/// angle, where only a handful of pixels span the sweep) therefore eases gently
+/// part-way to the stop instead of banding hard in a few coarse jumps. Long axes
+/// are unaffected: their even step already sits below the cap, so they still
+/// reach the full stop exactly.
+const MAX_GRADIENT_STEP: f32 = 15.0;
+
+/// Per-pane gradient invariants, derived once from a pane block's pixel bounds
+/// and the active [`GradientSpec`] so the per-pixel sample ([`sweep_t`]) never
+/// redoes the trig, projection extents, or radius. Built by [`pane_sweep`] once
+/// per pane (panes ≪ pixels), then consulted for every pixel of that pane.
+#[derive(Clone, Copy)]
+struct PaneSweep {
+    kind: SweepKind,
+    /// Per-pixel `t` ceiling — `(MAX_GRADIENT_STEP * steps).min(100)`, where
+    /// `steps` is the axis span (linear) or max radius (radial). Caps how far a
+    /// short axis can advance toward the stop (see [`MAX_GRADIENT_STEP`]).
+    max_t: f32,
+    /// `Weave` mode flips the sweep on odd pixel rows; precomputed so `sweep_t`
+    /// only checks row parity, not the whole [`GradientMode`].
+    weave: bool,
+}
+
+/// Shape-specific precomputed terms of a [`PaneSweep`]: the projection unit
+/// vector + normalization range for a linear sweep, or the center + max radius
+/// for a radial one.
+#[derive(Clone, Copy)]
+enum SweepKind {
+    /// `proj(x, y) = x*dx + y*dy`, normalized as `(proj − lo) / span`.
+    Linear {
+        dx: f32,
+        dy: f32,
+        lo: f32,
+        span: f32,
+    },
+    /// `dist = hypot(px − cx, py − cy) / max`, then directed by `radial`.
+    Radial {
+        cx: f32,
+        cy: f32,
+        max: f32,
+        radial: RadialDirection,
+    },
+}
+
+/// Precompute the per-pane gradient invariants for `spec` over pane block
+/// `bounds` (`(px0, px1, py0, py1)`, the half-open pixel extents), or `None`
+/// when the block degenerates to a single point along the sweep axis (no
+/// direction → flat base fill). Computed once per pane so [`sweep_t`] need not
+/// redo the trig / projection extents / radius for every pixel.
+fn pane_sweep(spec: GradientSpec, bounds: (usize, usize, usize, usize)) -> Option<PaneSweep> {
+    let (px0, px1, py0, py1) = bounds;
+    // Inclusive pixel extents — the projection/distance must span the painted
+    // pixels (px1/py1 are exclusive), so a one-pixel axis collapses to lo == hi.
+    let (xlo, xhi) = (px0 as f32, px1.saturating_sub(1).max(px0) as f32);
+    let (ylo, yhi) = (py0 as f32, py1.saturating_sub(1).max(py0) as f32);
+    // `steps` is the axis length in pixels — the denominator of the even sweep
+    // and the lever the per-pixel cap multiplies against.
+    let (kind, steps) = match spec.shape {
+        GradientShape::Linear => {
+            // Project onto the unit vector at `angle` degrees (clockwise, y down),
+            // normalized against the span of the bbox corners along that axis. At
+            // angle 0 this reduces to (px − px0)/(px1 − px0 − 1) — the classic
+            // left-to-right column ratio.
+            let theta = (spec.angle as f32).to_radians();
+            let (dx, dy) = (theta.cos(), theta.sin());
+            let proj = |x: f32, y: f32| x * dx + y * dy;
+            let corners = [
+                proj(xlo, ylo),
+                proj(xhi, ylo),
+                proj(xlo, yhi),
+                proj(xhi, yhi),
+            ];
+            let lo = corners.iter().copied().fold(f32::INFINITY, f32::min);
+            let hi = corners.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let span = hi - lo;
+            if span <= f32::EPSILON {
+                return None;
+            }
+            (SweepKind::Linear { dx, dy, lo, span }, span)
+        }
+        GradientShape::Radial => {
+            let (cx, cy) = ((xlo + xhi) / 2.0, (ylo + yhi) / 2.0);
+            // Center is the midpoint, so the farthest corner sets the max radius.
+            let max = ((xhi - cx).powi(2) + (yhi - cy).powi(2)).sqrt();
+            if max <= f32::EPSILON {
+                return None;
+            }
+            (
+                SweepKind::Radial {
+                    cx,
+                    cy,
+                    max,
+                    radial: spec.radial,
+                },
+                max,
+            )
+        }
+    };
+    Some(PaneSweep {
+        kind,
+        // Cap the per-pixel change: the full base→stop range needs `steps`
+        // pixels, but each pixel advances at most MAX_GRADIENT_STEP, so a short
+        // axis only reaches `MAX_GRADIENT_STEP * steps` instead of banding.
+        max_t: (MAX_GRADIENT_STEP * steps).min(100.0),
+        weave: spec.mode == GradientMode::Weave,
+    })
+}
+
+/// Position parameter `t ∈ [0, 100]` of the sample point `(px, py)` under the
+/// precomputed `sweep`.
+///
+/// The base→stop range is spread evenly across the axis but rate-limited to
+/// [`MAX_GRADIENT_STEP`] per pixel, so short axes stop short of the full stop
+/// (see that constant). Weave's odd-row flip is applied to the *ratio* here, so
+/// both rows mirror within the same capped range.
+///
+/// `px`/`py` are continuous pixel coordinates so callers can sample off the
+/// integer grid — a label cell asks for its text-row vertical center
+/// (`2*tr + 0.5`) rather than the top pixel, keeping its single background
+/// sample faithful for vertical, diagonal, and radial sweeps.
+fn sweep_t(sweep: &PaneSweep, px: f32, py: f32) -> u8 {
+    let ratio = match sweep.kind {
+        SweepKind::Linear { dx, dy, lo, span } => (px * dx + py * dy - lo) / span,
+        SweepKind::Radial {
+            cx,
+            cy,
+            max,
+            radial,
+        } => {
+            let dist = (((px - cx).powi(2) + (py - cy).powi(2)).sqrt() / max).clamp(0.0, 1.0);
+            match radial {
+                RadialDirection::Outward => dist,
+                RadialDirection::Inward => 1.0 - dist,
+            }
+        }
+    };
+    // Weave flips the sweep on odd pixel rows. Flipping the *ratio* (not the
+    // final t) keeps both rows mirrored within the capped range below; the parity
+    // is taken on the integer row the sample falls in (a label centered at
+    // `2*tr + 0.5` truncates to the even top row, matching its top-pixel sample).
+    let ratio = match sweep.weave {
+        true if !(py as usize).is_multiple_of(2) => 1.0 - ratio,
+        _ => ratio,
+    };
+    // Smoothstep-ease the ratio (3r² − 2r³) so the sweep eases in and out instead
+    // of ramping linearly (#46). It is symmetric (s(1−r) = 1−s(r)), so the weave
+    // ratio-flip above stays a clean mirror. Endpoints are fixed points, so the
+    // base fill is reached exactly and the stop is reached exactly whenever the
+    // cap leaves `max_t` at 100.
+    let ratio = ratio.clamp(0.0, 1.0);
+    let eased = ratio * ratio * (3.0 - 2.0 * ratio);
+    (eased * sweep.max_t).round() as u8
+}
+
+/// Test-only convenience composing [`pane_sweep`] + [`sweep_t`] into the old
+/// single-call `t` lookup, so the unit tests read against one entry point.
+/// Production paints through [`pane_sweep`] once per pane and [`sweep_t`] per
+/// pixel (the per-render precompute, so the trig / extents aren't redone each
+/// pixel).
+#[cfg(test)]
+fn gradient_t(
+    spec: GradientSpec,
+    bounds: (usize, usize, usize, usize),
+    px: f32,
+    py: f32,
+) -> Option<u8> {
+    Some(sweep_t(&pane_sweep(spec, bounds)?, px, py))
+}
+
+/// Fill color of pane `i` at the continuous sample point `(px, py)` — the base
+/// fill swept by the pane's precomputed [`PaneSweep`] (`sweeps[i]`). A block with
+/// no sweep direction, or an `Off` gradient (then `sweeps[i]` is `None`),
+/// degenerates to the base fill.
 fn fill_at(
     panes: &[PaneRect],
     palette: &Palette,
-    bounds: &[(usize, usize)],
-    gradient: GradientMode,
+    sweeps: &[Option<PaneSweep>],
     i: usize,
-    px: usize,
-    py: usize,
+    px: f32,
+    py: f32,
 ) -> Rgb {
     let fill = palette.color_for(panes[i].id);
-    if gradient == GradientMode::Off {
+    let Some(sweep) = sweeps[i].as_ref() else {
         return fill;
-    }
-    let (px0, px1) = bounds[i];
-    let span = px1.saturating_sub(px0);
-    if span <= 1 {
-        return fill;
-    }
-    // Smoothstep-ease the column ratio (3r² − 2r³) so the sweep eases in and
-    // out instead of ramping linearly — the first/last columns no longer show
-    // the largest perceived jumps (#46). Endpoints are fixed points (0→0,
-    // 1→1), so the base fill and the stop are reached exactly.
-    let ratio = (px - px0) as f32 / (span - 1) as f32;
-    let eased = ratio * ratio * (3.0 - 2.0 * ratio);
-    let t = (eased * 100.0).round() as u8;
-    match gradient {
-        GradientMode::Sheen => crate::color::gradient_at(fill, t),
-        GradientMode::Weave if py.is_multiple_of(2) => crate::color::gradient_at(fill, t),
-        GradientMode::Weave => crate::color::gradient_at(fill, 100 - t),
-        GradientMode::Off => unreachable!("handled above"),
-    }
+    };
+    // `sweep_t` already baked in Weave's odd-row flip and the per-pixel cap,
+    // so every active mode just shades the base fill by the position `t`.
+    crate::color::gradient_at(fill, sweep_t(sweep, px, py))
 }
 
 /// Color of the pixel at `(px, py)` in the pixel grid. `grid` stores the
@@ -200,15 +458,14 @@ fn pixel_color(
     ring: &[bool],
     panes: &[PaneRect],
     palette: &Palette,
-    bounds: &[(usize, usize)],
-    gradient: GradientMode,
+    sweeps: &[Option<PaneSweep>],
     pw: usize,
     px: usize,
     py: usize,
 ) -> Rgb {
     match grid[py * pw + px] {
         Some(i) if ring[py * pw + px] => palette.ring_for(panes[i].id),
-        Some(i) => fill_at(panes, palette, bounds, gradient, i, px, py),
+        Some(i) => fill_at(panes, palette, sweeps, i, px as f32, py as f32),
         None => BG,
     }
 }
@@ -232,8 +489,9 @@ fn pixel_color(
 /// to host its display width.
 /// Empty input yields an all-background block, with the badge still stamped
 /// over it when one is given and fits. `gradient` selects the per-pane fill
-/// sweep (see [`GradientMode`]); `Off` reproduces the historical flat fills
-/// byte-for-byte. `active` marks the bar's selected tab (#59): its badge and
+/// sweep — mode, shape, and direction (see [`GradientSpec`]); `Off` reproduces
+/// the historical flat fills byte-for-byte, as does the default `Sheen` at
+/// angle 0. `active` marks the bar's selected tab (#59): its badge and
 /// every pane label render pure white ([`ACTIVE_FG`]) — the focused one also
 /// bold — and its focus ring is drawn. Inactive blocks suppress the highlight
 /// entirely — no ring, no bold — and subdue text toward the pane fill by
@@ -247,7 +505,7 @@ pub fn render(
     vinset: usize,
     mode: LabelMode,
     badge: Option<&str>,
-    gradient: GradientMode,
+    gradient: GradientSpec,
     active: bool,
 ) -> String {
     let pw = cols;
@@ -273,7 +531,7 @@ pub fn render(
     let mut grid = vec![None::<usize>; ph * pw]; // pane index per pixel
     let mut ring = vec![false; ph * pw]; // focus-ring pixels
     let mut overlay = vec![None::<OverlayCell>; text_rows * pw]; // label cells
-    let mut bounds = Vec::with_capacity(panes.len()); // (px0, px1) per pane
+    let mut bounds = Vec::with_capacity(panes.len()); // (px0, px1, py0, py1) per pane
 
     // The shortcut badge occupies the top text row's left cells, after a
     // one-cell margin, drawn over the underlying cell color — the pane fill, or
@@ -325,7 +583,7 @@ pub fn render(
         if py1 <= py0 {
             py1 = (py0 + 1).min(ph);
         }
-        bounds.push((px0, px1));
+        bounds.push((px0, px1, py0, py1));
 
         for py in py0..py1 {
             for px in px0..px1 {
@@ -444,6 +702,14 @@ pub fn render(
         }
     }
 
+    // Precompute each pane's sweep invariants once (trig / projection extents /
+    // radius), so the per-pixel `sweep_t` below is a few mul-adds. `Off` skips
+    // the sweep entirely — every pane reads its flat base fill.
+    let sweeps: Vec<Option<PaneSweep>> = match gradient.mode {
+        GradientMode::Off => vec![None; bounds.len()],
+        _ => bounds.iter().map(|&b| pane_sweep(gradient, b)).collect(),
+    };
+
     let mut out = String::with_capacity(text_rows * pw * 24);
     for tr in 0..text_rows {
         for c in 0..pw {
@@ -453,7 +719,7 @@ pub fn render(
                 let Some(ch) = badge_cells[c - BADGE_COL] else {
                     continue;
                 };
-                let fill = pixel_color(&grid, &ring, panes, palette, &bounds, gradient, pw, c, 0);
+                let fill = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 0);
                 put_bg(&mut out, fill);
                 // Active tab: white badge — vivid fill + white = maximum contrast.
                 // Inactive tab: muted toward the fill — recedes gracefully (#59).
@@ -478,7 +744,13 @@ pub fn render(
                 // also bold for maximum emphasis. Inactive tab: text muted toward
                 // the pane fill so it recedes without becoming unreadable (#59).
                 let highlighted = active && panes[i].focused;
-                let label_fill = fill_at(panes, palette, &bounds, gradient, i, c, 2 * tr);
+                // A label paints one background sample for its whole cell; take it
+                // at the text row's vertical center (`2*tr + 0.5`) so a vertical,
+                // diagonal, or radial sweep reads correctly through the text
+                // (at angle 0 the row is irrelevant — byte-identical to the
+                // pre-#71 top-pixel sample).
+                let label_fill =
+                    fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
                 put_bg(&mut out, label_fill);
                 let label_fg = if active {
                     ACTIVE_FG
@@ -495,28 +767,8 @@ pub fn render(
                 out.push(ch);
                 continue;
             }
-            let top = pixel_color(
-                &grid,
-                &ring,
-                panes,
-                palette,
-                &bounds,
-                gradient,
-                pw,
-                c,
-                2 * tr,
-            );
-            let bottom = pixel_color(
-                &grid,
-                &ring,
-                panes,
-                palette,
-                &bounds,
-                gradient,
-                pw,
-                c,
-                2 * tr + 1,
-            );
+            let top = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr);
+            let bottom = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr + 1);
             put_fg(&mut out, top);
             put_bg(&mut out, bottom);
             out.push('▀');
@@ -563,7 +815,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         assert_eq!(out.lines().count(), 3);
@@ -588,7 +840,7 @@ mod tests {
             1,
             LabelMode::None,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             false,
         );
         let lines: Vec<&str> = out.lines().collect();
@@ -621,7 +873,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             false,
         );
         assert!(
@@ -659,7 +911,7 @@ mod tests {
             1,
             LabelMode::None,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             false,
         );
         let lines: Vec<&str> = out.lines().collect();
@@ -693,7 +945,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         let (r, g, b) = palette.color_for(1);
@@ -713,7 +965,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         assert!(out.contains("\x1b[38;2;"), "expected a truecolor fg escape");
@@ -732,7 +984,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         assert!(
@@ -759,7 +1011,7 @@ mod tests {
                 0,
                 LabelMode::None,
                 None,
-                GradientMode::Off,
+                GradientSpec::OFF,
                 true,
             )
         };
@@ -792,7 +1044,7 @@ mod tests {
                 0,
                 LabelMode::None,
                 None,
-                GradientMode::Off,
+                GradientSpec::OFF,
                 true
             )
             .is_empty()
@@ -806,7 +1058,7 @@ mod tests {
                 0,
                 LabelMode::None,
                 None,
-                GradientMode::Off,
+                GradientSpec::OFF,
                 true
             )
             .is_empty()
@@ -823,7 +1075,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         assert_eq!(out.lines().count(), 2);
@@ -847,7 +1099,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         assert!(wide.contains('c'), "expected label text in a wide block");
@@ -860,7 +1112,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         assert!(!narrow.contains('c'), "narrow block should drop the label");
@@ -879,7 +1131,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         assert!(
@@ -907,7 +1159,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         for ch in ['a', 'b', 'c'] {
@@ -937,7 +1189,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         assert!(
@@ -973,7 +1225,7 @@ mod tests {
             0,
             LabelMode::All,
             Some("F1"),
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         let lines = visible_lines(&out);
@@ -1008,7 +1260,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         let lines = visible_lines(&out);
@@ -1041,7 +1293,7 @@ mod tests {
             0,
             LabelMode::All,
             Some("F1"),
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         let lines = visible_lines(&out);
@@ -1075,7 +1327,7 @@ mod tests {
             0,
             LabelMode::All,
             Some("F1"),
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         let lines = visible_lines(&out);
@@ -1113,7 +1365,7 @@ mod tests {
                 0,
                 LabelMode::All,
                 Some("F1"),
-                GradientMode::Off,
+                GradientSpec::OFF,
                 true,
             );
             for line in visible_lines(&out) {
@@ -1178,7 +1430,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         let lines = visible_lines(&out);
@@ -1217,7 +1469,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         let lines = visible_lines(&out);
@@ -1254,7 +1506,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         let lines = visible_lines(&out);
@@ -1289,7 +1541,7 @@ mod tests {
             0,
             LabelMode::None,
             Some("⌘ 1"),
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         assert!(wide.contains('⌘'), "wide block should host the badge");
@@ -1301,7 +1553,7 @@ mod tests {
             0,
             LabelMode::None,
             Some("⌘ 1"),
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         assert!(
@@ -1327,7 +1579,7 @@ mod tests {
                 0,
                 LabelMode::None,
                 Some("⌘ 1"),
-                GradientMode::Off,
+                GradientSpec::OFF,
                 active,
             )
         };
@@ -1372,7 +1624,7 @@ mod tests {
                 0,
                 LabelMode::Focused,
                 None,
-                GradientMode::Off,
+                GradientSpec::OFF,
                 active,
             )
         };
@@ -1427,7 +1679,7 @@ mod tests {
             0,
             LabelMode::None,
             Some("符1"),
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         let lines = visible_lines(&out);
@@ -1458,7 +1710,7 @@ mod tests {
             0,
             LabelMode::None,
             Some("符符"),
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         assert!(
@@ -1484,7 +1736,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            GradientMode::Off,
+            GradientSpec::OFF,
             true,
         );
         let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
@@ -1495,15 +1747,17 @@ mod tests {
     #[test]
     fn sheen_sweeps_from_base_fill_to_stop() {
         let palette = test_palette();
+        // 21 columns → a 20 px axis, long enough that the per-pixel cap doesn't
+        // bind and the rightmost column reaches the full stop.
         let out = render(
             &one_plain(),
             &palette,
-            10,
+            21,
             1,
             0,
             LabelMode::None,
             None,
-            GradientMode::Sheen,
+            GradientSpec::SHEEN,
             true,
         );
         let base = fg(palette.color_for(1));
@@ -1519,17 +1773,18 @@ mod tests {
     fn weave_reverses_the_bottom_pixel_row() {
         // Pixel row parity drives the direction: at column 0 the top pixel is
         // t=0 (base fill) while the bottom pixel sweeps R→L and is t=100 (the
-        // stop) — so the very first cell must pair base fg with stop bg.
+        // stop) — so the very first cell must pair base fg with stop bg. The 21
+        // columns give a 20 px axis so the bottom row reaches the full stop.
         let palette = test_palette();
         let out = render(
             &one_plain(),
             &palette,
-            10,
+            21,
             1,
             0,
             LabelMode::None,
             None,
-            GradientMode::Weave,
+            GradientSpec::WEAVE,
             true,
         );
         let fill = palette.color_for(1);
@@ -1554,9 +1809,205 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            GradientMode::Sheen,
+            GradientSpec::SHEEN,
             true,
         );
         assert!(out.starts_with(&fg(palette.color_for(1))));
+    }
+
+    // ---- gradient direction (#71) ---------------------------------------
+
+    /// A linear sheen at `angle` degrees, default radial direction.
+    fn lin(angle: u16) -> GradientSpec {
+        GradientSpec {
+            mode: GradientMode::Sheen,
+            shape: GradientShape::Linear,
+            angle,
+            radial: RadialDirection::Outward,
+        }
+    }
+
+    /// A radial sheen in `radial` direction (angle is irrelevant to radial).
+    fn radial(radial: RadialDirection) -> GradientSpec {
+        GradientSpec {
+            mode: GradientMode::Sheen,
+            shape: GradientShape::Radial,
+            angle: 0,
+            radial,
+        }
+    }
+
+    #[test]
+    fn gradient_t_linear_angle_0_runs_left_to_right() {
+        // bounds: (px0, px1, py0, py1) — a long 41 px axis so the per-pixel cap
+        // doesn't bind and the sweep spans the full base→stop range.
+        let bounds = (0, 41, 0, 4);
+        assert_eq!(gradient_t(lin(0), bounds, 0.0, 0.0), Some(0));
+        assert_eq!(gradient_t(lin(0), bounds, 40.0, 0.0), Some(100));
+        // y does not affect a horizontal sweep.
+        assert_eq!(
+            gradient_t(lin(0), bounds, 0.0, 3.0),
+            Some(0),
+            "angle 0 ignores y"
+        );
+    }
+
+    #[test]
+    fn gradient_t_linear_angle_90_runs_top_to_bottom() {
+        // A tall 41 px axis so the cap doesn't bind (see angle-0 above).
+        let bounds = (0, 10, 0, 41);
+        assert_eq!(gradient_t(lin(90), bounds, 0.0, 0.0), Some(0));
+        assert_eq!(gradient_t(lin(90), bounds, 0.0, 40.0), Some(100));
+        // x does not affect a vertical sweep.
+        assert_eq!(
+            gradient_t(lin(90), bounds, 9.0, 0.0),
+            Some(0),
+            "angle 90 ignores x"
+        );
+    }
+
+    #[test]
+    fn gradient_t_linear_angle_180_reverses_angle_0() {
+        // 180° is the reverse of 0°: the left edge now holds the stop, the right
+        // the base fill. (`round`-to-u8 absorbs the tiny f32 fuzz in cos/sin π.)
+        let bounds = (0, 41, 0, 4);
+        assert_eq!(gradient_t(lin(180), bounds, 0.0, 0.0), Some(100));
+        assert_eq!(gradient_t(lin(180), bounds, 40.0, 0.0), Some(0));
+    }
+
+    #[test]
+    fn gradient_t_caps_the_per_pixel_step_on_a_short_axis() {
+        // A 3-px-tall pane spans only 2 pixels vertically, so an even 0→100 sweep
+        // would jump 50 per pixel. The cap holds each step to MAX_GRADIENT_STEP,
+        // so the far edge eases only part-way to the stop (steps × the cap).
+        let bounds = (0, 10, 0, 3); // span_y = 2
+        let edge = (MAX_GRADIENT_STEP * 2.0).round() as u8;
+        assert!(edge < 100, "a short axis must stop short of the full stop");
+        assert_eq!(gradient_t(lin(90), bounds, 0.0, 0.0), Some(0));
+        assert_eq!(gradient_t(lin(90), bounds, 0.0, 2.0), Some(edge));
+        // The midpoint pixel sits one capped step in, not a coarse half-jump.
+        assert_eq!(
+            gradient_t(lin(90), bounds, 0.0, 1.0),
+            Some((MAX_GRADIENT_STEP).round() as u8)
+        );
+    }
+
+    #[test]
+    fn gradient_t_radial_runs_from_center_to_edge() {
+        // 41×41 block → center pixel at (20, 20); the radius to a corner is long
+        // enough that the cap doesn't bind, so the edge reaches the full stop.
+        let bounds = (0, 41, 0, 41);
+        let (out, inn) = (
+            radial(RadialDirection::Outward),
+            radial(RadialDirection::Inward),
+        );
+        // Center: outward = base fill (0), inward = stop (100).
+        assert_eq!(gradient_t(out, bounds, 20.0, 20.0), Some(0));
+        assert_eq!(gradient_t(inn, bounds, 20.0, 20.0), Some(100));
+        // Corner: outward = stop (100), inward = base fill (0) — the mirror.
+        assert_eq!(gradient_t(out, bounds, 0.0, 0.0), Some(100));
+        assert_eq!(gradient_t(inn, bounds, 0.0, 0.0), Some(0));
+    }
+
+    #[test]
+    fn gradient_t_degenerate_axis_returns_none() {
+        // A 1-px-wide block has no horizontal span (angle 0 → None) but can still
+        // sweep vertically (angle 90 → a real value) — the #71 generalization of
+        // the old column-only degeneracy check.
+        assert_eq!(gradient_t(lin(0), (3, 4, 0, 8), 3.0, 0.0), None);
+        assert_eq!(gradient_t(lin(90), (3, 4, 0, 8), 3.0, 0.0), Some(0));
+        // A single-pixel block has no radius either.
+        assert_eq!(
+            gradient_t(radial(RadialDirection::Outward), (3, 4, 0, 1), 3.0, 0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn label_samples_the_text_row_center_between_its_two_pixels()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A vertical sweep's label takes one background sample at the text row's
+        // vertical center (2*tr + 0.5), strictly between the row's top (2*tr) and
+        // bottom (2*tr + 1) pixels — so the label tracks the sweep through the
+        // text rather than freezing at the top pixel.
+        let bounds = (0, 4, 0, 8);
+        let tr = 2usize;
+        let top = gradient_t(lin(90), bounds, 0.0, (2 * tr) as f32).ok_or("top sample")?;
+        let center =
+            gradient_t(lin(90), bounds, 0.0, 2.0 * tr as f32 + 0.5).ok_or("center sample")?;
+        let bottom =
+            gradient_t(lin(90), bounds, 0.0, (2 * tr + 1) as f32).ok_or("bottom sample")?;
+        assert!(
+            top < center && center < bottom,
+            "center sample lies between the row's pixels: {top} < {center} < {bottom}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn render_vertical_sweep_is_uniform_across_each_row() {
+        // End-to-end wiring: angle 90 produces no horizontal variation — every
+        // column of a row shares the same fg/bg pair — while the top row begins
+        // at the base fill and the bottom row reaches the capped sweep edge (a
+        // 4-px-tall block is too short to hit the full stop under the cap).
+        let palette = test_palette();
+        let out = render(
+            &one_plain(),
+            &palette,
+            4,
+            2,
+            0,
+            LabelMode::None,
+            None,
+            lin(90),
+            true,
+        );
+        let fill = palette.color_for(1);
+        // size 2 → 4 px tall → an inclusive span of 3 pixels.
+        let edge =
+            crate::color::gradient_at(fill, (MAX_GRADIENT_STEP * 3.0).min(100.0).round() as u8);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(
+            lines[0].starts_with(&fg(fill)),
+            "top row starts at the base fill, got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains(&bg(edge)),
+            "bottom row reaches the capped sweep edge, got {:?}",
+            lines[1]
+        );
+        // Uniform across columns: the base fg appears once per column on row 0.
+        assert_eq!(
+            lines[0].matches(&fg(fill)).count(),
+            4,
+            "row 0 must be uniform across its 4 columns"
+        );
+    }
+
+    #[test]
+    fn render_radial_outward_paints_the_corner_with_the_stop() {
+        // The top-left pixel is a farthest corner: radial-outward paints it at the
+        // stop shade, distinguishing it from a linear angle-0 sweep (whose
+        // top-left corner is the base fill). 16×16 px keeps the corner radius long
+        // enough that the cap doesn't bind, so the corner reaches the full stop.
+        let palette = test_palette();
+        let out = render(
+            &one_plain(),
+            &palette,
+            16,
+            8,
+            0,
+            LabelMode::None,
+            None,
+            radial(RadialDirection::Outward),
+            true,
+        );
+        let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
+        assert!(
+            out.starts_with(&stop),
+            "radial outward paints the farthest corner at the stop, got {:?}",
+            out.lines().next()
+        );
     }
 }

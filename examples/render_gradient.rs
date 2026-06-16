@@ -1,10 +1,33 @@
-//! Standalone visual harness for #40: renders the same 2x2 layout in all
-//! three gradient modes side by side. Not part of the plugin — run with e.g.
+//! Standalone visual harness for #40 / #71: renders the same 2x2 layout across
+//! gradient modes *and* directions (linear angles + radial) side by side. Not
+//! part of the plugin — run with e.g.
 //! `cargo run --example render_gradient --target x86_64-unknown-linux-gnu`
 //! (or substitute your host target to override the wasm32-wasip1 default).
 
 use zellij_tabmap::color::Palette;
-use zellij_tabmap::minimap::{GradientMode, LabelMode, PaneRect, render};
+use zellij_tabmap::minimap::{
+    GradientMode, GradientShape, GradientSpec, LabelMode, PaneRect, RadialDirection, render,
+};
+
+/// A linear sheen at `angle` degrees.
+fn linear(angle: u16) -> GradientSpec {
+    GradientSpec {
+        mode: GradientMode::Sheen,
+        shape: GradientShape::Linear,
+        angle,
+        radial: RadialDirection::Outward,
+    }
+}
+
+/// A radial sheen in `radial` direction.
+fn radial(radial: RadialDirection) -> GradientSpec {
+    GradientSpec {
+        mode: GradientMode::Sheen,
+        shape: GradientShape::Radial,
+        angle: 0,
+        radial,
+    }
+}
 
 fn main() {
     let panes = vec![
@@ -18,10 +41,15 @@ fn main() {
         .nth(1)
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(28);
-    for (name, mode) in [
-        ("off", GradientMode::Off),
-        ("sheen", GradientMode::Sheen),
-        ("weave", GradientMode::Weave),
+    for (name, spec) in [
+        ("off", GradientSpec::from_mode(GradientMode::Off)),
+        ("sheen (0° L→R)", linear(0)),
+        ("sheen (90° top→bottom)", linear(90)),
+        ("sheen (45° diagonal)", linear(45)),
+        ("sheen (180° reverse)", linear(180)),
+        ("weave", GradientSpec::from_mode(GradientMode::Weave)),
+        ("radial outward", radial(RadialDirection::Outward)),
+        ("radial inward", radial(RadialDirection::Inward)),
     ] {
         println!("-- gradient \"{name}\" --");
         print!(
@@ -34,7 +62,7 @@ fn main() {
                 0,
                 LabelMode::All,
                 Some("\u{2318} 1"),
-                mode,
+                spec,
                 true,
             )
         );

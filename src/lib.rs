@@ -265,7 +265,7 @@ impl ZellijPlugin for State {
                 &panes_by_position,
                 &self.palette,
                 &self.config.shortcut_prefix,
-                self.config.gradient,
+                self.config.gradient_spec(),
                 self.config.inactive_dim,
                 self.config.perspective,
             )

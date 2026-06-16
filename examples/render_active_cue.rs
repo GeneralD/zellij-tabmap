@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use zellij_tabmap::color::Palette;
 use zellij_tabmap::line::{self, Alignment};
-use zellij_tabmap::minimap::{GradientMode, PaneRect};
+use zellij_tabmap::minimap::{GradientMode, GradientSpec, PaneRect};
 use zellij_tabmap::paint;
 
 fn main() {
@@ -56,7 +56,7 @@ fn main() {
             &panes,
             &palette,
             "\u{2318} ",
-            GradientMode::Sheen,
+            GradientSpec::from_mode(GradientMode::Sheen),
             inactive_dim,
             false,
         )

@@ -93,6 +93,18 @@ pub(crate) fn mixed(from: Rgb, to: Rgb, percent: u8) -> Rgb {
     (lerp(from.0, to.0), lerp(from.1, to.1), lerp(from.2, to.2))
 }
 
+/// The luma-opposite extreme of `base`: white for a dark color, black for a
+/// light one. The single direction rule every "stay legible on either theme
+/// polarity" shade follows — [`derived_ring`], [`gradient_at`], and the
+/// new-tab button fill (#76) all sweep `base` toward this.
+fn contrast_target(base: Rgb) -> Rgb {
+    if luma(base) < 128 {
+        (255, 255, 255)
+    } else {
+        (0, 0, 0)
+    }
+}
+
 /// Luminance-aware focus-ring shade of `fill`: lighten a dark fill toward white,
 /// darken a light one toward black, by a fixed mix. The ring stays in the same
 /// hue family as the pane it surrounds (cohesive) while reading as a distinct
@@ -104,12 +116,7 @@ fn derived_ring(fill: Rgb) -> Rgb {
     /// against the fill without washing out to pure white/black, not a
     /// correctness constant.
     const SHIFT_PERCENT: u8 = 55;
-    let target = if luma(fill) < 128 {
-        (255, 255, 255)
-    } else {
-        (0, 0, 0)
-    };
-    mixed(fill, target, SHIFT_PERCENT)
+    mixed(fill, contrast_target(fill), SHIFT_PERCENT)
 }
 
 /// One sRGB channel decoded to linear light (`0.0..=1.0`), via the exact
@@ -163,14 +170,36 @@ pub(crate) fn gradient_at(fill: Rgb, percent: u8) -> Rgb {
     /// correctness constant — retune freely if the sheen reads too
     /// strong/weak after curve changes.
     const SWEEP_PERCENT: f32 = 0.60;
-    let target = if luma(fill) < 128 {
-        (255, 255, 255)
-    } else {
-        (0, 0, 0)
-    };
     // Composing the two lerps in linear space collapses to a single mix:
     // fill→stop by t equals fill→target by t·SWEEP_PERCENT.
-    mixed_linear(fill, target, SWEEP_PERCENT * percent as f32 / 100.0)
+    mixed_linear(
+        fill,
+        contrast_target(fill),
+        SWEEP_PERCENT * percent as f32 / 100.0,
+    )
+}
+
+/// The muted fill the inline new-tab `+` button block is painted with (#76):
+/// the bar [`CANVAS`] lifted a little toward its [`contrast_target`] (lighter on
+/// a dark bar, darker on a light one). Deliberately a *small* lift — the button
+/// is a quiet affordance that reads as part of the strip, not a competing tab.
+pub(crate) fn button_fill() -> Rgb {
+    /// Mix fraction of the canvas toward its contrast extreme. A visual
+    /// parameter (like [`derived_ring`]'s `SHIFT_PERCENT`) — small so the
+    /// button stays inconspicuous; retune freely.
+    const BUTTON_FILL_BLEND: u8 = 12;
+    mixed(CANVAS, contrast_target(CANVAS), BUTTON_FILL_BLEND)
+}
+
+/// The `+` glyph foreground for the new-tab button (#76): the same contrast
+/// direction as [`button_fill`] but a stronger mix, so the affordance is clearly
+/// legible on the muted fill without pulling focus from the tab labels.
+pub(crate) fn button_glyph() -> Rgb {
+    /// Mix fraction of the canvas toward its contrast extreme for the glyph —
+    /// stronger than the fill's so the `+` stands off it, soft enough not to
+    /// compete with the labels. A visual parameter, retune freely.
+    const BUTTON_GLYPH_BLEND: u8 = 60;
+    mixed(CANVAS, contrast_target(CANVAS), BUTTON_GLYPH_BLEND)
 }
 
 /// A theme-derived color assignment for panes.
@@ -595,6 +624,42 @@ mod tests {
         assert_eq!(gradient_at(light, 0), light);
         let far = gradient_at(light, 100);
         assert!(far.0 < light.0 && far.1 < light.1 && far.2 < light.2);
+        Ok(())
+    }
+
+    #[test]
+    fn contrast_target_follows_luma_polarity() -> R {
+        // The shared direction rule: a dark base sweeps toward white, a light
+        // one toward black — what keeps ring / sweep / button shades legible on
+        // either theme polarity.
+        assert_eq!(contrast_target((10, 20, 30)), (255, 255, 255));
+        assert_eq!(contrast_target((230, 220, 210)), (0, 0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn button_fill_is_a_quiet_lift_off_the_canvas() -> R {
+        // The fill must read as part of the strip: distinct from the canvas but
+        // only slightly — closer to the canvas than the glyph foreground, and
+        // lifted toward the contrast extreme (lighter, since the canvas is dark).
+        let fill = button_fill();
+        assert_ne!(fill, CANVAS, "the fill must be visible against the canvas");
+        assert!(
+            channel_between(CANVAS, button_glyph(), fill),
+            "the fill sits between the canvas and the glyph: {fill:?}"
+        );
+        assert!(luma(fill) > luma(CANVAS), "a dark canvas lifts lighter");
+        Ok(())
+    }
+
+    #[test]
+    fn button_glyph_reads_clearly_on_the_fill() -> R {
+        // The "+" must stand off the muted fill: further from the canvas than
+        // the fill (brighter here), so it is legible without pulling focus.
+        let glyph = button_glyph();
+        let fill = button_fill();
+        assert!(luma(glyph) > luma(fill), "glyph brighter than its fill");
+        assert_ne!(glyph, fill);
         Ok(())
     }
 }

@@ -206,6 +206,32 @@ pub fn assemble(
     }
 }
 
+/// Assemble the inline new-tab `+` button (#76) as a block of exactly `width`
+/// columns and `rows` rows: a muted [`color::button_fill`] on every row, with a
+/// `+` (in [`color::button_glyph`]) centered on the vertical-center row — the
+/// same middle row [`crate::paint::compose`] homes the overflow markers and the
+/// narrow-rung text on, so the glyph lines up with the tab labels.
+///
+/// Returns a [`TabBlock`] so [`crate::paint::bar`] can place it through the same
+/// `compose` path as the tabs. The button carries no tab identity, so its
+/// `position` is an inert placeholder: `compose` positions a block by the column
+/// it is handed, never by the block's own `position`.
+pub fn button_block(width: usize, rows: usize) -> TabBlock {
+    let fill = color::button_fill();
+    let middle = rows / 2;
+    let lines = (0..rows)
+        .map(|row| match row == middle {
+            true => StyledLine(text_row_on("+", color::button_glyph(), fill, width)),
+            false => StyledLine(fill_row(fill, width)),
+        })
+        .collect();
+    TabBlock {
+        lines,
+        width,
+        position: 0,
+    }
+}
+
 /// The `⌘N` shortcut hint for a tab at 0-based `position`.
 ///
 /// Shown 1-based to match `GoToTab N`. Per design §4.5 a tab with no `Super N`
@@ -344,32 +370,48 @@ fn padded_rows(rows: impl Iterator<Item = String>, width: usize, count: usize) -
         .collect()
 }
 
-/// A full-width row of background half-blocks — the empty canvas.
-fn blank_row(width: usize) -> String {
+/// A full-width row of solid `fill` half-blocks, SGR-reset at the end. The
+/// general form behind [`blank_row`] (canvas fill) and the new-tab button's
+/// muted-fill rows (#76).
+fn fill_row(fill: Rgb, width: usize) -> String {
     let mut out = String::new();
-    background_run(&mut out, width);
+    solid_run(&mut out, fill, width);
     out.push_str(minimap::RESET);
     out
 }
 
-/// `text` (no embedded ANSI) centered on a background canvas `width` columns
-/// wide, drawn in `fg`. The text is first clamped to the budget by display
-/// width — never splitting a wide glyph — so the row is always exactly `width`
-/// display columns even when a caller passes oversized text. The remaining
-/// padding is split left/right to center it.
+/// A full-width row of background half-blocks — the empty canvas (the
+/// canvas-colored [`fill_row`]).
+fn blank_row(width: usize) -> String {
+    fill_row(minimap::BG, width)
+}
+
+/// `text` (no embedded ANSI) centered on the background canvas `width` columns
+/// wide, drawn in `fg` — the canvas-colored [`text_row_on`], used by the narrow
+/// rungs (L3 glyph, L4 hint).
 fn text_row(text: &str, fg: Rgb, width: usize) -> String {
+    text_row_on(text, fg, minimap::BG, width)
+}
+
+/// `text` (no embedded ANSI) centered on a solid `fill` canvas `width` columns
+/// wide, drawn in `fg`. Generalizes [`text_row`] (whose canvas is [`minimap::BG`])
+/// for the new-tab button's muted fill (#76). The text is first clamped to the
+/// budget by display width — never splitting a wide glyph — so the row is always
+/// exactly `width` display columns even when a caller passes oversized text. The
+/// remaining padding is split left/right to center it.
+fn text_row_on(text: &str, fg: Rgb, fill: Rgb, width: usize) -> String {
     let clamped = clamped_to_width(text, width);
     let text_width = display_width_ignoring_ansi(&clamped);
     let left = (width - text_width) / 2;
     let right = width - text_width - left;
     let mut out = String::new();
-    background_run(&mut out, left);
+    solid_run(&mut out, fill, left);
     if text_width > 0 {
-        minimap::put_bg(&mut out, minimap::BG);
+        minimap::put_bg(&mut out, fill);
         minimap::put_fg(&mut out, fg);
         out.push_str(&clamped);
     }
-    background_run(&mut out, right);
+    solid_run(&mut out, fill, right);
     out.push_str(minimap::RESET);
     out
 }
@@ -391,13 +433,16 @@ fn clamped_to_width(s: &str, width: usize) -> String {
         .collect()
 }
 
-/// Append `count` background half-block cells to `out`.
-fn background_run(out: &mut String, count: usize) {
+/// Append `count` solid-fill cells of `fill` to `out`: a run of `fill`-on-`fill`
+/// half-blocks, which read as a solid color band. The canvas-colored case
+/// (`fill = minimap::BG`) is the empty bar background; the new-tab button fills
+/// with its own muted color (#76).
+fn solid_run(out: &mut String, fill: Rgb, count: usize) {
     if count == 0 {
         return;
     }
-    minimap::put_fg(out, minimap::BG);
-    minimap::put_bg(out, minimap::BG);
+    minimap::put_fg(out, fill);
+    minimap::put_bg(out, fill);
     out.push_str(&"\u{2580}".repeat(count)); // ▀
 }
 
@@ -1060,5 +1105,71 @@ mod tests {
         assert_eq!(display_width_ignoring_ansi(styled), 2);
         // A wide CJK char counts as two columns.
         assert_eq!(display_width_ignoring_ansi("\u{5b9f}"), 2); // 実
+    }
+
+    // ---- button_block (inline new-tab "+" button, #76) -------------------
+
+    #[test]
+    fn button_block_fills_every_row_to_the_budget() {
+        // The "+" button holds the same exact-height / exact-width contract as a
+        // tab block — every one of `rows` rows fills the budget — so `compose`
+        // lays it without a wider previous frame bleeding through.
+        for rows in [3, 4, 5, 6] {
+            for width in [3, 5, 8] {
+                let block = button_block(width, rows);
+                assert_eq!(block.lines.len(), rows, "rows {rows}: exact height");
+                for (row, line) in block.lines.iter().enumerate() {
+                    assert_eq!(
+                        measured(line),
+                        width,
+                        "rows {rows}, width {width}, row {row}: display width must equal the budget"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn button_block_centers_the_plus_on_the_middle_row() {
+        // The glyph rides the vertical-center row (rows / 2) — the row `compose`
+        // homes markers and rung text on — so the "+" lines up with the tab
+        // labels. Every other row carries just the muted fill, no glyph.
+        let rows = 4;
+        let block = button_block(3, rows);
+        let middle = rows / 2;
+        assert!(
+            block.lines[middle].as_str().contains('+'),
+            "the + rides the middle row"
+        );
+        for (row, line) in block.lines.iter().enumerate() {
+            if row != middle {
+                assert!(!line.as_str().contains('+'), "row {row} carries no glyph");
+            }
+        }
+    }
+
+    #[test]
+    fn button_block_paints_the_muted_fill_and_glyph_colors() {
+        // The block is painted with the theme-derived muted button fill
+        // (background) and the "+" in the button glyph foreground (#76) — the
+        // quiet affordance, never a tab's vivid pane fill.
+        let fill_bg = {
+            let (r, g, b) = crate::color::button_fill();
+            format!("\x1b[48;2;{r};{g};{b}m")
+        };
+        let glyph_fg = {
+            let (r, g, b) = crate::color::button_glyph();
+            format!("\x1b[38;2;{r};{g};{b}m")
+        };
+        let block = button_block(3, 4);
+        let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
+        assert!(
+            joined.contains(&fill_bg),
+            "every row is painted with the muted button fill"
+        );
+        assert!(
+            joined.contains(&glyph_fg),
+            "the + is drawn in the button glyph foreground"
+        );
     }
 }

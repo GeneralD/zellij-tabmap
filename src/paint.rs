@@ -74,11 +74,19 @@ pub fn bar(
             )
         })
         .collect();
+    // The inline new-tab `+` button (#76), when the layout reserved one: a
+    // full-height block placed through the same `compose` path as the tabs.
+    // Owned here so `placed` can borrow it; appended after the tabs so it draws
+    // on top (its span never overlaps one, so order is cosmetic).
+    let button = layout
+        .button
+        .map(|hit| (hit.start, tab_block::button_block(hit.width, rows)));
     let placed: Vec<(usize, &TabBlock)> = layout
         .tabs
         .iter()
         .zip(&blocks)
         .map(|(hit, block)| (hit.start, block))
+        .chain(button.iter().map(|(start, block)| (*start, block)))
         .collect();
     let markers: Vec<(usize, &str)> = layout
         .left
@@ -140,7 +148,7 @@ pub fn compose(rows: usize, placed: &[(usize, &TabBlock)], markers: &[(usize, &s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::line::{Overflow, TabHit};
+    use crate::line::{ButtonHit, Overflow, TabHit};
     use crate::minimap;
     use crate::tab_block::StyledLine;
 
@@ -251,7 +259,12 @@ mod tests {
     // ---- bar -------------------------------------------------------------
 
     fn layout(tabs: Vec<TabHit>, left: Option<Overflow>, right: Option<Overflow>) -> LineLayout {
-        LineLayout { tabs, left, right }
+        LineLayout {
+            tabs,
+            left,
+            right,
+            button: None,
+        }
     }
 
     fn hit(position: usize, start: usize, width: usize, active: bool) -> TabHit {
@@ -470,5 +483,56 @@ mod tests {
         // Each marker appears exactly once — never duplicated onto rows 1 / 3.
         assert_eq!(out.matches("+2").count(), 1);
         assert_eq!(out.matches("+3").count(), 1);
+    }
+
+    #[test]
+    fn bar_draws_the_new_tab_button_at_its_reserved_span() {
+        // #76: when the layout reserves a "+" button, `bar` lays its full-height
+        // block at the button's start column through the same `compose` path as
+        // the tabs. The "+" rides the middle row (the row `compose` homes markers
+        // on), painted in the muted glyph foreground — never a tab's pane fill.
+        let mut lo = layout(vec![hit(0, 0, 16, true)], None, None);
+        lo.button = Some(ButtonHit {
+            start: 18,
+            width: 3,
+        });
+        let out = bar(
+            3,
+            &lo,
+            &BTreeMap::new(),
+            &Palette::default(),
+            "\u{2318}",
+            GradientSpec::OFF,
+            false,
+            false,
+        );
+        // rows=3 → middle row index 1 → 1-based row 2, button start col 18+1=19.
+        assert!(
+            out.contains("\u{1b}[2;19H"),
+            "the button block is homed at its reserved column"
+        );
+        assert!(
+            out.contains(&fg(crate::color::button_glyph())),
+            "the + is painted in the muted glyph foreground"
+        );
+        assert!(out.contains('+'), "the new-tab glyph is drawn");
+    }
+
+    #[test]
+    fn bar_omits_the_button_when_the_layout_reserves_none() {
+        // No reserved button → no "+" anywhere: the button is purely opt-in,
+        // gated upstream by the config toggle (#76).
+        let lo = layout(vec![hit(0, 0, 16, true)], None, None);
+        let out = bar(
+            3,
+            &lo,
+            &BTreeMap::new(),
+            &Palette::default(),
+            "\u{2318}",
+            GradientSpec::OFF,
+            false,
+            false,
+        );
+        assert!(!out.contains('+'), "no button reserved → no + drawn");
     }
 }

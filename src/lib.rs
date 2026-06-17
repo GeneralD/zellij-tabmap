@@ -47,6 +47,25 @@ pub struct State {
     /// resolved (and cleared) on release. `None` whenever no drag is underway.
     /// v2 drag-to-reorder (#10).
     drag: Option<DragState>,
+    /// Per-tab pane geometry for click-to-focus (#74), keyed by tab position and
+    /// rebuilt every render alongside `tab_layout`. Only tabs drawn as a minimap
+    /// (the L0–L2 grid rungs) get an entry — narrow tabs (L3 glyph / L4 hint)
+    /// draw no per-pane regions, so a click there has no pane to resolve. Cleared
+    /// on every render bail-out, so a click never hit-tests a stale frame.
+    tab_panes: BTreeMap<usize, TabPaneGeom>,
+}
+
+/// One visible tab's drawn pane geometry, captured each render so a later click
+/// can map (row, column) back to the pane the frame actually drew (#74). Holds
+/// exactly what [`minimap::pane_at_cell`] needs that the column-only
+/// [`line::TabHit`] does not: the block's start column, drawn width and height,
+/// the perspective `vinset`, and the tab's projected panes.
+struct TabPaneGeom {
+    start: usize,
+    width: usize,
+    rows: usize,
+    vinset: usize,
+    panes: Vec<minimap::PaneRect>,
 }
 
 /// An in-progress tab drag. Recorded from the `LeftClick` that begins a press
@@ -165,15 +184,19 @@ impl ZellijPlugin for State {
                 self.palette = palette_from_style(&mode_info.style);
                 true
             }
-            Event::Mouse(Mouse::LeftClick(_row, column)) => {
-                // A left click anywhere in a tab's column span focuses that tab
-                // (#8); the clicked row is irrelevant. The switch arrives back as
-                // a TabUpdate, which drives the repaint — so this arm requests
-                // none. It also records the press as a *potential* drag (#10):
-                // if the pointer then holds and releases elsewhere, the tab is
-                // reordered; a plain click never sets `dragging`, so it is a
-                // pure switch. Press on no tab clears any stale drag.
-                self.switch_to_tab_at(column);
+            Event::Mouse(Mouse::LeftClick(row, column)) => {
+                // A left click resolves as finely as the drawn frame allows: when
+                // it lands on a pane cell of a tab's minimap, focus that exact
+                // pane (#74); otherwise fall back to switching to the clicked tab
+                // (#8). Focusing a pane also switches to its tab, so a click on a
+                // non-active tab's pane both switches and focuses in one step. The
+                // change arrives back as a Tab/Pane update that drives the repaint,
+                // so this arm requests none. It also records the press as a
+                // *potential* drag (#10): if the pointer then holds and releases
+                // elsewhere, the tab is reordered; a plain click never sets
+                // `dragging`, so it stays a pure focus/switch. Press on no tab
+                // clears any stale drag.
+                self.focus_or_switch_at(row, column);
                 self.drag = self.grab_at(column);
                 false
             }
@@ -200,9 +223,10 @@ impl ZellijPlugin for State {
         // Reset the click geometry up front. If this frame bails out before
         // drawing — no permission yet, no active tab mid-transition, or too few
         // rows to draw — a click must find no spans to resolve against rather
-        // than the previous frame's stale ones. The success path repopulates it
+        // than the previous frame's stale ones. The success path repopulates both
         // at the end.
         self.tab_layout.clear();
+        self.tab_panes.clear();
         if !self.permitted {
             return;
         }
@@ -275,6 +299,38 @@ impl ZellijPlugin for State {
         // the current layout. `pack` re-runs every render, so this is always
         // the live geometry — never a cached copy.
         self.tab_layout = layout.tabs;
+
+        // Record per-tab pane geometry for the finer click-to-focus hit-test
+        // (#74), parallel to `tab_layout`. Only the grid rungs (L0–L2) draw a
+        // per-pane minimap; narrower tabs (L3 glyph / L4 hint) carry no pane
+        // regions, so they get no entry and a click there falls back to plain
+        // tab-switch. `vinset_for` mirrors what `assemble` painted, so the
+        // hit-test insets exactly as the frame did.
+        self.tab_panes = self
+            .tab_layout
+            .iter()
+            .filter(|hit| {
+                matches!(
+                    tab_block::level_for(hit.width),
+                    tab_block::Level::L0 | tab_block::Level::L1 | tab_block::Level::L2
+                )
+            })
+            .map(|hit| {
+                (
+                    hit.position,
+                    TabPaneGeom {
+                        start: hit.start,
+                        width: hit.width,
+                        rows,
+                        vinset: tab_block::vinset_for(self.config.perspective, rows, hit.active),
+                        panes: panes_by_position
+                            .get(&hit.position)
+                            .cloned()
+                            .unwrap_or_default(),
+                    },
+                )
+            })
+            .collect();
     }
 }
 
@@ -296,6 +352,41 @@ impl State {
         .into_iter()
         .chain(config.reorder.then_some(PermissionType::RunActionsAsUser))
         .collect()
+    }
+
+    /// Resolve a left click at (`row`, `column`) as finely as the drawn frame
+    /// allows (#74): focus the exact minimap pane under the cursor when the click
+    /// lands on one, else fall back to switching to the clicked tab (#8). Focusing
+    /// a pane also switches to its tab (zellij's `focus_terminal_pane` does), so a
+    /// click on a non-active tab's pane both switches and focuses in one step.
+    /// Both effects return as a Tab/Pane update that drives the repaint.
+    fn focus_or_switch_at(&self, row: isize, column: usize) {
+        if let Some(id) = self.pane_at(row, column) {
+            // The pane survived projection's `is_plugin/is_floating/is_suppressed`
+            // filter, so it is a visible tiled terminal pane: it is never hidden,
+            // making both `should_float_if_hidden` and `should_be_in_place_if_hidden`
+            // moot — pass `false`. Needs `ChangeApplicationState`, already granted
+            // for `switch_tab_to` (#8), so no new permission (#74).
+            focus_terminal_pane(id as u32, false, false);
+            return;
+        }
+        self.switch_to_tab_at(column);
+    }
+
+    /// The stable id of the minimap pane drawn at click (`row`, `column`), or
+    /// `None` when the click missed a pane — outside every tab, on a tab too
+    /// narrow to draw a minimap (an L3/L4 rung carries no `tab_panes` entry), or
+    /// on a block's background/inset cell. `row` is zellij's click line (`isize`,
+    /// negative when the pointer is above the pane); a negative or out-of-range
+    /// row resolves to `None`, so the caller falls back to a plain tab-switch.
+    /// Hit-tests against the exact geometry the last `render` recorded, so it can
+    /// never focus a pane other than the one drawn under the cursor.
+    fn pane_at(&self, row: isize, column: usize) -> Option<usize> {
+        let row = usize::try_from(row).ok()?;
+        let position = line::position_at_column(&self.tab_layout, column)?;
+        let geom = self.tab_panes.get(&position)?;
+        let col = column.checked_sub(geom.start)?;
+        minimap::pane_at_cell(&geom.panes, geom.width, geom.rows, geom.vinset, col, row)
     }
 
     /// Focus the tab whose drawn block contains `column`; a click that landed on
@@ -952,10 +1043,194 @@ mod tests {
         state.permitted = true;
         state.tabs = vec![tab(0, 1)];
         state.tab_layout = five_block_layout();
+        state.tab_panes = [(0usize, geom(0, 20, &[(7, 0, 0, 80, 24)]))]
+            .into_iter()
+            .collect();
 
         state.render(MIN_ROWS, 80);
 
         assert!(state.tab_layout.is_empty());
+        assert!(
+            state.tab_panes.is_empty(),
+            "the bail-out wipes the pane geometry too"
+        );
+    }
+
+    /// A `TabPaneGeom` for a block at `start` of `width` columns, holding panes
+    /// `(id, x, y, w, h)`, at the minimum bar height with no perspective inset —
+    /// the shape `render` records for a grid-rung tab (#74).
+    fn geom(start: usize, width: usize, panes: &[(usize, u32, u32, u32, u32)]) -> TabPaneGeom {
+        TabPaneGeom {
+            start,
+            width,
+            rows: MIN_ROWS,
+            vinset: 0,
+            panes: panes
+                .iter()
+                .map(|&(id, x, y, w, h)| minimap::PaneRect::new(id, x, y, w, h, "sh", false))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn pane_at_resolves_a_click_to_the_pane_under_the_cursor() {
+        // A tab block drawn at columns 10..30 holding two side-by-side panes (id
+        // 7 left, id 3 right). A click in the block's left half resolves to pane
+        // 7, the right half to pane 3 — the finer hit-test the column-only switch
+        // (#8) could not make.
+        let mut state = State::default();
+        state.tab_layout = vec![hit_active(0, 10, 20)];
+        state.tab_panes = [(
+            0usize,
+            geom(10, 20, &[(7, 0, 0, 40, 24), (3, 40, 0, 40, 24)]),
+        )]
+        .into_iter()
+        .collect();
+
+        assert_eq!(state.pane_at(1, 12), Some(7), "left half → pane 7");
+        assert_eq!(state.pane_at(1, 27), Some(3), "right half → pane 3");
+    }
+
+    #[test]
+    fn pane_at_is_none_off_the_block_and_above_the_bar() {
+        // A column outside every recorded span, and a negative click line (the
+        // pointer above the pane), both resolve to no pane — so the caller falls
+        // back to a plain tab-switch / no-op rather than focusing a wrong pane.
+        let mut state = State::default();
+        state.tab_layout = vec![hit_active(0, 10, 20)];
+        state.tab_panes = [(0usize, geom(10, 20, &[(7, 0, 0, 80, 24)]))]
+            .into_iter()
+            .collect();
+
+        assert_eq!(state.pane_at(1, 5), None, "column left of the block");
+        assert_eq!(state.pane_at(-1, 12), None, "line above the bar");
+    }
+
+    #[test]
+    fn pane_at_resolves_inside_an_inactive_tabs_minimap() {
+        // A non-active grid-rung tab still records its pane geometry, so a click
+        // on its minimap resolves to a pane — the handler then focuses it, which
+        // also switches to that tab (zellij's `focus_terminal_pane`): a click on
+        // a non-active tab's pane both switches and focuses in one step (#74).
+        let mut state = State::default();
+        state.tab_layout = vec![hit(1, 0, 12)];
+        state.tab_panes = [(1usize, geom(0, 12, &[(4, 0, 0, 80, 24)]))]
+            .into_iter()
+            .collect();
+
+        assert_eq!(state.pane_at(1, 6), Some(4));
+    }
+
+    #[test]
+    fn pane_at_falls_back_when_the_tab_draws_no_minimap() {
+        // A narrow tab (an L3 glyph / L4 hint rung) records a column span but no
+        // pane geometry — the grid-rung filter dropped it — so a click resolves
+        // to no pane and the caller falls back to #8's tab-switch, never a
+        // wrong-pane focus.
+        let mut state = State::default();
+        state.tab_layout = vec![hit(0, 10, 3)];
+        // tab_panes deliberately left empty for this tab.
+
+        assert_eq!(state.pane_at(1, 11), None);
+    }
+
+    #[test]
+    fn focus_or_switch_at_dispatches_the_focus_and_the_switch_arms() {
+        // A click that resolves to a minimap pane drives the focus arm
+        // (`focus_terminal_pane`, a no-op host stub off-wasm); a click that
+        // resolves to no pane falls back to #8's tab-switch. Host effects are
+        // unobservable natively, so the contract is that both arms dispatch
+        // without panicking, over the same geometry `pane_at` reads.
+        let mut state = State::default();
+        state.tab_layout = vec![hit_active(0, 10, 20)];
+        state.tab_panes = [(0usize, geom(10, 20, &[(7, 0, 0, 80, 24)]))]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            state.pane_at(1, 12),
+            Some(7),
+            "precondition: click hits pane 7"
+        );
+        state.focus_or_switch_at(1, 12); // resolves to a pane → focus arm
+        state.focus_or_switch_at(1, 5); // off every block → switch fallback
+    }
+
+    #[test]
+    fn render_omits_narrow_tabs_from_the_click_geometry() {
+        // Squeezed into 80 columns, many tabs collapse to L3/L4 rungs that draw
+        // a glyph/hint rather than a per-pane minimap. The grid-rung filter
+        // drops them, so they get no `tab_panes` entry and a click there falls
+        // back to #8's plain tab-switch — never a wrong-pane focus (#74).
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = (0..24)
+            .map(|i| TabInfo {
+                active: i == 0,
+                ..tab(i, i + 1)
+            })
+            .collect();
+
+        state.render(MIN_ROWS, 80);
+
+        let narrow: Vec<_> = state
+            .tab_layout
+            .iter()
+            .filter(|h| {
+                matches!(
+                    tab_block::level_for(h.width),
+                    tab_block::Level::L3 | tab_block::Level::L4
+                )
+            })
+            .collect();
+        assert!(
+            !narrow.is_empty(),
+            "24 tabs in 80 columns must squeeze some to L3/L4"
+        );
+        assert!(
+            narrow
+                .iter()
+                .all(|h| !state.tab_panes.contains_key(&h.position)),
+            "narrow (L3/L4) tabs carry no click geometry"
+        );
+    }
+
+    /// An active [`TabHit`] at `position` spanning `start..start + width`.
+    fn hit_active(position: usize, start: usize, width: usize) -> line::TabHit {
+        line::TabHit {
+            active: true,
+            ..hit(position, start, width)
+        }
+    }
+
+    #[test]
+    fn render_records_pane_geometry_for_the_minimap() {
+        // The success path records, per grid-rung tab, the geometry a finer click
+        // hit-tests against (#74): the active tab's two panes survive into its
+        // `tab_panes` entry, keyed by position, carrying the frame's row count.
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                ..tab(0, 1)
+            },
+            tab(1, 2),
+            tab(2, 3),
+        ];
+        state.panes.panes.insert(
+            0,
+            vec![content_pane(0, 1, 40, 24), content_pane(40, 1, 40, 24)],
+        );
+
+        state.render(MIN_ROWS, 80);
+
+        assert_eq!(
+            state.tab_panes.get(&0).map(|g| g.panes.len()),
+            Some(2),
+            "the active tab's panes are recorded for click-to-focus"
+        );
+        assert_eq!(state.tab_panes.get(&0).map(|g| g.rows), Some(MIN_ROWS));
     }
 
     #[test]

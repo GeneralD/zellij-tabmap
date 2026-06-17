@@ -44,6 +44,12 @@ pub struct State {
     /// each Tab/Pane update), so a click always tests against what is currently
     /// drawn, never a stale frame. Empty until the first render.
     tab_layout: Vec<line::TabHit>,
+    /// The most recent render's "+" button span — the source of truth for
+    /// routing a click to "open a new tab" (#76). Re-recorded every `render()`
+    /// alongside [`Self::tab_layout`] and cleared on the same bail-outs, so a
+    /// click always tests against the live frame. `None` whenever the button is
+    /// disabled, did not fit, or no frame has drawn yet.
+    button_layout: Option<line::ButtonHit>,
     /// The in-progress tab drag, if any. Set when a press lands on a tab,
     /// resolved (and cleared) on release. `None` whenever no drag is underway.
     /// v2 drag-to-reorder (#10).
@@ -186,17 +192,31 @@ impl ZellijPlugin for State {
                 true
             }
             Event::Mouse(Mouse::LeftClick(row, column)) => {
-                // A left click resolves as finely as the drawn frame allows: when
-                // it lands on a pane cell of a tab's minimap, focus that exact
-                // pane (#74); otherwise fall back to switching to the clicked tab
-                // (#8). Focusing a pane also switches to its tab, so a click on a
-                // non-active tab's pane both switches and focuses in one step. The
-                // change arrives back as a Tab/Pane update that drives the repaint,
-                // so this arm requests none. It also records the press as a
-                // *potential* drag (#10): if the pointer then holds and releases
-                // elsewhere, the tab is reordered; a plain click never sets
-                // `dragging`, so it stays a pure focus/switch. Press on no tab
+                // A click in the "+" button's span opens (and focuses) a new tab
+                // and consumes the gesture — it never falls through to a pane
+                // focus, tab switch, or drag arm, and it clears any stale drag
+                // first so a later Hold/Release can't reorder against it. zellij
+                // focuses the new tab; the resulting TabUpdate drives the repaint,
+                // so this requests none. The button span is only ever recorded
+                // when `config.new_tab_button` is on (see `render`), so a disabled
+                // button leaves this guard inert (#76).
+                //
+                // Otherwise the click resolves as finely as the drawn frame
+                // allows: when it lands on a pane cell of a tab's minimap, focus
+                // that exact pane (#74); otherwise fall back to switching to the
+                // clicked tab (#8). Focusing a pane also switches to its tab, so a
+                // click on a non-active tab's pane both switches and focuses in one
+                // step. The change arrives back as a Tab/Pane update that drives
+                // the repaint, so this arm requests none. It also records the press
+                // as a *potential* drag (#10): if the pointer then holds and
+                // releases elsewhere, the tab is reordered; a plain click never
+                // sets `dragging`, so it stays a pure focus/switch. Press on no tab
                 // clears any stale drag.
+                if self.clicked_new_tab_button(column) {
+                    self.drag = None;
+                    let _opened = new_tab::<&str>(None, None);
+                    return false;
+                }
                 self.focus_or_switch_at(row, column);
                 self.drag = self.grab_at(column);
                 false
@@ -240,6 +260,7 @@ impl ZellijPlugin for State {
         // than the previous frame's stale ones. The success path repopulates both
         // at the end.
         self.tab_layout.clear();
+        self.button_layout = None;
         self.tab_panes.clear();
         if !self.permitted {
             return;
@@ -266,7 +287,11 @@ impl ZellijPlugin for State {
         // `+N →` end markers — then render each visible tab into its budgeted
         // block. `pack` clamps the active width into the legible `16..=28` range,
         // so the parser keeps the raw value (see `config.rs`); §4.3–4.4 of the design.
-        let layout = line::pack(
+        // Reserve the trailing "+" button only when enabled — `pack_with_button`
+        // with `with_button: false` is exactly `pack`, recording no button — so
+        // the disabled bar reclaims those columns for the tab strip. When on, the
+        // button is sized to match the bar's inactive tabs (#76).
+        let layout = line::pack_with_button(
             cols,
             0,
             self.config.active_width,
@@ -274,6 +299,7 @@ impl ZellijPlugin for State {
             active_position,
             self.config.align,
             self.config.tab_gap,
+            self.config.new_tab_button,
         );
 
         // Project only the visible tabs' tiled panes (the collapsed ones need no
@@ -310,8 +336,11 @@ impl ZellijPlugin for State {
         );
 
         // Record the spans this frame drew so a later click hit-tests against
-        // the current layout. `pack` re-runs every render, so this is always
-        // the live geometry — never a cached copy.
+        // the current layout. `pack_with_button` re-runs every render, so this
+        // is always the live geometry — never a cached copy. The button span
+        // (when reserved) is recorded the same way, so a click routes to "open
+        // a new tab" against the live frame (#76).
+        self.button_layout = layout.button;
         self.tab_layout = layout.tabs;
 
         // Record per-tab pane geometry for the finer click-to-focus hit-test
@@ -413,6 +442,16 @@ impl State {
             return;
         };
         switch_tab_to(target);
+    }
+
+    /// Whether `column` falls in the "+" button's drawn span — the pure routing
+    /// decision behind a new-tab click (#76). Tests the last frame's recorded
+    /// button geometry: `None` (button disabled, didn't fit, or no frame yet) is
+    /// always a miss. Split from the `new_tab` host effect so the decision is
+    /// unit-tested without a zellij host, mirroring the
+    /// [`reorder_plan`](Self::reorder_plan)/[`reorder`](Self::reorder) seam.
+    fn clicked_new_tab_button(&self, column: usize) -> bool {
+        self.button_layout.is_some_and(|hit| hit.contains(column))
     }
 
     /// Dispatch a wheel step to the configured navigation: switch tabs, walk
@@ -1431,6 +1470,94 @@ mod tests {
             "the active tab's panes are recorded for click-to-focus"
         );
         assert_eq!(state.tab_panes.get(&0).map(|g| g.rows), Some(MIN_ROWS));
+    }
+
+    #[test]
+    fn clicked_new_tab_button_hit_tests_the_recorded_button_span() {
+        // The pure routing predicate behind a new-tab click: a column inside the
+        // recorded "+" span is a hit, one outside misses, and no recorded button
+        // (disabled or no frame yet) always misses. Keeping the decision pure is
+        // what lets it be tested without a zellij host — the `new_tab` host
+        // effect (which reads stdin) is reached only past a true hit.
+        let mut state = State::default();
+        assert!(
+            !state.clicked_new_tab_button(10),
+            "no recorded button → every click misses"
+        );
+
+        state.button_layout = Some(line::ButtonHit {
+            start: 20,
+            width: 3,
+        });
+        assert!(
+            state.clicked_new_tab_button(20),
+            "left edge of the span hits"
+        );
+        assert!(
+            state.clicked_new_tab_button(22),
+            "right edge of the span hits"
+        );
+        assert!(
+            !state.clicked_new_tab_button(19),
+            "just before the span misses"
+        );
+        assert!(
+            !state.clicked_new_tab_button(23),
+            "just past the span misses"
+        );
+    }
+
+    #[test]
+    fn render_records_the_button_span_only_when_enabled() {
+        // With the button enabled (the default) a wide-enough frame reserves and
+        // records its span, so a later click can route to "open a new tab".
+        // Turning the toggle off records no span, leaving the click router with
+        // nothing to match and reclaiming the columns for the tab strip.
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                ..tab(0, 1)
+            },
+            tab(1, 2),
+        ];
+        state
+            .panes
+            .panes
+            .insert(0, vec![content_pane(0, 1, 80, 24)]);
+
+        state.render(MIN_ROWS, 80);
+        assert!(
+            state.button_layout.is_some(),
+            "the enabled button records its span on a wide frame"
+        );
+
+        state.config = Config {
+            new_tab_button: false,
+            ..Default::default()
+        };
+        state.render(MIN_ROWS, 80);
+        assert!(
+            state.button_layout.is_none(),
+            "the disabled button records no span"
+        );
+    }
+
+    #[test]
+    fn render_clears_the_button_span_when_it_cannot_draw() {
+        // A frame that bails out before drawing (here: not yet permitted) must
+        // wipe the previous frame's button span too — otherwise a click could
+        // route to a new tab against geometry no longer on screen.
+        let mut state = State::default();
+        state.button_layout = Some(line::ButtonHit {
+            start: 40,
+            width: 3,
+        });
+
+        state.render(MIN_ROWS, 80);
+
+        assert!(state.button_layout.is_none());
     }
 
     #[test]

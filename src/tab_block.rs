@@ -216,6 +216,54 @@ pub fn assemble(
     }
 }
 
+/// Assemble the inline new-tab `+` button (#76) as a block of exactly `width`
+/// columns and `rows` rows, sized to read as one of the **inactive** tabs beside
+/// it: a muted [`color::button_fill`] band with a `+` (in [`color::button_glyph`])
+/// centered on the vertical-center row — the same middle row
+/// [`crate::paint::compose`] homes the overflow markers and the narrow-rung text
+/// on, so the glyph lines up with the tab labels.
+///
+/// `perspective` mirrors the inactive grid block's depth recede (#66): when on
+/// **and** the bar is at least four rows tall, the fill insets a half-row of
+/// canvas top and bottom, so the button stands exactly as tall as the receded
+/// inactive tabs rather than floating at the full-height active tab's height.
+/// Below four rows, or with perspective off, the band fills its full height —
+/// which the inactive tabs also do in that regime, so the size match holds either
+/// way. The `+` rides the middle row, which is never a recede row at ≥4 rows
+/// (`rows / 2` is neither the first nor the last), so the glyph keeps a solid
+/// band beneath it.
+///
+/// Returns a [`TabBlock`] so [`crate::paint::bar`] can place it through the same
+/// `compose` path as the tabs. The button carries no tab identity, so its
+/// `position` is an inert placeholder: `compose` positions a block by the column
+/// it is handed, never by the block's own `position`.
+pub fn button_block(width: usize, rows: usize, perspective: bool) -> TabBlock {
+    let fill = color::button_fill();
+    // The half-row (one half-block pixel) of canvas reserved at each end for an
+    // inactive block in perspective mode at ≥4 rows — exactly `assemble`'s gate
+    // and inset, so the button recedes in lockstep with the inactive tabs.
+    let vinset = usize::from(perspective && rows >= 4);
+    let middle = rows / 2;
+    let lines = (0..rows)
+        .map(|row| {
+            let receded_top = row < vinset;
+            let receded_bottom = row + vinset >= rows;
+            let line = match (receded_top, receded_bottom, row == middle) {
+                (true, _, _) => two_tone_row(minimap::BG, fill, width),
+                (_, true, _) => two_tone_row(fill, minimap::BG, width),
+                (_, _, true) => text_row_on("+", color::button_glyph(), fill, width),
+                _ => fill_row(fill, width),
+            };
+            StyledLine(line)
+        })
+        .collect();
+    TabBlock {
+        lines,
+        width,
+        position: 0,
+    }
+}
+
 /// The `⌘N` shortcut hint for a tab at 0-based `position`.
 ///
 /// Shown 1-based to match `GoToTab N`. Per design §4.5 a tab with no `Super N`
@@ -354,32 +402,65 @@ fn padded_rows(rows: impl Iterator<Item = String>, width: usize, count: usize) -
         .collect()
 }
 
-/// A full-width row of background half-blocks — the empty canvas.
-fn blank_row(width: usize) -> String {
+/// A full-width row of solid `fill` half-blocks, SGR-reset at the end. The
+/// general form behind [`blank_row`] (canvas fill) and the new-tab button's
+/// muted-fill rows (#76).
+fn fill_row(fill: Rgb, width: usize) -> String {
     let mut out = String::new();
-    background_run(&mut out, width);
+    solid_run(&mut out, fill, width);
     out.push_str(minimap::RESET);
     out
 }
 
-/// `text` (no embedded ANSI) centered on a background canvas `width` columns
-/// wide, drawn in `fg`. The text is first clamped to the budget by display
-/// width — never splitting a wide glyph — so the row is always exactly `width`
-/// display columns even when a caller passes oversized text. The remaining
-/// padding is split left/right to center it.
+/// A full-width row of background half-blocks — the empty canvas (the
+/// canvas-colored [`fill_row`]).
+fn blank_row(width: usize) -> String {
+    fill_row(minimap::BG, width)
+}
+
+/// A full-width row of half-blocks split between `top` and `bottom`: each `▀`
+/// paints its upper-half pixel `top` and its lower-half pixel `bottom`,
+/// SGR-reset at the end. The new-tab button's recede rows use it to inset a
+/// half-row of canvas ([`minimap::BG`]) above or below the muted fill, matching
+/// an inactive grid block's perspective recede (#66) pixel-for-pixel. The
+/// same-color case is exactly [`fill_row`].
+fn two_tone_row(top: Rgb, bottom: Rgb, width: usize) -> String {
+    let mut out = String::new();
+    if width > 0 {
+        minimap::put_fg(&mut out, top);
+        minimap::put_bg(&mut out, bottom);
+        out.push_str(&"\u{2580}".repeat(width)); // ▀
+    }
+    out.push_str(minimap::RESET);
+    out
+}
+
+/// `text` (no embedded ANSI) centered on the background canvas `width` columns
+/// wide, drawn in `fg` — the canvas-colored [`text_row_on`], used by the narrow
+/// rungs (L3 glyph, L4 hint).
 fn text_row(text: &str, fg: Rgb, width: usize) -> String {
+    text_row_on(text, fg, minimap::BG, width)
+}
+
+/// `text` (no embedded ANSI) centered on a solid `fill` canvas `width` columns
+/// wide, drawn in `fg`. Generalizes [`text_row`] (whose canvas is [`minimap::BG`])
+/// for the new-tab button's muted fill (#76). The text is first clamped to the
+/// budget by display width — never splitting a wide glyph — so the row is always
+/// exactly `width` display columns even when a caller passes oversized text. The
+/// remaining padding is split left/right to center it.
+fn text_row_on(text: &str, fg: Rgb, fill: Rgb, width: usize) -> String {
     let clamped = clamped_to_width(text, width);
     let text_width = display_width_ignoring_ansi(&clamped);
     let left = (width - text_width) / 2;
     let right = width - text_width - left;
     let mut out = String::new();
-    background_run(&mut out, left);
+    solid_run(&mut out, fill, left);
     if text_width > 0 {
-        minimap::put_bg(&mut out, minimap::BG);
+        minimap::put_bg(&mut out, fill);
         minimap::put_fg(&mut out, fg);
         out.push_str(&clamped);
     }
-    background_run(&mut out, right);
+    solid_run(&mut out, fill, right);
     out.push_str(minimap::RESET);
     out
 }
@@ -401,13 +482,16 @@ fn clamped_to_width(s: &str, width: usize) -> String {
         .collect()
 }
 
-/// Append `count` background half-block cells to `out`.
-fn background_run(out: &mut String, count: usize) {
+/// Append `count` solid-fill cells of `fill` to `out`: a run of `fill`-on-`fill`
+/// half-blocks, which read as a solid color band. The canvas-colored case
+/// (`fill = minimap::BG`) is the empty bar background; the new-tab button fills
+/// with its own muted color (#76).
+fn solid_run(out: &mut String, fill: Rgb, count: usize) {
     if count == 0 {
         return;
     }
-    minimap::put_fg(out, minimap::BG);
-    minimap::put_bg(out, minimap::BG);
+    minimap::put_fg(out, fill);
+    minimap::put_bg(out, fill);
     out.push_str(&"\u{2580}".repeat(count)); // ▀
 }
 
@@ -1070,5 +1154,120 @@ mod tests {
         assert_eq!(display_width_ignoring_ansi(styled), 2);
         // A wide CJK char counts as two columns.
         assert_eq!(display_width_ignoring_ansi("\u{5b9f}"), 2); // 実
+    }
+
+    // ---- button_block (inline new-tab "+" button, #76) -------------------
+
+    #[test]
+    fn button_block_fills_every_row_to_the_budget() {
+        // The "+" button holds the same exact-height / exact-width contract as a
+        // tab block — every one of `rows` rows fills the budget — so `compose`
+        // lays it without a wider previous frame bleeding through. The recede
+        // rows (perspective on) are still full display width: a half-block split
+        // between fill and canvas occupies the cell exactly like a solid one.
+        for perspective in [false, true] {
+            for rows in [3, 4, 5, 6] {
+                for width in [3, 5, 8] {
+                    let block = button_block(width, rows, perspective);
+                    assert_eq!(block.lines.len(), rows, "rows {rows}: exact height");
+                    for (row, line) in block.lines.iter().enumerate() {
+                        assert_eq!(
+                            measured(line),
+                            width,
+                            "perspective {perspective}, rows {rows}, width {width}, row {row}: display width must equal the budget"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn button_block_centers_the_plus_on_the_middle_row() {
+        // The glyph rides the vertical-center row (rows / 2) — the row `compose`
+        // homes markers and rung text on — so the "+" lines up with the tab
+        // labels. Every other row carries just the muted fill, no glyph.
+        let rows = 4;
+        let block = button_block(3, rows, false);
+        let middle = rows / 2;
+        assert!(
+            block.lines[middle].as_str().contains('+'),
+            "the + rides the middle row"
+        );
+        for (row, line) in block.lines.iter().enumerate() {
+            if row != middle {
+                assert!(!line.as_str().contains('+'), "row {row} carries no glyph");
+            }
+        }
+    }
+
+    #[test]
+    fn button_block_paints_the_muted_fill_and_glyph_colors() {
+        // The block is painted with the theme-derived muted button fill
+        // (background) and the "+" in the button glyph foreground (#76) — the
+        // quiet affordance, never a tab's vivid pane fill.
+        let fill_bg = {
+            let (r, g, b) = crate::color::button_fill();
+            format!("\x1b[48;2;{r};{g};{b}m")
+        };
+        let glyph_fg = {
+            let (r, g, b) = crate::color::button_glyph();
+            format!("\x1b[38;2;{r};{g};{b}m")
+        };
+        let block = button_block(3, 4, false);
+        let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
+        assert!(
+            joined.contains(&fill_bg),
+            "every row is painted with the muted button fill"
+        );
+        assert!(
+            joined.contains(&glyph_fg),
+            "the + is drawn in the button glyph foreground"
+        );
+    }
+
+    #[test]
+    fn button_block_recedes_like_an_inactive_block_under_perspective() {
+        // #76 size match: the button must read as one of the *inactive* tabs, so
+        // it takes the same perspective recede an inactive grid block does (#66)
+        // — a half-row of canvas inset top and bottom at ≥4 rows. The witness is
+        // the top and bottom rows: receded, their first cell carries the canvas
+        // background ([`minimap::BG`]); full-height, it carries the button fill.
+        // Like `assemble`'s cue, the recede is gated on a four-row bar — inert at
+        // three rows.
+        let canvas_bg = {
+            let (r, g, b) = minimap::BG;
+            format!("\x1b[48;2;{r};{g};{b}m")
+        };
+        let canvas_fg = {
+            let (r, g, b) = minimap::BG;
+            format!("\x1b[38;2;{r};{g};{b}m")
+        };
+        let recede = button_block(5, 4, true);
+        let full = button_block(5, 4, false);
+        let last = recede.lines.len() - 1;
+        // Top row: canvas in the upper half (fg), fill in the lower — receded in.
+        assert!(
+            recede.lines[0].as_str().starts_with(&canvas_fg),
+            "the receded top row insets a half-row of canvas above the fill"
+        );
+        // Bottom row: fill in the upper half, canvas in the lower (bg).
+        assert!(
+            recede.lines[last].as_str().contains(&canvas_bg),
+            "the receded bottom row insets a half-row of canvas below the fill"
+        );
+        // Full-height: the ends carry no canvas inset — they are solid fill.
+        assert!(
+            !full.lines[0].as_str().contains(&canvas_bg)
+                && !full.lines[0].as_str().starts_with(&canvas_fg),
+            "with perspective off the top row is solid fill, no canvas inset"
+        );
+        // The cue is gated on a four-row bar: a three-row button never recedes,
+        // matching `assemble`'s inactive-block gate.
+        assert_eq!(
+            button_block(5, 3, true).lines,
+            button_block(5, 3, false).lines,
+            "below four rows perspective must be a no-op for the button too"
+        );
     }
 }

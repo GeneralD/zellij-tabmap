@@ -68,6 +68,12 @@ pub struct Config {
     /// `pane size=N`, so this cue only shows once `size >= 4`. `false` renders
     /// every tab at full height.
     pub perspective: bool,
+    /// Whether a clickable "+" button is appended after the last visible tab,
+    /// opening (and focusing) a new tab on click (#76). On by default; clicking it
+    /// needs only the already-granted `ChangeApplicationState` permission, so no
+    /// new permission prompt appears on auto-update. `false` hides the button and
+    /// reclaims its columns for the tab strip.
+    pub new_tab_button: bool,
     /// How the mouse wheel navigates over the bar (#80). `tab` (default) switches
     /// tabs, `pane` walks the focused pane across tab boundaries, `off` makes the
     /// wheel inert. zellij delivers scroll events without a position, so the
@@ -113,6 +119,10 @@ impl Config {
     /// lifts the active tab out of the box (#66). A no-op below four rows. Set
     /// `false` to render every tab at full height.
     pub const DEFAULT_PERSPECTIVE: bool = true;
+    /// Default new-tab button — on, so the "+" affordance is present out of the
+    /// box (#76). It rides on the already-granted `ChangeApplicationState`
+    /// permission, so enabling it by default costs existing users no new prompt.
+    pub const DEFAULT_NEW_TAB_BUTTON: bool = true;
     /// Default wheel behaviour — `Tab`, matching zellij's stock tab-bar (scroll
     /// switches tabs). Set `pane` to walk panes, `off` to disable (#80).
     pub const DEFAULT_SCROLL: ScrollMode = ScrollMode::Tab;
@@ -170,6 +180,10 @@ impl Config {
                 .get("perspective")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_PERSPECTIVE),
+            new_tab_button: configuration
+                .get("new_tab_button")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_NEW_TAB_BUTTON),
             scroll: configuration
                 .get("scroll")
                 .and_then(|raw| raw.parse().ok())
@@ -224,6 +238,7 @@ mod tests {
         assert_eq!(config.gradient_radial, RadialDirection::Outward);
         assert!(config.inactive_dim);
         assert!(config.perspective);
+        assert!(config.new_tab_button);
         assert_eq!(config.scroll, ScrollMode::Tab);
     }
 
@@ -438,6 +453,19 @@ mod tests {
         // A malformed or empty value keeps the on-by-default cue.
         assert!(config_from(&[("perspective", "sometimes")]).perspective);
         assert!(config_from(&[("perspective", "")]).perspective);
+    }
+
+    #[test]
+    fn parses_explicit_new_tab_button_off() {
+        // The "+" button is on by default; an explicit `false` hides it.
+        assert!(!config_from(&[("new_tab_button", "false")]).new_tab_button);
+    }
+
+    #[test]
+    fn malformed_new_tab_button_falls_back() {
+        // A malformed or empty value keeps the on-by-default button.
+        assert!(config_from(&[("new_tab_button", "nope")]).new_tab_button);
+        assert!(config_from(&[("new_tab_button", "")]).new_tab_button);
     }
 
     #[test]

@@ -52,9 +52,10 @@ impl ButtonHit {
     /// Whether `column` lands on the button's drawn span. Column-range only:
     /// the button is a full-height fill, so it owns its columns on *every* row
     /// — there is no per-row trailing space to mis-trigger on (#76).
-pub fn contains(&self, column: usize) -> bool {
-    let end = self.start.saturating_add(self.width);
-    (self.start..end).contains(&column)
+    pub fn contains(&self, column: usize) -> bool {
+        let end = self.start.saturating_add(self.width);
+        (self.start..end).contains(&column)
+    }
 }
 
 /// A run of collapsed tabs at one end of the bar, drawn as `← +N` / `+N →`.
@@ -373,10 +374,9 @@ pub fn pack_with_button(
     // when nothing is drawn). The reduced-budget pack guarantees the strip ends
     // by `cols - reserve`, so `last_tab_end + button_width <= cols` — the button
     // always fits.
-let start = layout
-    .tabs
-    .last()
-    .map_or(prefix_width, |tab| tab.start.saturating_add(tab.width).saturating_add(gap));
+    let start = layout.tabs.last().map_or(prefix_width, |tab| {
+        tab.start.saturating_add(tab.width).saturating_add(gap)
+    });
 
     // Slide the right marker past the button. `pack` placed it butting the last
     // tab; shifting it by the whole reserve lands it exactly at the button's end

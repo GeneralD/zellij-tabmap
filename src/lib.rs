@@ -181,11 +181,14 @@ impl ZellijPlugin for State {
                 // pure switch. Press on no tab clears any stale drag.
                 // A click in the "+" button's span opens (and focuses) a new tab
                 // and consumes the gesture — it never falls through to a tab
-                // switch or a drag arm. zellij focuses the new tab; the resulting
-                // TabUpdate drives the repaint, so this requests none. The button
-                // span is only ever recorded when `config.new_tab_button` is on
-                // (see `render`), so a disabled button leaves this guard inert (#76).
+                // switch or a drag arm, and it clears any stale drag first so a
+                // later Hold/Release can't reorder against it. zellij focuses the
+                // new tab; the resulting TabUpdate drives the repaint, so this
+                // requests none. The button span is only ever recorded when
+                // `config.new_tab_button` is on (see `render`), so a disabled
+                // button leaves this guard inert (#76).
                 if self.clicked_new_tab_button(column) {
+                    self.drag = None;
                     let _opened = new_tab::<&str>(None, None);
                     return false;
                 }

@@ -80,6 +80,14 @@ pub struct Config {
     /// gesture acts on the whole bar. Needs no permission beyond the default set
     /// (`ChangeApplicationState`). See [`ScrollMode`].
     pub scroll: ScrollMode,
+    /// Wheel events required per navigation step (#83). A stepless device (Magic
+    /// Mouse, trackpad) fires a *stream* of scroll events for one flick, so the
+    /// pre-#83 "one event = one step" raced through tabs/panes. This is a software
+    /// detent: `3` (default) takes a step every third event, `1` restores the
+    /// pre-#83 one-step-per-event feel, higher values damp the wheel further. `0`
+    /// is treated as `1`. Ignored when `scroll` is `off`. See
+    /// [`crate::scroll::accumulate`].
+    pub scroll_throttle: usize,
 }
 
 impl Config {
@@ -126,6 +134,9 @@ impl Config {
     /// Default wheel behaviour — `Tab`, matching zellij's stock tab-bar (scroll
     /// switches tabs). Set `pane` to walk panes, `off` to disable (#80).
     pub const DEFAULT_SCROLL: ScrollMode = ScrollMode::Tab;
+    /// Default wheel throttle — a step every `3` events, taming stepless devices
+    /// out of the box. Set `1` to restore the pre-#83 one-step-per-event feel (#83).
+    pub const DEFAULT_SCROLL_THROTTLE: usize = 3;
 
     /// Parse the configuration map, falling back to a default for any missing or
     /// malformed value. Total: never panics on bad input.
@@ -188,6 +199,10 @@ impl Config {
                 .get("scroll")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_SCROLL),
+            scroll_throttle: configuration
+                .get("scroll_throttle")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_SCROLL_THROTTLE),
         }
     }
 
@@ -240,6 +255,7 @@ mod tests {
         assert!(config.perspective);
         assert!(config.new_tab_button);
         assert_eq!(config.scroll, ScrollMode::Tab);
+        assert_eq!(config.scroll_throttle, 3);
     }
 
     #[test]
@@ -446,6 +462,27 @@ mod tests {
         assert_eq!(config_from(&[("scroll", "wheel")]).scroll, ScrollMode::Tab);
         assert_eq!(config_from(&[("scroll", "Tab")]).scroll, ScrollMode::Tab);
         assert_eq!(config_from(&[("scroll", "")]).scroll, ScrollMode::Tab);
+    }
+
+    #[test]
+    fn parses_scroll_throttle() {
+        // A valid count is preserved verbatim; `1` is the documented value for
+        // restoring the pre-#83 one-step-per-event feel.
+        assert_eq!(config_from(&[("scroll_throttle", "5")]).scroll_throttle, 5);
+        assert_eq!(config_from(&[("scroll_throttle", "1")]).scroll_throttle, 1);
+    }
+
+    #[test]
+    fn malformed_scroll_throttle_falls_back() {
+        // Non-numeric / negative / empty values keep the taming default. An
+        // explicit `0` parses fine here (range concerns live at the use site,
+        // where `accumulate` treats it as `1`).
+        assert_eq!(
+            config_from(&[("scroll_throttle", "fast")]).scroll_throttle,
+            3
+        );
+        assert_eq!(config_from(&[("scroll_throttle", "-1")]).scroll_throttle, 3);
+        assert_eq!(config_from(&[("scroll_throttle", "")]).scroll_throttle, 3);
     }
 
     #[test]

@@ -76,6 +76,44 @@ fn step(here: usize, len: usize, dir: ScrollDir) -> usize {
     }
 }
 
+/// A software detent for the wheel (#83). zellij emits one `Mouse::ScrollUp` /
+/// `ScrollDown` per sub-notch of motion, and a stepless device (Magic Mouse,
+/// trackpad) quantizes a single flick into a *stream* of them — so "one event =
+/// one nav step" (#80) races through several tabs/panes per flick. This recreates
+/// the missing physical detent: feed each event in `dir` into `accum` and report
+/// whether a navigation step is due now (`1`) or not yet (`0`).
+///
+/// `accum` is the signed sub-threshold remainder carried between calls (positive
+/// = forward, negative = backward); seed it `0`. `threshold` is the events per
+/// step — `1` reproduces the pre-#83 one-step-per-event feel, higher values damp
+/// the wheel. A `0` threshold is treated as `1`, so a misconfigured `0` can never
+/// wedge the wheel by demanding an unreachable count.
+///
+/// A direction reversal first clears any remainder pointing the other way, so a
+/// back-flick starts counting fresh instead of burning through leftover forward
+/// momentum — the wheel feels responsive at the turn. One event moves `accum` by
+/// a single unit and `threshold >= 1`, so at most one step crosses per call.
+pub fn accumulate(accum: &mut isize, dir: ScrollDir, threshold: usize) -> usize {
+    let threshold = threshold.max(1) as isize;
+    let unit: isize = match dir {
+        ScrollDir::Forward => 1,
+        ScrollDir::Backward => -1,
+    };
+    if accum.signum() == -unit {
+        *accum = 0;
+    }
+    *accum += unit;
+    if *accum >= threshold {
+        *accum -= threshold;
+        return 1;
+    }
+    if *accum <= -threshold {
+        *accum += threshold;
+        return 1;
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +191,63 @@ mod tests {
         // A lone pane (e.g. a single tab with one pane) steps to itself.
         assert_eq!(next_pane(&[7], 7, ScrollDir::Forward), Some(7));
         assert_eq!(next_pane(&[7], 7, ScrollDir::Backward), Some(7));
+    }
+
+    #[test]
+    fn accumulate_threshold_one_steps_every_event() {
+        // threshold 1 is the pre-#83 feel: each event yields a step, in either
+        // direction, and the accumulator returns to rest each time.
+        let mut accum = 0isize;
+        assert_eq!(accumulate(&mut accum, ScrollDir::Forward, 1), 1);
+        assert_eq!(accum, 0);
+        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 1), 1);
+        assert_eq!(accum, 0);
+    }
+
+    #[test]
+    fn accumulate_crosses_only_on_the_threshold_event() {
+        // threshold 3: the first two events accumulate silently (carry visible in
+        // `accum`), and only the third crosses — then the remainder resets to 0.
+        let mut accum = 0isize;
+        assert_eq!(accumulate(&mut accum, ScrollDir::Forward, 3), 0);
+        assert_eq!(accum, 1);
+        assert_eq!(accumulate(&mut accum, ScrollDir::Forward, 3), 0);
+        assert_eq!(accum, 2);
+        assert_eq!(accumulate(&mut accum, ScrollDir::Forward, 3), 1);
+        assert_eq!(accum, 0);
+    }
+
+    #[test]
+    fn accumulate_steps_backward_on_the_threshold_event() {
+        // The backward direction is symmetric: three backward events cross once.
+        let mut accum = 0isize;
+        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 3), 0);
+        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 3), 0);
+        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 3), 1);
+        assert_eq!(accum, 0);
+    }
+
+    #[test]
+    fn accumulate_reversal_clears_opposing_carry() {
+        // Two forward events leave a +2 carry; a single backward event wipes it
+        // and starts the backward count fresh (-1), rather than netting to +1. So
+        // the turn then needs a full `threshold` of backward events to cross.
+        let mut accum = 0isize;
+        accumulate(&mut accum, ScrollDir::Forward, 3);
+        accumulate(&mut accum, ScrollDir::Forward, 3);
+        assert_eq!(accum, 2);
+        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 3), 0);
+        assert_eq!(accum, -1);
+        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 3), 0);
+        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 3), 1);
+    }
+
+    #[test]
+    fn accumulate_treats_zero_threshold_as_one() {
+        // A misconfigured `0` must not wedge the wheel by demanding an
+        // unreachable count — it falls back to stepping on every event.
+        let mut accum = 0isize;
+        assert_eq!(accumulate(&mut accum, ScrollDir::Forward, 0), 1);
+        assert_eq!(accum, 0);
     }
 }

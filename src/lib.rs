@@ -60,6 +60,11 @@ pub struct State {
     /// draw no per-pane regions, so a click there has no pane to resolve. Cleared
     /// on every render bail-out, so a click never hit-tests a stale frame.
     tab_panes: BTreeMap<usize, TabPaneGeom>,
+    /// Signed sub-threshold wheel remainder for the software detent (#83). Each
+    /// scroll event feeds [`scroll::accumulate`]; a navigation step fires only
+    /// when it crosses `config.scroll_throttle`. Positive = forward, negative =
+    /// backward; a direction reversal resets it. Starts at `0`.
+    scroll_accum: isize,
 }
 
 /// One visible tab's drawn pane geometry, captured each render so a later click
@@ -237,9 +242,10 @@ impl ZellijPlugin for State {
             }
             Event::Mouse(Mouse::ScrollUp(_)) => {
                 // Wheel up = forward (next tab / next pane), matching zellij's
-                // stock tab-bar direction. The line count is ignored — one event
-                // is one step, for predictability. The navigation arrives back as
-                // a Tab/Pane update that drives the repaint, so request none (#80).
+                // stock tab-bar direction. The line count is ignored — each event
+                // counts as one notch into the software detent, which steps only
+                // every `scroll_throttle` events (#83). The navigation arrives back
+                // as a Tab/Pane update that drives the repaint, so request none (#80).
                 self.scroll(scroll::ScrollDir::Forward);
                 false
             }
@@ -454,14 +460,26 @@ impl State {
         self.button_layout.is_some_and(|hit| hit.contains(column))
     }
 
-    /// Dispatch a wheel step to the configured navigation: switch tabs, walk
+    /// Dispatch a wheel event to the configured navigation: switch tabs, walk
     /// panes, or do nothing (#80). zellij scroll events carry no position, so the
     /// gesture is bar-wide — it acts on the live tab/pane set, not a clicked spot.
-    fn scroll(&self, dir: scroll::ScrollDir) {
-        match self.config.scroll {
-            scroll::ScrollMode::Off => {}
+    ///
+    /// A software detent throttles the wheel (#83): each event feeds the
+    /// accumulator and only every `scroll_throttle`-th one actually steps, so a
+    /// stepless device's event stream no longer races through tabs/panes. `off`
+    /// mode short-circuits before accumulating, leaving the detent at rest.
+    fn scroll(&mut self, dir: scroll::ScrollDir) {
+        let mode = self.config.scroll;
+        if mode == scroll::ScrollMode::Off {
+            return;
+        }
+        if scroll::accumulate(&mut self.scroll_accum, dir, self.config.scroll_throttle) == 0 {
+            return;
+        }
+        match mode {
             scroll::ScrollMode::Tab => self.scroll_tabs(dir),
             scroll::ScrollMode::Pane => self.scroll_panes(dir),
+            scroll::ScrollMode::Off => {}
         }
     }
 
@@ -1373,16 +1391,45 @@ mod tests {
     fn scroll_dispatches_each_mode_without_panicking() {
         // Host effects (`switch_tab_to` / `focus_terminal_pane`) are no-op stubs
         // off-wasm, so the contract is that every mode dispatches both directions
-        // without panicking over the live tab/pane set.
+        // without panicking over the live tab/pane set. `scroll_throttle` defaults
+        // to 3, so drive enough events to cross the detent at least once.
         for mode in [
             scroll::ScrollMode::Tab,
             scroll::ScrollMode::Pane,
             scroll::ScrollMode::Off,
         ] {
-            let state = scroll_state(mode, Some(20));
-            state.scroll(scroll::ScrollDir::Forward);
-            state.scroll(scroll::ScrollDir::Backward);
+            let mut state = scroll_state(mode, Some(20));
+            for _ in 0..3 {
+                state.scroll(scroll::ScrollDir::Forward);
+            }
+            for _ in 0..3 {
+                state.scroll(scroll::ScrollDir::Backward);
+            }
         }
+    }
+
+    #[test]
+    fn scroll_throttle_delays_the_step_until_the_threshold() {
+        // With the default throttle (3), the first two wheel events accumulate
+        // without navigating — the detent leaves the accumulator below threshold —
+        // and only the third crosses it, after which the remainder resets.
+        let mut state = scroll_state(scroll::ScrollMode::Tab, Some(10));
+        state.scroll(scroll::ScrollDir::Forward);
+        assert_eq!(state.scroll_accum, 1);
+        state.scroll(scroll::ScrollDir::Forward);
+        assert_eq!(state.scroll_accum, 2);
+        state.scroll(scroll::ScrollDir::Forward);
+        assert_eq!(state.scroll_accum, 0);
+    }
+
+    #[test]
+    fn scroll_off_mode_never_accumulates() {
+        // `off` short-circuits before the detent, so the accumulator stays at rest
+        // — toggling back to tab/pane later starts from a clean count.
+        let mut state = scroll_state(scroll::ScrollMode::Off, Some(10));
+        state.scroll(scroll::ScrollDir::Forward);
+        state.scroll(scroll::ScrollDir::Forward);
+        assert_eq!(state.scroll_accum, 0);
     }
 
     #[test]

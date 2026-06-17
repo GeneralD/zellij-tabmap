@@ -1714,6 +1714,78 @@ mod tests {
     }
 
     #[test]
+    fn render_omits_narrow_tabs_from_the_close_geometry() {
+        // The close cell rides the same grid rungs the glyph is painted on
+        // (L0–L2). Tabs squeezed to L3/L4 draw no per-tab minimap and so get no
+        // "×" — the filter must drop them from `close_layout`, mirroring how #74
+        // drops them from the click geometry. Exercises the filter's reject arm.
+        let mut state = State::default();
+        state.permitted = true;
+        state.config = Config {
+            close_button: true,
+            ..Default::default()
+        };
+        state.tabs = (0..24)
+            .map(|i| TabInfo {
+                active: i == 0,
+                ..tab(i, i + 1)
+            })
+            .collect();
+
+        state.render(MIN_ROWS, 80);
+
+        let narrow: Vec<_> = state
+            .tab_layout
+            .iter()
+            .filter(|h| {
+                matches!(
+                    tab_block::level_for(h.width),
+                    tab_block::Level::L3 | tab_block::Level::L4
+                )
+            })
+            .collect();
+        assert!(
+            !narrow.is_empty(),
+            "24 tabs in 80 columns must squeeze some to L3/L4"
+        );
+        let closeable: std::collections::HashSet<usize> =
+            state.close_layout.iter().map(|hit| hit.position).collect();
+        assert!(
+            narrow.iter().all(|h| !closeable.contains(&h.position)),
+            "narrow (L3/L4) tabs carry no close cell"
+        );
+        assert!(
+            !state.close_layout.is_empty(),
+            "the wide tabs still record their close cells"
+        );
+    }
+
+    #[test]
+    fn left_click_on_the_close_cell_closes_the_tab_and_consumes_the_gesture() {
+        // A press on a recorded "×" cell closes that tab via the host (stubbed
+        // here), drops any armed drag, and requests no repaint — the close
+        // arrives back as a TabUpdate, which drives the redraw. Checked before
+        // the focus/switch fallback so the corner closes rather than switches,
+        // and before any drag is armed (#86).
+        let mut state = State::default();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 7,
+            dragging: false,
+        });
+        state.close_layout = vec![line::CloseHit {
+            position: 2,
+            row: 0,
+            column: 9,
+        }];
+
+        assert!(!state.update(Event::Mouse(Mouse::LeftClick(0, 9))));
+        assert!(
+            state.drag.is_none(),
+            "closing consumes the gesture and drops any stale drag"
+        );
+    }
+
+    #[test]
     fn render_clears_the_button_span_when_it_cannot_draw() {
         // A frame that bails out before drawing (here: not yet permitted) must
         // wipe the previous frame's button span too — otherwise a click could

@@ -2401,13 +2401,10 @@ mod tests {
             GradientSpec::OFF,
             true,
         );
+        let with_top = with.lines().next().unwrap_or_default();
         assert!(
-            with.lines()
-                .next()
-                .unwrap_or_default()
-                .contains(CLOSE_GLYPH),
-            "close=true stamps × on the top row: {:?}",
-            with.lines().next()
+            with_top.contains(CLOSE_GLYPH),
+            "close=true stamps × on the top row: {with_top:?}"
         );
         assert!(
             !without.contains(CLOSE_GLYPH),
@@ -2438,10 +2435,44 @@ mod tests {
         );
         let lines: Vec<&str> = out.lines().collect();
         assert!(lines[0].contains(CLOSE_GLYPH), "× rides the top row");
+        let lower = &lines[1..];
         assert!(
-            lines[1..].iter().all(|l| !l.contains(CLOSE_GLYPH)),
-            "no × on any lower row: {:?}",
-            &lines[1..]
+            lower.iter().all(|l| !l.contains(CLOSE_GLYPH)),
+            "no × on any lower row: {lower:?}"
+        );
+    }
+
+    #[test]
+    fn close_clips_a_top_row_label_off_its_own_cell() {
+        // With close on, a label that lands on the top row is bounded one column
+        // short of the "×" cell so the two never overprint — the row-0 mirror of
+        // the badge's left-edge nudge (#86). A top/bottom split puts the top
+        // pane's label on row 0 (it biases up off the shared middle row), so the
+        // close glyph and that label share the first line; both survive.
+        let panes = vec![
+            PaneRect::new(0, 0, 0, 100, 20, "top", false),
+            PaneRect::new(1, 0, 20, 100, 20, "bot", true),
+        ];
+        let out = render(
+            &panes,
+            &test_palette(),
+            14,
+            3,
+            0,
+            LabelMode::All,
+            None,
+            true,
+            GradientSpec::OFF,
+            true,
+        );
+        let lines = visible_lines(&out);
+        assert!(
+            lines[0].contains(CLOSE_GLYPH),
+            "the close × rides the top row beside the label: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("top"),
+            "the row-0 label still renders next to the close cell: {lines:?}"
         );
     }
 

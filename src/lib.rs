@@ -472,12 +472,17 @@ impl State {
 
     /// Every tab's tiled terminal panes flattened into one wheel-traversal order:
     /// tabs in ascending position, panes in reading order within each tab (#80).
+    ///
+    /// Tab order comes from the authoritative `self.tabs`, not the `PaneManifest`
+    /// keys: `TabUpdate` and `PaneUpdate` arrive as separate events, so a just-
+    /// closed tab can still linger as a stale position in the manifest. Walking
+    /// `self.tabs` drops those, so the wheel never steps into a pane of a tab that
+    /// no longer exists.
     fn pane_focus_order(&self) -> Vec<u32> {
-        let mut positions: Vec<usize> = self.panes.panes.keys().copied().collect();
-        positions.sort_unstable();
-        positions
-            .into_iter()
-            .filter_map(|position| self.panes.panes.get(&position))
+        let mut tabs: Vec<&TabInfo> = self.tabs.iter().collect();
+        tabs.sort_by_key(|tab| tab.position);
+        tabs.into_iter()
+            .filter_map(|tab| self.panes.panes.get(&tab.position))
             .flat_map(|panes| projection::pane_ids_in_reading_order(panes))
             .collect()
     }
@@ -1308,6 +1313,20 @@ mod tests {
         // Tabs in ascending position, panes in reading order within each: tab 0's
         // 10 (x=0) then 20 (x=40), then tab 1's 30 — the global wheel traversal.
         let state = scroll_state(scroll::ScrollMode::Pane, Some(10));
+        assert_eq!(state.pane_focus_order(), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn pane_focus_order_ignores_manifest_positions_not_in_the_tabs() {
+        // `TabUpdate` and `PaneUpdate` arrive separately, so a just-closed tab can
+        // linger as a stale position in the manifest. The traversal walks the
+        // authoritative `self.tabs`, so that stale pane (99 at position 5) is never
+        // visited — the wheel can't step into a tab that no longer exists.
+        let mut state = scroll_state(scroll::ScrollMode::Pane, Some(10));
+        state
+            .panes
+            .panes
+            .insert(5, vec![focusable_pane(99, 0, false)]);
         assert_eq!(state.pane_focus_order(), vec![10, 20, 30]);
     }
 

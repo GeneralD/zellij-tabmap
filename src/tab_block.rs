@@ -224,35 +224,30 @@ pub fn assemble(
 /// on, so the glyph lines up with the tab labels.
 ///
 /// `perspective` mirrors the inactive grid block's depth recede (#66): when on
-/// **and** the bar is at least four rows tall, the fill insets a half-row of
-/// canvas top and bottom, so the button stands exactly as tall as the receded
-/// inactive tabs rather than floating at the full-height active tab's height.
-/// Below four rows, or with perspective off, the band fills its full height —
-/// which the inactive tabs also do in that regime, so the size match holds either
-/// way. The `+` rides the middle row, which is never a recede row at ≥4 rows
-/// (`rows / 2` is neither the first nor the last), so the glyph keeps a solid
-/// band beneath it.
+/// **and** the bar is at least four rows tall, the fill insets a half-row top and
+/// bottom, so the button stands exactly as tall as the receded inactive tabs
+/// rather than floating at the full-height active tab's height. Below four rows,
+/// or with perspective off, the band fills its full height — which the inactive
+/// tabs also do in that regime, so the size match holds either way. The `+` rides
+/// the middle row, which is never a recede row at ≥4 rows (`rows / 2` is neither
+/// the first nor the last), so the glyph keeps a solid band beneath it.
 ///
-/// `gradient` is the bar's sweep, threaded straight through to
-/// [`minimap::button`] so the fill sweeps exactly as a single-pane inactive tab
-/// does (#84): a flat fill made the recede half-rows read as a hard frame, while
-/// the swept inactive tabs carried the same recede as depth.
+/// The recede inset is *transparent* (the terminal default background), not a
+/// painted canvas color: a `BG`-painted inset read as a hard top/bottom frame
+/// against the flat fill (#84). With the inset transparent the flat fill recedes
+/// cleanly into the bar backdrop, so the button stays flat — no gradient — which
+/// also keeps it visually distinct from the gradient-swept tabs.
 ///
 /// Returns a [`TabBlock`] so [`crate::paint::bar`] can place it through the same
 /// `compose` path as the tabs. The button carries no tab identity, so its
 /// `position` is an inert placeholder: `compose` positions a block by the column
 /// it is handed, never by the block's own `position`.
-pub fn button_block(
-    width: usize,
-    rows: usize,
-    perspective: bool,
-    gradient: GradientSpec,
-) -> TabBlock {
-    // The half-row (one half-block pixel) of canvas reserved at each end for an
-    // inactive block in perspective mode at ≥4 rows — exactly `assemble`'s gate
-    // and inset, so the button recedes in lockstep with the inactive tabs.
+pub fn button_block(width: usize, rows: usize, perspective: bool) -> TabBlock {
+    // The half-row (one half-block pixel) reserved at each end for an inactive
+    // block in perspective mode at ≥4 rows — exactly `assemble`'s gate and inset,
+    // so the button recedes in lockstep with the inactive tabs.
     let vinset = usize::from(perspective && rows >= 4);
-    let lines = minimap::button(width, rows, vinset, gradient)
+    let lines = minimap::button(width, rows, vinset)
         .lines()
         .map(|line| StyledLine(line.to_string()))
         .collect();
@@ -1150,7 +1145,7 @@ mod tests {
         for perspective in [false, true] {
             for rows in [3, 4, 5, 6] {
                 for width in [3, 5, 8] {
-                    let block = button_block(width, rows, perspective, GradientSpec::OFF);
+                    let block = button_block(width, rows, perspective);
                     assert_eq!(block.lines.len(), rows, "rows {rows}: exact height");
                     for (row, line) in block.lines.iter().enumerate() {
                         assert_eq!(
@@ -1170,7 +1165,7 @@ mod tests {
         // homes markers and rung text on — so the "+" lines up with the tab
         // labels. Every other row carries just the muted fill, no glyph.
         let rows = 4;
-        let block = button_block(3, rows, false, GradientSpec::OFF);
+        let block = button_block(3, rows, false);
         let middle = rows / 2;
         assert!(
             block.lines[middle].as_str().contains('+'),
@@ -1196,7 +1191,7 @@ mod tests {
             let (r, g, b) = crate::color::button_glyph();
             format!("\x1b[38;2;{r};{g};{b}m")
         };
-        let block = button_block(3, 4, false, GradientSpec::OFF);
+        let block = button_block(3, 4, false);
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(
             joined.contains(&fill_bg),
@@ -1212,72 +1207,50 @@ mod tests {
     fn button_block_recedes_like_an_inactive_block_under_perspective() {
         // #76 size match: the button must read as one of the *inactive* tabs, so
         // it takes the same perspective recede an inactive grid block does (#66)
-        // — a half-row of canvas inset top and bottom at ≥4 rows. The witness is
-        // the top and bottom rows: receded, their first cell carries the canvas
-        // background ([`minimap::BG`]); full-height, it carries the button fill.
-        // Like `assemble`'s cue, the recede is gated on a four-row bar — inert at
-        // three rows.
-        let canvas_bg = {
-            let (r, g, b) = minimap::BG;
-            format!("\x1b[48;2;{r};{g};{b}m")
-        };
-        let canvas_fg = {
-            let (r, g, b) = minimap::BG;
+        // — a half-row inset top and bottom at ≥4 rows. The inset is *transparent*
+        // (SGR 49, terminal default), not a painted canvas band (#84): the witness
+        // is the top and bottom rows resetting to the default background over the
+        // button fill, while a full-height button carries the solid fill with no
+        // reset. Like `assemble`'s cue, the recede is gated on a four-row bar —
+        // inert at three rows.
+        let transparent = "\x1b[49m";
+        let fill_fg = {
+            let (r, g, b) = crate::color::button_fill();
             format!("\x1b[38;2;{r};{g};{b}m")
         };
-        let recede = button_block(5, 4, true, GradientSpec::OFF);
-        let full = button_block(5, 4, false, GradientSpec::OFF);
+        let fill_bg = {
+            let (r, g, b) = crate::color::button_fill();
+            format!("\x1b[48;2;{r};{g};{b}m")
+        };
+        let recede = button_block(5, 4, true);
+        let full = button_block(5, 4, false);
         let last = recede.lines.len() - 1;
-        // Top row: canvas in the upper half (fg), fill in the lower — receded in.
+        // Top row `▄`: transparent upper half, button fill in the lower.
         assert!(
-            recede.lines[0].as_str().starts_with(&canvas_fg),
-            "the receded top row insets a half-row of canvas above the fill"
+            recede.lines[0]
+                .as_str()
+                .starts_with(&format!("{transparent}{fill_fg}\u{2584}")),
+            "the receded top row insets a transparent half-row above the fill"
         );
-        // Bottom row: fill in the upper half, canvas in the lower (bg).
+        // Bottom row `▀`: button fill in the upper half, transparent lower.
         assert!(
-            recede.lines[last].as_str().contains(&canvas_bg),
-            "the receded bottom row insets a half-row of canvas below the fill"
+            recede.lines[last]
+                .as_str()
+                .starts_with(&format!("{transparent}{fill_fg}\u{2580}")),
+            "the receded bottom row insets a transparent half-row below the fill"
         );
-        // Full-height: the ends carry no canvas inset — they are solid fill.
+        // Full-height: the top row is solid fill with no transparent inset.
         assert!(
-            !full.lines[0].as_str().contains(&canvas_bg)
-                && !full.lines[0].as_str().starts_with(&canvas_fg),
-            "with perspective off the top row is solid fill, no canvas inset"
+            full.lines[0].as_str().contains(&fill_bg)
+                && !full.lines[0].as_str().contains(transparent),
+            "with perspective off the top row is solid fill, no transparent inset"
         );
         // The cue is gated on a four-row bar: a three-row button never recedes,
         // matching `assemble`'s inactive-block gate.
         assert_eq!(
-            button_block(5, 3, true, GradientSpec::OFF).lines,
-            button_block(5, 3, false, GradientSpec::OFF).lines,
+            button_block(5, 3, true).lines,
+            button_block(5, 3, false).lines,
             "below four rows perspective must be a no-op for the button too"
-        );
-    }
-
-    #[test]
-    fn button_block_sweeps_the_fill_like_an_inactive_tab() {
-        // #84: a *flat* button fill made the recede half-rows read as a hard
-        // top/bottom frame, while the swept inactive tabs carried the same recede
-        // as depth. Threading the bar's gradient through makes the button fill
-        // vary across the row exactly as a single-pane inactive tab does, so the
-        // recede reads as depth, not a border. A wide button gives the sweep room
-        // to span several distinct shades; `Off` keeps a single flat color.
-        let bg_colors = |line: &str| -> std::collections::BTreeSet<String> {
-            line.split("\x1b[48;2;")
-                .skip(1)
-                .filter_map(|cell| cell.split('m').next().map(str::to_string))
-                .collect()
-        };
-        let middle = 4 / 2;
-        let swept = button_block(40, 4, true, GradientSpec::SHEEN);
-        let flat = button_block(40, 4, true, GradientSpec::OFF);
-        assert!(
-            bg_colors(swept.lines[middle].as_str()).len() > 1,
-            "the sheen sweep varies the button fill across the row (#84)"
-        );
-        assert_eq!(
-            bg_colors(flat.lines[middle].as_str()).len(),
-            1,
-            "with no gradient the button fill stays a single flat color"
         );
     }
 }

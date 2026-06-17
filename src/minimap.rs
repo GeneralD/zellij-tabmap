@@ -98,6 +98,44 @@ pub(crate) fn put_bg(out: &mut String, c: Rgb) {
     out.push_str(&format!("\x1b[48;2;{};{};{}m", c.0, c.1, c.2));
 }
 
+/// Reset the background to the terminal's default (SGR 49) — a *transparent*
+/// pixel that lets the bar's own backdrop show through, instead of a painted
+/// canvas color. The perspective recede inset (#66/#84) uses this so a receded
+/// tab recedes into the bar background rather than behind a dark band.
+pub(crate) fn put_default_bg(out: &mut String) {
+    out.push_str("\x1b[49m");
+}
+
+/// Emit one half-block cell from its top and bottom pixel colors. A `None`
+/// pixel is transparent — rendered on the terminal's default background
+/// ([`put_default_bg`]) so the bar's backdrop shows through. The glyph is chosen
+/// so the solid half always carries a real color: `▀` (upper half) when only the
+/// bottom is transparent, `▄` (lower half) when only the top is. A fully
+/// transparent cell is a plain space.
+pub(crate) fn put_halfblock(out: &mut String, top: Option<Rgb>, bottom: Option<Rgb>) {
+    match (top, bottom) {
+        (Some(t), Some(b)) => {
+            put_fg(out, t);
+            put_bg(out, b);
+            out.push('\u{2580}'); // ▀
+        }
+        (Some(t), None) => {
+            put_default_bg(out);
+            put_fg(out, t);
+            out.push('\u{2580}'); // ▀ — top color over a transparent bottom
+        }
+        (None, Some(b)) => {
+            put_default_bg(out);
+            put_fg(out, b);
+            out.push('\u{2584}'); // ▄ — bottom color under a transparent top
+        }
+        (None, None) => {
+            put_default_bg(out);
+            out.push(' ');
+        }
+    }
+}
+
 /// Which pane titles to overlay as labels — the ladder's per-rung label policy.
 ///
 /// The L0–L4 degradation ladder (see [`crate::tab_block`]) selects one of these
@@ -461,11 +499,13 @@ fn fill_at(
     crate::color::gradient_at(fill, sweep_t(sweep, px, py))
 }
 
-/// Color of the pixel at `(px, py)` in the pixel grid. `grid` stores the
-/// pane's *slice index* (to reach `panes[i]`); the color itself is keyed on
-/// that pane's stable `id`, never its position. Ring pixels are painted solid
-/// on top of the gradient sweep, so the focus outline stays intact in every
-/// [`GradientMode`].
+/// Color of the pixel at `(px, py)` in the pixel grid, or `None` for a
+/// background pixel — one no pane owns, including the perspective recede inset
+/// (#66/#84) — which renders transparent (the terminal's default background)
+/// rather than a painted canvas color. `grid` stores the pane's *slice index*
+/// (to reach `panes[i]`); the color itself is keyed on that pane's stable `id`,
+/// never its position. Ring pixels are painted solid on top of the gradient
+/// sweep, so the focus outline stays intact in every [`GradientMode`].
 #[allow(clippy::too_many_arguments)]
 fn pixel_color(
     grid: &[Option<usize>],
@@ -476,11 +516,11 @@ fn pixel_color(
     pw: usize,
     px: usize,
     py: usize,
-) -> Rgb {
+) -> Option<Rgb> {
     match grid[py * pw + px] {
-        Some(i) if ring[py * pw + px] => palette.ring_for(panes[i].id),
-        Some(i) => fill_at(panes, palette, sweeps, i, px as f32, py as f32),
-        None => BG,
+        Some(i) if ring[py * pw + px] => Some(palette.ring_for(panes[i].id)),
+        Some(i) => Some(fill_at(panes, palette, sweeps, i, px as f32, py as f32)),
+        None => None,
     }
 }
 
@@ -807,14 +847,24 @@ pub fn render(
                 let Some(ch) = badge_cells[c - BADGE_COL] else {
                     continue;
                 };
+                // The badge rides the top text row, whose upper pixel is the
+                // recede inset on a receded tab — transparent there, so the
+                // glyph reads on the bar backdrop instead of a painted band.
                 let fill = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 0);
-                put_bg(&mut out, fill);
+                match fill {
+                    Some(f) => put_bg(&mut out, f),
+                    None => put_default_bg(&mut out),
+                }
                 // Active tab: white badge — vivid fill + white = maximum contrast.
                 // Inactive tab: muted toward the fill — recedes gracefully (#59).
                 let badge_fg = if active {
                     ACTIVE_FG
                 } else {
-                    crate::color::mixed(ACTIVE_FG, fill, INACTIVE_LABEL_BLEND)
+                    crate::color::mixed(
+                        ACTIVE_FG,
+                        fill.unwrap_or(crate::color::CANVAS),
+                        INACTIVE_LABEL_BLEND,
+                    )
                 };
                 put_fg(&mut out, badge_fg);
                 out.push_str("\x1b[1m");
@@ -857,9 +907,7 @@ pub fn render(
             }
             let top = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr);
             let bottom = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr + 1);
-            put_fg(&mut out, top);
-            put_bg(&mut out, bottom);
-            out.push('▀');
+            put_halfblock(&mut out, top, bottom);
         }
         out.push_str(RESET);
         out.push('\n');
@@ -868,23 +916,25 @@ pub fn render(
 }
 
 /// Render the inline new-tab `+` button (#76) as a `width`-by-`rows` block that
-/// reads as a single-pane **inactive** tab: [`crate::color::button_fill`] swept
-/// by the same `gradient` the tabs carry, receding `vinset` half-rows of [`BG`]
-/// at the top and bottom, with a [`crate::color::button_glyph`]-colored `+`
-/// centered on the middle row.
+/// reads as a single-pane **inactive** tab: a flat [`crate::color::button_fill`]
+/// band, receding `vinset` half-rows of *transparent* inset at the top and
+/// bottom, with a [`crate::color::button_glyph`]-colored `+` centered on the
+/// middle row.
 ///
-/// Routing the fill through the shared [`pane_sweep`]/[`sweep_t`] machinery — the
-/// exact path a single-pane inactive block takes — is what fixes the framing bug
-/// (#84): a *flat* fill made the `BG` recede half-rows read as a hard top/bottom
-/// border, while the swept inactive tabs carried the same recede as depth. Swept,
-/// the button's recede reads as that same depth, and the recede still delivers
-/// the height match an inactive tab gets (#76). With an `Off` gradient the sweep
-/// collapses to the flat base fill, reproducing the pre-#84 look byte-for-byte.
+/// The recede inset is transparent (the terminal's default background via
+/// [`put_halfblock`]), not a painted canvas color: a `BG`-painted inset read as
+/// a hard top/bottom frame against the flat fill (#84), and once the *inactive
+/// tabs'* own recede insets also went transparent the band-vs-fill seam was the
+/// whole bug. With the inset transparent the flat fill recedes cleanly into the
+/// bar backdrop, so the button needs no gradient — staying flat is what keeps it
+/// visually distinct from the gradient-swept tabs. The recede still delivers the
+/// height match an inactive tab gets (#76).
 ///
 /// Returns an ANSI string of `rows` lines, each terminated by a reset and no
-/// trailing newline — the line shape [`render`] yields, so the caller frames it
-/// through the identical [`crate::paint::compose`] path.
-pub fn button(width: usize, rows: usize, vinset: usize, gradient: GradientSpec) -> String {
+/// trailing newline, so the caller frames it through the same
+/// [`crate::paint::compose`] path as a tab block (which consumes the lines via
+/// `.lines()`, ignoring any trailing terminator).
+pub(crate) fn button(width: usize, rows: usize, vinset: usize) -> String {
     let pw = width;
     let ph = rows * 2;
     if pw == 0 || rows == 0 {
@@ -892,27 +942,12 @@ pub fn button(width: usize, rows: usize, vinset: usize, gradient: GradientSpec) 
     }
     let fill = crate::color::button_fill();
     let glyph_fg = crate::color::button_glyph();
-    // Mirror `render`'s vinset clamp: reserve `vinset` BG pixel rows at the top
-    // and bottom, the button occupying the middle band (always ≥ one pixel).
+    // Mirror `render`'s vinset clamp: reserve `vinset` transparent pixel rows at
+    // the top and bottom, the button occupying the middle band (always ≥ one
+    // pixel). A pixel inside the band is the flat fill; outside it is transparent.
     let content_ph = ph.saturating_sub(2 * vinset).max(1);
     let vinset = (ph - content_ph) / 2;
-    let sweep = match gradient.mode {
-        GradientMode::Off => None,
-        _ => pane_sweep(gradient, (0, pw, vinset, vinset + content_ph)),
-    };
-    let shade = |px: f32, py: f32| {
-        sweep
-            .as_ref()
-            .map(|s| crate::color::gradient_at(fill, sweep_t(s, px, py)))
-            .unwrap_or(fill)
-    };
-    let pixel = |px: usize, py: usize| {
-        if py < vinset || py >= vinset + content_ph {
-            BG
-        } else {
-            shade(px as f32, py as f32)
-        }
-    };
+    let pixel = |py: usize| (py >= vinset && py < vinset + content_ph).then_some(fill);
     let middle = rows / 2;
     // Center the `+` by display width, matching the flat renderer it replaces.
     let glyph_col = (pw - 1) / 2;
@@ -920,19 +955,14 @@ pub fn button(width: usize, rows: usize, vinset: usize, gradient: GradientSpec) 
         .map(|tr| {
             let mut out = String::new();
             (0..pw).for_each(|c| match (tr == middle && c == glyph_col).then_some(()) {
-                // The glyph cell takes one background sample at the text row's
-                // vertical center, as the label overlay does, so a diagonal or
-                // radial sweep reads correctly through the `+`.
+                // The glyph rides the middle row, never a recede row, so the cell
+                // beneath it is solid fill.
                 Some(()) => {
+                    put_bg(&mut out, fill);
                     put_fg(&mut out, glyph_fg);
-                    put_bg(&mut out, shade(c as f32, 2.0 * tr as f32 + 0.5));
                     out.push('+');
                 }
-                None => {
-                    put_fg(&mut out, pixel(c, 2 * tr));
-                    put_bg(&mut out, pixel(c, 2 * tr + 1));
-                    out.push('\u{2580}'); // ▀
-                }
+                None => put_halfblock(&mut out, pixel(2 * tr), pixel(2 * tr + 1)),
             });
             out.push_str(RESET);
             out
@@ -990,7 +1020,10 @@ mod tests {
         // the shorter middle band. For a single full-tab pane in a 4-row block
         // that means the top text row's upper pixel and the bottom text row's
         // lower pixel become background (the recede that lifts the active tab),
-        // while the middle rows stay fully filled.
+        // while the middle rows stay fully filled. The recede pixel renders
+        // *transparent* (SGR 49, terminal default), so it shows the bar backdrop
+        // rather than a painted canvas band (#84).
+        let transparent = "\x1b[49m";
         let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "x", false)];
         let palette = test_palette();
         let fill = palette.color_for(0);
@@ -1007,21 +1040,21 @@ mod tests {
         );
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 4);
-        // Top row ▄: upper pixel is background, lower pixel is the pane fill.
+        // Top row `▄`: upper pixel transparent, lower pixel the pane fill.
         assert!(
-            lines[0].starts_with(&format!("{}{}", fg(BG), bg(fill))),
-            "top row must recede to background over fill: {:?}",
+            lines[0].starts_with(&format!("{transparent}{}\u{2584}", fg(fill))),
+            "top row must recede to transparent over fill: {:?}",
             lines[0]
         );
-        // Bottom row ▀: upper pixel is the pane fill, lower pixel is background.
+        // Bottom row `▀`: upper pixel the pane fill, lower pixel transparent.
         assert!(
-            lines[3].starts_with(&format!("{}{}", fg(fill), bg(BG))),
-            "bottom row must recede to fill over background: {:?}",
+            lines[3].starts_with(&format!("{transparent}{}\u{2580}", fg(fill))),
+            "bottom row must recede to fill over transparent: {:?}",
             lines[3]
         );
-        // A middle row stays fully the pane fill — no recede.
+        // A middle row stays fully the pane fill — no recede, no transparency.
         assert!(
-            lines[1].starts_with(&format!("{}{}", fg(fill), bg(fill))),
+            lines[1].starts_with(&format!("{}{}\u{2580}", fg(fill), bg(fill))),
             "middle row must stay fully filled: {:?}",
             lines[1]
         );
@@ -1042,7 +1075,7 @@ mod tests {
             full.lines()
                 .next()
                 .ok_or("a rendered row")?
-                .starts_with(&format!("{}{}", fg(fill), bg(fill))),
+                .starts_with(&format!("{}{}\u{2580}", fg(fill), bg(fill))),
             "with vinset 0 the top row fills completely"
         );
         Ok(())
@@ -1078,11 +1111,11 @@ mod tests {
         );
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 4);
-        // Bottom row must stay ▀ (fill over background); the buggy clamp painted
-        // the thin pane into the lower pixel too, turning the cell into a full █
-        // block (bg = fill instead of the reserved BG).
+        // Bottom row must stay `▀` (fill over transparent inset); the buggy clamp
+        // painted the thin pane into the lower pixel too, turning the cell into a
+        // full █ block (bg = fill instead of the reserved transparent inset).
         assert!(
-            lines[3].starts_with(&format!("{}{}", fg(edge_fill), bg(BG))),
+            lines[3].starts_with(&format!("\x1b[49m{}\u{2580}", fg(edge_fill))),
             "the reserved bottom inset must survive a thin bottom-edge pane: {:?}",
             lines[3]
         );
@@ -1228,7 +1261,10 @@ mod tests {
     }
 
     #[test]
-    fn render_empty_panes_is_all_background() {
+    fn render_empty_panes_is_all_transparent() {
+        // No panes → every pixel is background, which now renders transparent
+        // (SGR 49) so the empty block shows the bar backdrop rather than a
+        // painted canvas color (#84).
         let out = render(
             &[],
             &test_palette(),
@@ -1241,11 +1277,13 @@ mod tests {
             true,
         );
         assert_eq!(out.lines().count(), 2);
-        let (r, g, b) = BG;
-        let bg = format!("\x1b[48;2;{};{};{}m", r, g, b);
         assert!(
-            out.contains(&bg),
-            "empty block should be painted with the background"
+            out.contains("\x1b[49m"),
+            "empty block must reset to the default (transparent) background"
+        );
+        assert!(
+            !out.contains("\x1b[48;2;"),
+            "empty block must paint no truecolor background"
         );
     }
 

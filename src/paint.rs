@@ -83,7 +83,7 @@ pub fn bar(
     let button = layout.button.map(|hit| {
         (
             hit.start,
-            tab_block::button_block(hit.width, rows, perspective, gradient),
+            tab_block::button_block(hit.width, rows, perspective),
         )
     });
     let placed: Vec<(usize, &TabBlock)> = layout

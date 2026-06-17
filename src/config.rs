@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use crate::line::Alignment;
 use crate::minimap::{GradientMode, GradientShape, GradientSpec, RadialDirection};
+use crate::scroll::ScrollMode;
 
 /// Parsed plugin configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +74,12 @@ pub struct Config {
     /// new permission prompt appears on auto-update. `false` hides the button and
     /// reclaims its columns for the tab strip.
     pub new_tab_button: bool,
+    /// How the mouse wheel navigates over the bar (#80). `tab` (default) switches
+    /// tabs, `pane` walks the focused pane across tab boundaries, `off` makes the
+    /// wheel inert. zellij delivers scroll events without a position, so the
+    /// gesture acts on the whole bar. Needs no permission beyond the default set
+    /// (`ChangeApplicationState`). See [`ScrollMode`].
+    pub scroll: ScrollMode,
 }
 
 impl Config {
@@ -116,6 +123,9 @@ impl Config {
     /// box (#76). It rides on the already-granted `ChangeApplicationState`
     /// permission, so enabling it by default costs existing users no new prompt.
     pub const DEFAULT_NEW_TAB_BUTTON: bool = true;
+    /// Default wheel behaviour — `Tab`, matching zellij's stock tab-bar (scroll
+    /// switches tabs). Set `pane` to walk panes, `off` to disable (#80).
+    pub const DEFAULT_SCROLL: ScrollMode = ScrollMode::Tab;
 
     /// Parse the configuration map, falling back to a default for any missing or
     /// malformed value. Total: never panics on bad input.
@@ -174,6 +184,10 @@ impl Config {
                 .get("new_tab_button")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_NEW_TAB_BUTTON),
+            scroll: configuration
+                .get("scroll")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_SCROLL),
         }
     }
 
@@ -225,6 +239,7 @@ mod tests {
         assert!(config.inactive_dim);
         assert!(config.perspective);
         assert!(config.new_tab_button);
+        assert_eq!(config.scroll, ScrollMode::Tab);
     }
 
     #[test]
@@ -416,6 +431,21 @@ mod tests {
     fn parses_explicit_perspective_off() {
         // The depth cue is on by default; an explicit `false` opts out.
         assert!(!config_from(&[("perspective", "false")]).perspective);
+    }
+
+    #[test]
+    fn parses_scroll_modes() {
+        assert_eq!(config_from(&[("scroll", "tab")]).scroll, ScrollMode::Tab);
+        assert_eq!(config_from(&[("scroll", "pane")]).scroll, ScrollMode::Pane);
+        assert_eq!(config_from(&[("scroll", "off")]).scroll, ScrollMode::Off);
+    }
+
+    #[test]
+    fn malformed_scroll_falls_back_to_tab() {
+        // Unknown / wrong-case / empty values keep the zellij-stock default.
+        assert_eq!(config_from(&[("scroll", "wheel")]).scroll, ScrollMode::Tab);
+        assert_eq!(config_from(&[("scroll", "Tab")]).scroll, ScrollMode::Tab);
+        assert_eq!(config_from(&[("scroll", "")]).scroll, ScrollMode::Tab);
     }
 
     #[test]

@@ -87,6 +87,7 @@ default_tab_template {
             active_width "24"
             align "center"                              // "center" slides to keep the active tab centered; "left" anchors the row (all-fit only)
             reorder "false"                             // drag a tab to reorder; "true" also needs RunActionsAsUser
+            scroll "tab"                                // mouse wheel: "tab" (default) switch tabs / "pane" walk panes across tabs / "off"
             tab_gap "2"                                 // cleared columns between tab blocks; "0" packs them flush
             gradient "sheen"                            // pane fill sweep: "sheen" (default) / "weave" (alternating rows) / "off" (flat)
             gradient_shape "linear"                     // sweep geometry: "linear" (default) / "radial" (circular, from each block's center)
@@ -110,6 +111,8 @@ Contributors hacking on the plugin [build from source](#build-from-source) and p
 > **`align` — center vs left.** When every tab fits, `align` decides how the row is anchored: `center` (default) re-centers the active block on each focus change, so the whole strip slides horizontally; `left` pins the row's **left edge** at the start of the tab area (column 0, or just after any reserved prefix columns), removing that whole-strip slide. Note `left` does not freeze every tab's column — the active tab is still drawn wider than the inactives, so the tabs drawn after it shift right as focus crosses them; only the leftmost tab is truly fixed. `align` governs the all-fit case **only** — when tabs overflow, the visible window always follows the active tab (with `← +N` / `+N →` markers) regardless of `align`, because the active tab must stay on screen. The default stays `center` so existing layouts render unchanged on update.
 >
 > **`tab_gap` — space between tabs.** Leaves the given number of cleared columns between adjacent tab blocks so the boundary between screens reads clearly (default `2`). Set `0` to pack the blocks flush.
+>
+> **`scroll` — mouse wheel navigation.** Selects what the wheel does over the bar (zellij scroll events carry no position, so the gesture is bar-wide, not tied to a specific tab). `tab` (default) switches tabs — scroll up = next, scroll down = previous, following zellij's stock tab-bar direction but **wrapping** at the ends (first ↔ last) instead of clamping. `pane` instead walks the **focused pane** forward / backward in reading order (top→bottom, then left→right), crossing tab boundaries — stepping past a tab's last pane jumps to the next tab's first pane, and back — wrapping globally; the focus is absolute, so the bar's highlight follows correctly. `off` leaves the wheel inert. One wheel event is one step (magnitude is ignored). No extra permission is needed beyond the default set, so existing installs gain this on update without a re-grant.
 >
 > **`gradient` — per-pane fill sweep.** `sheen` (default) sweeps each pane block's fill from its base color toward a luminance-shifted shade (lighter for dark themes, darker for light ones); `weave` alternates the sweep direction on each half-block pixel row for a woven texture. The focus ring, labels, and the `⌘N` badge stay solid on top, so readability is unchanged. Set `off` for flat fills.
 >

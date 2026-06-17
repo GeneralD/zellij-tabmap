@@ -123,6 +123,16 @@ pub fn level_for(width: usize) -> Level {
     }
 }
 
+/// Pixel rows of background to inset top and bottom of a grid block — the
+/// perspective depth cue (#66): one (a half text row) for an *inactive* block
+/// when perspective is on and the bar is at least four rows tall, none otherwise
+/// (the active tab and short bars fill their full height). Single source for both
+/// [`assemble`] (which paints with it) and the click-to-focus geometry record
+/// (#74, `src/lib.rs`), so a pane hit-test insets exactly as the paint did.
+pub fn vinset_for(perspective: bool, rows: usize, active: bool) -> usize {
+    usize::from(perspective && rows >= 4 && !active)
+}
+
 /// Assemble `panes` into a `rows`-tall block of exactly `width` columns at tab
 /// `position`, choosing detail via the ladder. `prefix` is the configured
 /// shortcut glyph, used only by the L4 hint rung. `gradient` is the configured
@@ -153,7 +163,7 @@ pub fn assemble(
     // Pixel rows of background to inset top and bottom of the minimap canvas: one
     // (a half text row) for an inactive block in perspective mode at ≥4 rows,
     // none otherwise. The minimap centers the panes in the shorter band.
-    let vinset = usize::from(perspective && rows >= 4 && !active);
+    let vinset = vinset_for(perspective, rows, active);
     // #32: stamp the `⌘N` shortcut *inside* the color block as a top-left badge
     // (text over the block's own colors) rather than a separate gutter, so
     // the shortcut shows on comfortably-sized tabs. The minimap self-skips the

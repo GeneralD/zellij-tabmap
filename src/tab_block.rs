@@ -246,7 +246,7 @@ pub fn button_block(width: usize, rows: usize, perspective: bool) -> TabBlock {
     // The half-row (one half-block pixel) reserved at each end for an inactive
     // block in perspective mode at ≥4 rows — exactly `assemble`'s gate and inset,
     // so the button recedes in lockstep with the inactive tabs.
-    let vinset = usize::from(perspective && rows >= 4);
+    let vinset = vinset_for(perspective, rows, false);
     let lines = minimap::button(width, rows, vinset)
         .lines()
         .map(|line| StyledLine(line.to_string()))

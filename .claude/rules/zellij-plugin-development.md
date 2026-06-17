@@ -357,3 +357,45 @@ in-place reload — **start a fresh session** (with `file:` the local wasm is
 re-read from disk at server start, so the fresh session has the new build;
 see #13). Don't put `start-or-reload-plugin` in user-facing update docs for a
 template-loaded plugin — it sends users into a duplicated-pane recovery path.
+
+---
+
+## 15. Adding a new permission **silently freezes the bar** for existing users (zellij#4982)
+
+Once a user grants permissions for a plugin, that grant is keyed to the
+**exact set of permissions** they approved and stored in `permissions.kdl`.
+If a new release adds a *new* permission to the `request_permission()` call,
+the existing grant does **not** cover it — and because the bar is
+layout-loaded (non-selectable, see #2), zellij cannot present the interactive
+prompt again. The result: the new permission is silently never granted,
+the feature that needs it quietly fails for **all existing users** until they
+manually re-grant.
+
+**Way out (design rule):** any feature that requires a permission beyond the
+current default set (`ReadApplicationState` + `ChangeApplicationState`) must
+be gated behind an **opt-in config flag**. When the flag is on, the plugin
+requests the extra permission and the user gets the prompt on first use (they
+opted in — the feature is expected). When off, no new permission is requested
+and the existing grant keeps working. This mirrors how `reorder` gates
+`RunActionsAsUser` (#23).
+
+**Verify before shipping any new action** that it does NOT require a third
+permission. `close_tab_with_index` and `new_tab` both fall under the existing
+`ChangeApplicationState` — no extra permission needed. But any hypothetical
+future action (e.g. opening a URL, reading the clipboard) must be audited
+against this rule.
+
+---
+
+## 16. `close_tab_with_index(usize)` closes a tab **by index** without focusing first
+
+zellij-tile 0.44.3 exposes `close_tab_with_index(position: usize)` as a
+host-call shim. Unlike `close_focused_tab()`, it does **not** require the
+tab to be focused first — no go-to-then-close dance needed.
+
+Confirmed to fall under the existing `ChangeApplicationState` grant (see #15):
+no new permission is required.
+
+The `position` argument is the **0-based tab index** matching
+`TabInfo::position`. Store it on the `TabHit` geometry struct and pass it
+directly from the `LeftClick` close-button handler.

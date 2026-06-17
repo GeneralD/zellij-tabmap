@@ -74,6 +74,20 @@ impl PaneRect {
     }
 }
 
+/// A projected pane's block-local pixel bounding box: columns `px0..px1`
+/// (`0..cols`) and pixel rows `py0..py1` (`0..2*text_rows`, two pixels per text
+/// row). The exact rectangle [`render`] paints for the pane, surfaced so click
+/// hit-testing ([`pane_at_cell`]) can map a clicked cell back to the pane the
+/// same frame drew (#74). Half-open on every side, like the loops that consume
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaneBox {
+    pub px0: usize,
+    pub px1: usize,
+    pub py0: usize,
+    pub py1: usize,
+}
+
 // ---- ANSI emission ------------------------------------------------------
 
 pub(crate) fn put_fg(out: &mut String, c: Rgb) {
@@ -470,6 +484,111 @@ fn pixel_color(
     }
 }
 
+/// Project `panes` into their block-local pixel boxes and the pixel-ownership
+/// grid for a `pw`-column, `ph`-pixel-row canvas (`ph == 2 * text_rows`), with
+/// `vinset` background pixel rows reserved top and bottom (#66).
+///
+/// Returns `(grid, boxes)`: `grid[py * pw + px]` is the *slice index* of the pane
+/// owning that pixel (`None` for background), filled pane-by-pane in slice order
+/// so a later pane overwrites an earlier one on any overlap; `boxes[i]` is
+/// `panes[i]`'s [`PaneBox`]. Pure geometry shared by [`render`] (to paint) and
+/// [`pane_at_cell`] (to hit-test), so the two can never disagree about where a
+/// pane sits. The bounding-box normalization means only relative positions
+/// matter, so an absolute coordinate origin is irrelevant.
+fn project_panes(
+    panes: &[PaneRect],
+    pw: usize,
+    ph: usize,
+    vinset: usize,
+) -> (Vec<Option<usize>>, Vec<PaneBox>) {
+    let mut grid = vec![None::<usize>; ph * pw];
+    if pw == 0 || ph == 0 {
+        return (grid, Vec::new());
+    }
+    // The panes occupy the canvas minus `vinset` background pixel rows top and
+    // bottom; clamped so a degenerate over-inset can't underflow the height.
+    let content_ph = ph.saturating_sub(2 * vinset).max(1);
+    let vinset = (ph - content_ph) / 2;
+
+    let minx = panes.iter().map(|p| p.x).min().unwrap_or(0);
+    let miny = panes.iter().map(|p| p.y).min().unwrap_or(0);
+    let maxx = panes.iter().map(|p| p.x + p.w).max().unwrap_or(1);
+    let maxy = panes.iter().map(|p| p.y + p.h).max().unwrap_or(1);
+    let bw = (maxx - minx).max(1) as f64;
+    let bh = (maxy - miny).max(1) as f64;
+    let map = |v: u32, lo: u32, span: f64, out: usize| -> usize {
+        (((v - lo) as f64) / span * out as f64).round() as usize
+    };
+
+    let boxes: Vec<PaneBox> = panes
+        .iter()
+        .map(|p| {
+            let px0 = map(p.x, minx, bw, pw).min(pw);
+            let px1 = match map(p.x + p.w, minx, bw, pw).min(pw) {
+                hi if hi <= px0 => (px0 + 1).min(pw),
+                hi => hi,
+            };
+            // Map into the content band (`content_ph` high) and shift down by the
+            // top inset, so the reserved background rows stay unpainted (#66). The
+            // start clamps one row short of the band (`content_ph - 1`, never
+            // negative since `content_ph >= 1`): `round()` can map a pane's top to
+            // exactly `content_ph`, which would shift `py0` into the bottom inset
+            // row (`vinset + content_ph`) and paint over the reserved background —
+            // a thin pane on the bottom edge is the worst case. `py1` keeps the
+            // full `content_ph` (exclusive) so a pane still reaches the band's
+            // bottom.
+            let py0 = (vinset + map(p.y, miny, bh, content_ph).min(content_ph - 1)).min(ph);
+            let py1 = match (vinset + map(p.y + p.h, miny, bh, content_ph).min(content_ph)).min(ph)
+            {
+                hi if hi <= py0 => (py0 + 1).min(ph),
+                hi => hi,
+            };
+            PaneBox { px0, px1, py0, py1 }
+        })
+        .collect();
+
+    for (i, b) in boxes.iter().enumerate() {
+        for py in b.py0..b.py1 {
+            for px in b.px0..b.px1 {
+                grid[py * pw + px] = Some(i);
+            }
+        }
+    }
+
+    (grid, boxes)
+}
+
+/// The stable id of the pane drawn at block-local cell (`col`, `row`) in a
+/// `cols`-by-`text_rows` minimap of `panes` (same `vinset` as the [`render`] that
+/// drew it), or `None` when the cell is background, inset, or out of range (#74).
+///
+/// A text row packs two pane pixels via the half-block `▀` (top pixel = fg,
+/// bottom pixel = bg), but a terminal reports a click at *cell* resolution — it
+/// cannot say which half was clicked. When the two pixels belong to different
+/// panes this **biases to the top pixel** (`2*row`), the upper half-block the
+/// cell visually leads with, and falls back to the bottom pixel (`2*row+1`) only
+/// when the top is background — so a click on a split-boundary cell resolves to a
+/// real, drawn pane, never a panic or a phantom. Reuses the exact ownership grid
+/// [`render`] paints ([`project_panes`]), so the resolved pane is always the one
+/// under the cursor on screen.
+pub fn pane_at_cell(
+    panes: &[PaneRect],
+    cols: usize,
+    text_rows: usize,
+    vinset: usize,
+    col: usize,
+    row: usize,
+) -> Option<usize> {
+    let pw = cols;
+    let ph = text_rows * 2;
+    if pw == 0 || text_rows == 0 || col >= pw || row >= text_rows {
+        return None;
+    }
+    let (grid, _) = project_panes(panes, pw, ph, vinset);
+    let at = |py: usize| grid[py * pw + col];
+    at(2 * row).or_else(|| at(2 * row + 1)).map(|i| panes[i].id)
+}
+
 /// Render `panes` into a `cols` × `text_rows` block (pixel rows = `2*text_rows`).
 ///
 /// `vinset` reserves that many background pixel rows at **both** the top and the
@@ -513,25 +632,13 @@ pub fn render(
     if pw == 0 || text_rows == 0 {
         return String::new();
     }
-    // The panes occupy the canvas minus `vinset` background pixel rows top and
-    // bottom; clamped so a degenerate over-inset can't underflow the height.
-    let content_ph = ph.saturating_sub(2 * vinset).max(1);
-    let vinset = (ph - content_ph) / 2;
-
-    let minx = panes.iter().map(|p| p.x).min().unwrap_or(0);
-    let miny = panes.iter().map(|p| p.y).min().unwrap_or(0);
-    let maxx = panes.iter().map(|p| p.x + p.w).max().unwrap_or(1);
-    let maxy = panes.iter().map(|p| p.y + p.h).max().unwrap_or(1);
-    let bw = (maxx - minx).max(1) as f64;
-    let bh = (maxy - miny).max(1) as f64;
-    let map = |v: u32, lo: u32, span: f64, out: usize| -> usize {
-        (((v - lo) as f64) / span * out as f64).round() as usize
-    };
-
-    let mut grid = vec![None::<usize>; ph * pw]; // pane index per pixel
+    // Project every pane to its block-local pixel box and the pixel-ownership
+    // grid in one shared step (#74): `render` paints from them here, and
+    // [`pane_at_cell`] hit-tests against the same `project_panes` output, so a
+    // click can never resolve to a pane other than the one drawn.
+    let (grid, bounds) = project_panes(panes, pw, ph, vinset);
     let mut ring = vec![false; ph * pw]; // focus-ring pixels
     let mut overlay = vec![None::<OverlayCell>; text_rows * pw]; // label cells
-    let mut bounds = Vec::with_capacity(panes.len()); // (px0, px1, py0, py1) per pane
 
     // The shortcut badge occupies the top text row's left cells, after a
     // one-cell margin, drawn over the underlying cell color — the pane fill, or
@@ -565,31 +672,9 @@ pub fn render(
     let badge_fits = !badge_cells.is_empty() && BADGE_COL + badge_cells.len() <= pw;
 
     for (i, p) in panes.iter().enumerate() {
-        let px0 = map(p.x, minx, bw, pw).min(pw);
-        let mut px1 = map(p.x + p.w, minx, bw, pw).min(pw);
-        if px1 <= px0 {
-            px1 = (px0 + 1).min(pw);
-        }
-        // Map into the content band (`content_ph` high) and shift down by the
-        // top inset, so the reserved background rows stay unpainted (#66). The
-        // start clamps one row short of the band (`content_ph - 1`, never
-        // negative since `content_ph >= 1`): `round()` can map a pane's top to
-        // exactly `content_ph`, which would shift `py0` into the bottom inset row
-        // (`vinset + content_ph`) and paint over the reserved background — a thin
-        // pane on the bottom edge is the worst case. `py1` keeps the full
-        // `content_ph` (exclusive) so a pane still reaches the band's bottom.
-        let py0 = (vinset + map(p.y, miny, bh, content_ph).min(content_ph - 1)).min(ph);
-        let mut py1 = (vinset + map(p.y + p.h, miny, bh, content_ph).min(content_ph)).min(ph);
-        if py1 <= py0 {
-            py1 = (py0 + 1).min(ph);
-        }
-        bounds.push((px0, px1, py0, py1));
-
-        for py in py0..py1 {
-            for px in px0..px1 {
-                grid[py * pw + px] = Some(i);
-            }
-        }
+        // `project_panes` already computed this pane's box and filled the grid;
+        // read the box back to drive the focus ring and label overlays below.
+        let PaneBox { px0, px1, py0, py1 } = bounds[i];
 
         let cw = px1 - px0;
         let chh = py1 - py0;
@@ -707,7 +792,10 @@ pub fn render(
     // the sweep entirely — every pane reads its flat base fill.
     let sweeps: Vec<Option<PaneSweep>> = match gradient.mode {
         GradientMode::Off => vec![None; bounds.len()],
-        _ => bounds.iter().map(|&b| pane_sweep(gradient, b)).collect(),
+        _ => bounds
+            .iter()
+            .map(|b| pane_sweep(gradient, (b.px0, b.px1, b.py0, b.py1)))
+            .collect(),
     };
 
     let mut out = String::with_capacity(text_rows * pw * 24);
@@ -1085,6 +1173,62 @@ mod tests {
             out.contains(&bg),
             "empty block should be painted with the background"
         );
+    }
+
+    // ---- pane_at_cell (#74) ----------------------------------------------
+
+    #[test]
+    fn pane_at_cell_resolves_a_horizontal_split() {
+        // Two side-by-side panes over an 8-column block (id 7 left, id 3 right).
+        // The left columns resolve to pane 7, the right columns to pane 3 — the
+        // finer hit-test the column-only tab switch (#8) could not make.
+        let panes = vec![
+            PaneRect::new(7, 0, 0, 40, 24, "sh", false),
+            PaneRect::new(3, 40, 0, 40, 24, "sh", false),
+        ];
+        assert_eq!(pane_at_cell(&panes, 8, 3, 0, 2, 1), Some(7), "left half");
+        assert_eq!(pane_at_cell(&panes, 8, 3, 0, 6, 1), Some(3), "right half");
+    }
+
+    #[test]
+    fn pane_at_cell_biases_a_split_boundary_cell_to_the_top_pixel() {
+        // Two stacked panes split mid-block: pane 7 owns pixel rows 0..3, pane 3
+        // owns 3..6. Text row 1 packs pixels 2 (pane 7) and 3 (pane 3) into one
+        // cell; the terminal can't say which half was clicked, so the hit-test
+        // biases to the top pixel — pane 7. Rows wholly inside one pane resolve
+        // unambiguously.
+        let panes = vec![
+            PaneRect::new(7, 0, 0, 80, 12, "sh", false),
+            PaneRect::new(3, 0, 12, 80, 12, "sh", false),
+        ];
+        assert_eq!(pane_at_cell(&panes, 4, 3, 0, 1, 0), Some(7), "top row → 7");
+        assert_eq!(
+            pane_at_cell(&panes, 4, 3, 0, 1, 1),
+            Some(7),
+            "boundary cell biases to the top pixel (pane 7)"
+        );
+        assert_eq!(
+            pane_at_cell(&panes, 4, 3, 0, 1, 2),
+            Some(3),
+            "bottom row → 3"
+        );
+    }
+
+    #[test]
+    fn pane_at_cell_covers_a_single_pane_everywhere() {
+        // A lone pane fills the whole block, so every in-range cell resolves to
+        // it; an out-of-range column or row, and a click on an empty block,
+        // resolve to nothing.
+        let panes = vec![PaneRect::new(5, 0, 0, 80, 24, "sh", true)];
+        assert_eq!(pane_at_cell(&panes, 4, 3, 0, 0, 0), Some(5));
+        assert_eq!(pane_at_cell(&panes, 4, 3, 0, 3, 2), Some(5));
+        assert_eq!(
+            pane_at_cell(&panes, 4, 3, 0, 4, 0),
+            None,
+            "column past width"
+        );
+        assert_eq!(pane_at_cell(&panes, 4, 3, 0, 0, 3), None, "row past height");
+        assert_eq!(pane_at_cell(&[], 4, 3, 0, 0, 0), None, "empty block");
     }
 
     #[test]

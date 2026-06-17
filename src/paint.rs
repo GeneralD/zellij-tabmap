@@ -74,13 +74,18 @@ pub fn bar(
             )
         })
         .collect();
-    // The inline new-tab `+` button (#76), when the layout reserved one: a
-    // full-height block placed through the same `compose` path as the tabs.
-    // Owned here so `placed` can borrow it; appended after the tabs so it draws
-    // on top (its span never overlaps one, so order is cosmetic).
-    let button = layout
-        .button
-        .map(|hit| (hit.start, tab_block::button_block(hit.width, rows)));
+    // The inline new-tab `+` button (#76), when the layout reserved one: a block
+    // placed through the same `compose` path as the tabs, sized to read as an
+    // inactive tab — it takes `perspective` so it recedes in lockstep with them
+    // (#66) instead of floating at the active tab's full height. Owned here so
+    // `placed` can borrow it; appended after the tabs so it draws on top (its
+    // span never overlaps one, so order is cosmetic).
+    let button = layout.button.map(|hit| {
+        (
+            hit.start,
+            tab_block::button_block(hit.width, rows, perspective),
+        )
+    });
     let placed: Vec<(usize, &TabBlock)> = layout
         .tabs
         .iter()

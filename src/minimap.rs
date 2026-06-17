@@ -867,6 +867,80 @@ pub fn render(
     out
 }
 
+/// Render the inline new-tab `+` button (#76) as a `width`-by-`rows` block that
+/// reads as a single-pane **inactive** tab: [`crate::color::button_fill`] swept
+/// by the same `gradient` the tabs carry, receding `vinset` half-rows of [`BG`]
+/// at the top and bottom, with a [`crate::color::button_glyph`]-colored `+`
+/// centered on the middle row.
+///
+/// Routing the fill through the shared [`pane_sweep`]/[`sweep_t`] machinery — the
+/// exact path a single-pane inactive block takes — is what fixes the framing bug
+/// (#84): a *flat* fill made the `BG` recede half-rows read as a hard top/bottom
+/// border, while the swept inactive tabs carried the same recede as depth. Swept,
+/// the button's recede reads as that same depth, and the recede still delivers
+/// the height match an inactive tab gets (#76). With an `Off` gradient the sweep
+/// collapses to the flat base fill, reproducing the pre-#84 look byte-for-byte.
+///
+/// Returns an ANSI string of `rows` lines, each terminated by a reset and no
+/// trailing newline — the line shape [`render`] yields, so the caller frames it
+/// through the identical [`crate::paint::compose`] path.
+pub fn button(width: usize, rows: usize, vinset: usize, gradient: GradientSpec) -> String {
+    let pw = width;
+    let ph = rows * 2;
+    if pw == 0 || rows == 0 {
+        return String::new();
+    }
+    let fill = crate::color::button_fill();
+    let glyph_fg = crate::color::button_glyph();
+    // Mirror `render`'s vinset clamp: reserve `vinset` BG pixel rows at the top
+    // and bottom, the button occupying the middle band (always ≥ one pixel).
+    let content_ph = ph.saturating_sub(2 * vinset).max(1);
+    let vinset = (ph - content_ph) / 2;
+    let sweep = match gradient.mode {
+        GradientMode::Off => None,
+        _ => pane_sweep(gradient, (0, pw, vinset, vinset + content_ph)),
+    };
+    let shade = |px: f32, py: f32| {
+        sweep
+            .as_ref()
+            .map(|s| crate::color::gradient_at(fill, sweep_t(s, px, py)))
+            .unwrap_or(fill)
+    };
+    let pixel = |px: usize, py: usize| {
+        if py < vinset || py >= vinset + content_ph {
+            BG
+        } else {
+            shade(px as f32, py as f32)
+        }
+    };
+    let middle = rows / 2;
+    // Center the `+` by display width, matching the flat renderer it replaces.
+    let glyph_col = (pw - 1) / 2;
+    (0..rows)
+        .map(|tr| {
+            let mut out = String::new();
+            (0..pw).for_each(|c| match (tr == middle && c == glyph_col).then_some(()) {
+                // The glyph cell takes one background sample at the text row's
+                // vertical center, as the label overlay does, so a diagonal or
+                // radial sweep reads correctly through the `+`.
+                Some(()) => {
+                    put_fg(&mut out, glyph_fg);
+                    put_bg(&mut out, shade(c as f32, 2.0 * tr as f32 + 0.5));
+                    out.push('+');
+                }
+                None => {
+                    put_fg(&mut out, pixel(c, 2 * tr));
+                    put_bg(&mut out, pixel(c, 2 * tr + 1));
+                    out.push('\u{2580}'); // ▀
+                }
+            });
+            out.push_str(RESET);
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

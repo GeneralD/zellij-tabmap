@@ -233,29 +233,28 @@ pub fn assemble(
 /// (`rows / 2` is neither the first nor the last), so the glyph keeps a solid
 /// band beneath it.
 ///
+/// `gradient` is the bar's sweep, threaded straight through to
+/// [`minimap::button`] so the fill sweeps exactly as a single-pane inactive tab
+/// does (#84): a flat fill made the recede half-rows read as a hard frame, while
+/// the swept inactive tabs carried the same recede as depth.
+///
 /// Returns a [`TabBlock`] so [`crate::paint::bar`] can place it through the same
 /// `compose` path as the tabs. The button carries no tab identity, so its
 /// `position` is an inert placeholder: `compose` positions a block by the column
 /// it is handed, never by the block's own `position`.
-pub fn button_block(width: usize, rows: usize, perspective: bool) -> TabBlock {
-    let fill = color::button_fill();
+pub fn button_block(
+    width: usize,
+    rows: usize,
+    perspective: bool,
+    gradient: GradientSpec,
+) -> TabBlock {
     // The half-row (one half-block pixel) of canvas reserved at each end for an
     // inactive block in perspective mode at ≥4 rows — exactly `assemble`'s gate
     // and inset, so the button recedes in lockstep with the inactive tabs.
     let vinset = usize::from(perspective && rows >= 4);
-    let middle = rows / 2;
-    let lines = (0..rows)
-        .map(|row| {
-            let receded_top = row < vinset;
-            let receded_bottom = row + vinset >= rows;
-            let line = match (receded_top, receded_bottom, row == middle) {
-                (true, _, _) => two_tone_row(minimap::BG, fill, width),
-                (_, true, _) => two_tone_row(fill, minimap::BG, width),
-                (_, _, true) => text_row_on("+", color::button_glyph(), fill, width),
-                _ => fill_row(fill, width),
-            };
-            StyledLine(line)
-        })
+    let lines = minimap::button(width, rows, vinset, gradient)
+        .lines()
+        .map(|line| StyledLine(line.to_string()))
         .collect();
     TabBlock {
         lines,
@@ -416,23 +415,6 @@ fn fill_row(fill: Rgb, width: usize) -> String {
 /// canvas-colored [`fill_row`]).
 fn blank_row(width: usize) -> String {
     fill_row(minimap::BG, width)
-}
-
-/// A full-width row of half-blocks split between `top` and `bottom`: each `▀`
-/// paints its upper-half pixel `top` and its lower-half pixel `bottom`,
-/// SGR-reset at the end. The new-tab button's recede rows use it to inset a
-/// half-row of canvas ([`minimap::BG`]) above or below the muted fill, matching
-/// an inactive grid block's perspective recede (#66) pixel-for-pixel. The
-/// same-color case is exactly [`fill_row`].
-fn two_tone_row(top: Rgb, bottom: Rgb, width: usize) -> String {
-    let mut out = String::new();
-    if width > 0 {
-        minimap::put_fg(&mut out, top);
-        minimap::put_bg(&mut out, bottom);
-        out.push_str(&"\u{2580}".repeat(width)); // ▀
-    }
-    out.push_str(minimap::RESET);
-    out
 }
 
 /// `text` (no embedded ANSI) centered on the background canvas `width` columns
@@ -1168,7 +1150,7 @@ mod tests {
         for perspective in [false, true] {
             for rows in [3, 4, 5, 6] {
                 for width in [3, 5, 8] {
-                    let block = button_block(width, rows, perspective);
+                    let block = button_block(width, rows, perspective, GradientSpec::OFF);
                     assert_eq!(block.lines.len(), rows, "rows {rows}: exact height");
                     for (row, line) in block.lines.iter().enumerate() {
                         assert_eq!(
@@ -1188,7 +1170,7 @@ mod tests {
         // homes markers and rung text on — so the "+" lines up with the tab
         // labels. Every other row carries just the muted fill, no glyph.
         let rows = 4;
-        let block = button_block(3, rows, false);
+        let block = button_block(3, rows, false, GradientSpec::OFF);
         let middle = rows / 2;
         assert!(
             block.lines[middle].as_str().contains('+'),
@@ -1214,7 +1196,7 @@ mod tests {
             let (r, g, b) = crate::color::button_glyph();
             format!("\x1b[38;2;{r};{g};{b}m")
         };
-        let block = button_block(3, 4, false);
+        let block = button_block(3, 4, false, GradientSpec::OFF);
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(
             joined.contains(&fill_bg),
@@ -1243,8 +1225,8 @@ mod tests {
             let (r, g, b) = minimap::BG;
             format!("\x1b[38;2;{r};{g};{b}m")
         };
-        let recede = button_block(5, 4, true);
-        let full = button_block(5, 4, false);
+        let recede = button_block(5, 4, true, GradientSpec::OFF);
+        let full = button_block(5, 4, false, GradientSpec::OFF);
         let last = recede.lines.len() - 1;
         // Top row: canvas in the upper half (fg), fill in the lower — receded in.
         assert!(
@@ -1265,9 +1247,37 @@ mod tests {
         // The cue is gated on a four-row bar: a three-row button never recedes,
         // matching `assemble`'s inactive-block gate.
         assert_eq!(
-            button_block(5, 3, true).lines,
-            button_block(5, 3, false).lines,
+            button_block(5, 3, true, GradientSpec::OFF).lines,
+            button_block(5, 3, false, GradientSpec::OFF).lines,
             "below four rows perspective must be a no-op for the button too"
+        );
+    }
+
+    #[test]
+    fn button_block_sweeps_the_fill_like_an_inactive_tab() {
+        // #84: a *flat* button fill made the recede half-rows read as a hard
+        // top/bottom frame, while the swept inactive tabs carried the same recede
+        // as depth. Threading the bar's gradient through makes the button fill
+        // vary across the row exactly as a single-pane inactive tab does, so the
+        // recede reads as depth, not a border. A wide button gives the sweep room
+        // to span several distinct shades; `Off` keeps a single flat color.
+        let bg_colors = |line: &str| -> std::collections::BTreeSet<String> {
+            line.split("\x1b[48;2;")
+                .skip(1)
+                .filter_map(|cell| cell.split('m').next().map(str::to_string))
+                .collect()
+        };
+        let middle = 4 / 2;
+        let swept = button_block(40, 4, true, GradientSpec::SHEEN);
+        let flat = button_block(40, 4, true, GradientSpec::OFF);
+        assert!(
+            bg_colors(swept.lines[middle].as_str()).len() > 1,
+            "the sheen sweep varies the button fill across the row (#84)"
+        );
+        assert_eq!(
+            bg_colors(flat.lines[middle].as_str()).len(),
+            1,
+            "with no gradient the button fill stays a single flat color"
         );
     }
 }

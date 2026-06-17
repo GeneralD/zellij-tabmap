@@ -21,6 +21,27 @@ pub fn active_tab(tabs: &[TabInfo]) -> Option<&TabInfo> {
     tabs.iter().find(|tab| tab.active)
 }
 
+/// Whether a pane belongs to the user's tiled terminal layout — the set the
+/// minimap depicts and the wheel navigates (#80).
+///
+/// Excludes plugin panes (the tab-bar / status-bar / attention overlays),
+/// floating panes, and suppressed (background) panes. The single source of this
+/// filter, so [`project`] and the scroll traversal can never drift apart.
+pub fn is_tiled_terminal(pane: &PaneInfo) -> bool {
+    !(pane.is_plugin || pane.is_floating || pane.is_suppressed)
+}
+
+/// The ids of a tab's tiled terminal panes in **reading order** — top to bottom,
+/// then left to right — the per-tab order the wheel walks in `pane` mode (#80).
+pub fn pane_ids_in_reading_order(panes: &[PaneInfo]) -> Vec<u32> {
+    let mut tiled: Vec<&PaneInfo> = panes
+        .iter()
+        .filter(|pane| is_tiled_terminal(pane))
+        .collect();
+    tiled.sort_by_key(|pane| (pane.pane_y, pane.pane_x));
+    tiled.into_iter().map(|pane| pane.id).collect()
+}
+
 /// Project a tab's panes into renderer rectangles, dropping everything that is
 /// not part of the user's tiled layout.
 ///
@@ -32,7 +53,7 @@ pub fn active_tab(tabs: &[TabInfo]) -> Option<&TabInfo> {
 pub fn project(panes: &[PaneInfo]) -> Vec<PaneRect> {
     panes
         .iter()
-        .filter(|pane| !(pane.is_plugin || pane.is_floating || pane.is_suppressed))
+        .filter(|pane| is_tiled_terminal(pane))
         .map(|pane| {
             PaneRect::new(
                 pane.id as usize,
@@ -173,5 +194,53 @@ mod tests {
         }];
         assert!(project(&panes).is_empty());
         assert!(project(&[]).is_empty());
+    }
+
+    fn pane_at(id: u32, x: usize, y: usize) -> PaneInfo {
+        PaneInfo {
+            id,
+            pane_x: x,
+            pane_y: y,
+            pane_columns: 40,
+            pane_rows: 12,
+            title: "sh".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reading_order_sorts_top_to_bottom_then_left_to_right() {
+        // A 2x2 grid given out of order: reading order is top-left, top-right,
+        // bottom-left, bottom-right (y first, then x) — the wheel's per-tab walk.
+        let panes = [
+            pane_at(30, 40, 13), // bottom-right
+            pane_at(10, 0, 1),   // top-left
+            pane_at(20, 40, 1),  // top-right
+            pane_at(25, 0, 13),  // bottom-left
+        ];
+        assert_eq!(pane_ids_in_reading_order(&panes), vec![10, 20, 25, 30]);
+    }
+
+    #[test]
+    fn reading_order_drops_chrome_and_overlays() {
+        // Only tiled terminal panes are walked — the bars, floats, and suppressed
+        // panes never appear in the traversal.
+        let panes = [
+            PaneInfo {
+                is_plugin: true,
+                ..pane_at(99, 0, 1)
+            },
+            pane_at(10, 0, 1),
+            PaneInfo {
+                is_floating: true,
+                ..pane_at(98, 0, 13)
+            },
+            PaneInfo {
+                is_suppressed: true,
+                ..pane_at(97, 40, 1)
+            },
+        ];
+        assert_eq!(pane_ids_in_reading_order(&panes), vec![10]);
+        assert!(pane_ids_in_reading_order(&[]).is_empty());
     }
 }

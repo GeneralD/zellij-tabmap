@@ -313,28 +313,42 @@ pub fn pack(
     }
 }
 
-/// The width to draw the inline new-tab `+` button at (#76): the width of an
-/// **inactive** tab in `layout`, so the button reads as just another slot at the
-/// end of the strip rather than a cramped icon. When the bar has no inactive tab
-/// to copy — a lone active tab — the active block's width is used instead, and an
-/// empty layout falls back to the [`INACTIVE_MIN`] floor.
+/// The width an inline new-tab `+` button would copy from `layout` (#76): an
+/// **inactive** tab's width, so the button reads as just another slot at the end
+/// of the strip rather than a cramped icon.
+///
+/// When no inactive tab is in view the source depends on *why*: a lone tab with
+/// no overflow markers is a genuine single-tab bar, so the sole tab's width is
+/// used (the "+" is its sibling); but when overflow markers are present the
+/// inactive tabs are merely *hidden* — only the wide active block shows — so the
+/// floor [`INACTIVE_MIN`] an overflowed inactive renders at is used instead of
+/// the active width, which would size the button far too wide. An empty layout
+/// also falls back to the floor.
 fn button_slot_width(layout: &LineLayout) -> usize {
-    layout
-        .tabs
-        .iter()
-        .find(|tab| !tab.active)
-        .or_else(|| layout.tabs.first())
-        .map_or(INACTIVE_MIN, |tab| tab.width)
+    if let Some(inactive) = layout.tabs.iter().find(|tab| !tab.active) {
+        return inactive.width;
+    }
+    match layout.left.is_none() && layout.right.is_none() {
+        true => layout.tabs.first().map_or(INACTIVE_MIN, |tab| tab.width),
+        false => INACTIVE_MIN,
+    }
 }
 
 /// Like [`pack`], but also reserves and records the inline new-tab `+` button
 /// at the end of the strip (#76).
 ///
 /// The button is sized to match the bar's **inactive tabs** (see
-/// [`button_slot_width`]) so it reads as just another slot, not a cramped icon —
-/// a trial [`pack`] at the full budget reveals that width. That width plus one
-/// `gap` is held back from `cols` *before* packing, so the tabs never pack into
-/// the button's span. The button is then placed one `gap` past the last visible
+/// [`button_slot_width`]) so it reads as just another slot, not a cramped icon.
+/// Reserving the button's span shrinks the budget the tabs repack into, which can
+/// narrow the inactive tabs below a full-budget trial — so the width that makes
+/// the "+" a true sibling is a *fixed point*: the largest button width whose
+/// reduced-budget repack still renders its inactive tabs at least that wide. The
+/// search runs from the widest the button could be (the full-budget trial)
+/// downward; the [`INACTIVE_MIN`] floor satisfies it once the reserve fits, so a
+/// button is dropped only when even that floor overflows the bar. The reserved
+/// width plus one `gap` is held back from `cols` *before* packing, so the tabs
+/// never pack into the button's span. The button is
+/// then placed one `gap` past the last visible
 /// tab — "just another slot at the end of the strip" — rather than pinned to the
 /// far-right edge (a fill reads as part of the strip). On overflow the right
 /// `+N →` marker, which `pack` butts against the last visible tab, is shifted
@@ -372,41 +386,51 @@ pub fn pack_with_button(
         return plain();
     }
 
-    // Size the button like an inactive tab: a trial pack at the full budget
-    // reveals the inactive block width this bar produces, so the "+" is a
-    // sibling slot rather than a fixed-width icon. Saturating throughout: `gap`
-    // is unbounded config input (`tab_gap`), so a pathological value collapses to
-    // "no room" (button dropped) instead of overflowing — mirroring `pack`'s
-    // entry clamp.
-    let button_width = button_slot_width(&plain());
-    let reserve = button_width.saturating_add(gap);
-    if cols <= prefix_width.saturating_add(reserve) {
+    // Size the button like an inactive tab so the "+" is a sibling slot rather
+    // than a fixed-width icon. The full-budget trial is the *widest* the button
+    // could be; search downward from it for the largest width whose reduced-budget
+    // repack still renders its inactive tabs at least that wide (the fixed point —
+    // a wider reserve would shrink the tabs below the button, making the "+" look
+    // bigger than the slots beside it). Saturating throughout: `gap` is unbounded
+    // config input (`tab_gap`), so a pathological value collapses to "no room"
+    // (button dropped) instead of overflowing — mirroring `pack`'s entry clamp.
+    let max_button_width = button_slot_width(&plain());
+    let solved = (INACTIVE_MIN..=max_button_width)
+        .rev()
+        .find_map(|button_width| {
+            let reserve = button_width.saturating_add(gap);
+            if cols <= prefix_width.saturating_add(reserve) {
+                return None;
+            }
+            let layout = pack(
+                cols - reserve,
+                prefix_width,
+                active_desired,
+                tab_count,
+                active,
+                align,
+                gap,
+            );
+            (button_slot_width(&layout) >= button_width).then_some((layout, button_width, reserve))
+        });
+    // No width fits — not even the INACTIVE_MIN floor: the bar is too narrow to
+    // host the button, so drop it rather than overlap the strip.
+    let Some((mut layout, button_width, reserve)) = solved else {
         return plain();
-    }
-
-    let mut layout = pack(
-        cols - reserve,
-        prefix_width,
-        active_desired,
-        tab_count,
-        active,
-        align,
-        gap,
-    );
+    };
 
     // Anchor the button one `gap` past the last visible tab (or at the prefix
-    // when nothing is drawn). The reduced-budget pack guarantees the strip ends
-    // by `cols - reserve`, so `last_tab_end + button_width <= cols` — the button
-    // always fits.
+    // when nothing is drawn). The strip ends by `cols - reserve` and
+    // `reserve = button_width + gap`, so `last_tab_end + gap + button_width
+    // <= cols` — the button always fits.
     let start = layout.tabs.last().map_or(prefix_width, |tab| {
         tab.start.saturating_add(tab.width).saturating_add(gap)
     });
 
     // Slide the right marker past the button. `pack` placed it butting the last
-    // tab; shifting it by the whole reserve lands it exactly at the button's end
-    // (the marker's own leading space then separates it visually), and keeps it
-    // in bounds: its end was `<= cols - reserve`, so after `+ reserve` it is
-    // `<= cols`.
+    // visible tab; shifting it by the whole `reserve` (`= gap + button_width`)
+    // lands it exactly at the button's end, beyond it, and keeps it in bounds:
+    // its end was `<= cols - reserve`, so after `+ reserve` it is `<= cols`.
     if let Some(marker) = layout.right.as_mut() {
         marker.start += reserve;
     }
@@ -1092,6 +1116,49 @@ mod tests {
     }
 
     #[test]
+    fn button_width_tracks_the_reduced_budget_inactive_not_the_full_budget_trial()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Regression for the mid-sized bar where reserving the button shrinks the
+        // inactive tabs below the full-budget trial. 4 tabs / 80 cols / gap 2:
+        // the full-budget pack trials its inactives at 18, but once an 18+2
+        // reserve is held back the repack shares the remaining 60 cols among the
+        // inactives at 11. The "+" must equal the *rendered* 11, not the trial 18,
+        // or it would sit visibly wider than the tabs it sits beside. The bar is
+        // wide enough that the inactives are uncapped (11 < active_w 20), so the
+        // two budgets genuinely disagree — the case the size-match has to cover.
+        let full_budget_inactive = pack(80, 0, 20, 4, 1, Alignment::Left, 2)
+            .tabs
+            .iter()
+            .find(|tab| !tab.active)
+            .map(|tab| tab.width);
+        let layout = pack_with_button(80, 0, 20, 4, 1, Alignment::Left, 2, true);
+        let button = layout
+            .button
+            .ok_or("an 80-col 4-tab bar must record a button")?;
+        let rendered_inactive = layout
+            .tabs
+            .iter()
+            .find(|tab| !tab.active)
+            .map(|tab| tab.width);
+        assert_eq!(
+            Some(button.width),
+            rendered_inactive,
+            "button matches the inactive width of the layout actually drawn"
+        );
+        assert!(
+            full_budget_inactive.is_some_and(|trial| button.width < trial),
+            "the fix narrows the button below the full-budget trial ({full_budget_inactive:?} → {})",
+            button.width
+        );
+        assert!(
+            layout.right.is_none(),
+            "no overflow: the inactives still fit"
+        );
+        assert!(within_bounds(&layout, 80) && ordered_non_overlapping(&layout));
+        Ok(())
+    }
+
+    #[test]
     fn button_stays_after_the_last_tab_with_the_right_marker_beyond_it_on_overflow() {
         // Many tabs in a narrow bar force the overflow branch. The button still
         // sits directly after the last *visible* tab, and the `+N →` right
@@ -1207,6 +1274,21 @@ mod tests {
                                     layout,
                                     pack(cols, 0, 20, tab_count, active, align, gap),
                                     "a dropped button leaves a plain pack: gap={gap} align={align:?} cols={cols} n={tab_count} a={active}"
+                                );
+                            }
+                            // Whenever a button IS recorded, it is never *wider*
+                            // than an inactive tab rendered in *this* layout — the
+                            // size match the user asked for, held across the whole
+                            // space, not just the wide bars where the full-budget
+                            // trial happens to agree. (At the fixed point it equals
+                            // the inactive width; off it, it is at most one step
+                            // narrower — never the bigger-than-the-tabs look.) (#76)
+                            if let Some(button) = layout.button {
+                                assert!(
+                                    button.width <= button_slot_width(&layout),
+                                    "button {} wider than the rendered inactive {}: gap={gap} align={align:?} cols={cols} n={tab_count} a={active}",
+                                    button.width,
+                                    button_slot_width(&layout),
                                 );
                             }
                         }

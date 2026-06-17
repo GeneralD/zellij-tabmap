@@ -95,6 +95,7 @@ default_tab_template {
             gradient_radial "outward"                   // radial direction: "outward" (default, base at center) / "inward" (stop at center)
             inactive_dim "true"                         // dim inactive tabs so the active one stands out; "false" to opt out
             perspective "true"                          // lift the active tab with depth (needs pane size 4+); "false" to opt out
+            new_tab_button "true"                       // clickable "+" after the last tab opens a new tab; "false" hides it
         }
     }
     children
@@ -121,6 +122,8 @@ Contributors hacking on the plugin [build from source](#build-from-source) and p
 > **`inactive_dim` — visual cue for the active tab.** When `true` (default), inactive tabs are dimmed toward the terminal background so the active tab stands out clearly: its pane fills stay vivid, its shortcut badge and focused pane label are drawn in white, and no focus ring appears on other tabs. Set `false` to disable the dimming and treat all tabs with equal intensity.
 >
 > **`perspective` — lift the active tab with depth.** When `true` (default) **and** the bar is at least **4 rows tall**, every inactive tab recedes by one row — a half-row of terminal background inset at its top and bottom — while the active tab fills the full height, so the selected tab appears to float forward. The height comes from the layout's `pane size=N`, which the plugin can only read, not set: bump the tab-bar pane to `size=4` (or more) to see the effect. Below 4 rows the option is a no-op (every tab fills the bar), and `false` always renders every tab at full height. Pairs naturally with `inactive_dim` — color recede plus depth recede. The bar renders nothing if it is given fewer than 3 rows (the minimap needs that floor to stay legible).
+>
+> **`new_tab_button` — the clickable "+" affordance.** When `true` (default), a muted "+" block is drawn one gap after the last visible tab; clicking anywhere in its span opens a new tab **and** focuses it. The button is styled like an inactive tab — same width and, in a tall enough bar, the same one-row recede as `perspective` — so it reads as part of the strip rather than a control bolted on. When tabs overflow, it sits between the tabs and the trailing `+N →` marker. It rides on the already-granted `ChangeApplicationState` permission (the same one tab switching uses), so enabling it by default costs existing installs no new permission prompt on update. Set `false` to hide it and reclaim its columns for the tab strip.
 >
 > **Enabling `reorder`** requests a third permission, `RunActionsAsUser` (for the `MoveTabByTabId` action a tab drag performs). Granting is all-or-nothing for tab-template plugins, so when you set `reorder "true"` you must **re-run step 2** (the grant prompt then lists all three permissions) and restart — otherwise the bar freezes with no prompt. Left at the default (`false`), the plugin requests only the two permissions above, so an existing install keeps working unchanged across updates.
 

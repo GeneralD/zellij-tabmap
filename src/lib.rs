@@ -407,24 +407,24 @@ impl ZellijPlugin for State {
         // `close` is set (enabled + >1 tab). The glyph lands at the block's top
         // text row, rightmost column, so the click cell is `(0, start + width-1)`
         // — exactly where the minimap painted it.
-        self.close_layout = close
-            .then(|| {
-                self.tab_layout
-                    .iter()
-                    .filter(|hit| {
-                        matches!(
-                            tab_block::level_for(hit.width),
-                            tab_block::Level::L0 | tab_block::Level::L1 | tab_block::Level::L2
-                        )
-                    })
-                    .map(|hit| line::CloseHit {
-                        position: hit.position,
-                        row: 0,
-                        column: hit.start + hit.width - 1,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        self.close_layout = if close {
+            self.tab_layout
+                .iter()
+                .filter(|hit| {
+                    matches!(
+                        tab_block::level_for(hit.width),
+                        tab_block::Level::L0 | tab_block::Level::L1 | tab_block::Level::L2
+                    )
+                })
+                .map(|hit| line::CloseHit {
+                    position: hit.position,
+                    row: 0,
+                    column: hit.start + hit.width - 1,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
     }
 }
 

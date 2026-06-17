@@ -95,7 +95,8 @@ fn main() {
         true,
     );
 
-    // Hide the cursor so a held screenshot doesn't catch a stray cursor block
-    // parked past the button.
-    print!("{bar}\u{1b}[?25l");
+// Hide the cursor so a held screenshot doesn't catch a stray cursor block
+// parked past the button. Move the cursor below the rendered bar and restore it
+// so the demo doesn't leave the terminal in a hidden-cursor state.
+print!("{bar}\u{1b}[?25l\u{1b}[{n};1H\u{1b}[?25h", n = ROWS + 2);
 }

@@ -249,12 +249,9 @@ impl ZellijPlugin for State {
         // block. `pack` clamps the active width into the legible `16..=28` range,
         // so the parser keeps the raw value (see `config.rs`); §4.3–4.4 of the design.
         // Reserve the trailing "+" button only when enabled — `pack_with_button`
-        // with a zero width is exactly `pack`, recording no button — so the
-        // disabled bar reclaims those columns for the tab strip (#76).
-        let button_width = match self.config.new_tab_button {
-            true => line::BUTTON_WIDTH,
-            false => 0,
-        };
+        // with `with_button: false` is exactly `pack`, recording no button — so
+        // the disabled bar reclaims those columns for the tab strip. When on, the
+        // button is sized to match the bar's inactive tabs (#76).
         let layout = line::pack_with_button(
             cols,
             0,
@@ -263,7 +260,7 @@ impl ZellijPlugin for State {
             active_position,
             self.config.align,
             self.config.tab_gap,
-            button_width,
+            self.config.new_tab_button,
         );
 
         // Project only the visible tabs' tiled panes (the collapsed ones need no

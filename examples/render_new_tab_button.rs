@@ -74,16 +74,7 @@ fn main() {
     // paints it one gap past the last visible tab. A wider-than-needed bar
     // (160 cols, left-aligned) leaves the "+" sitting right after the last tab
     // with empty canvas beyond — the "just another slot at the end" intent.
-    let layout = line::pack_with_button(
-        160,
-        0,
-        line::ACTIVE_MAX,
-        4,
-        1,
-        Alignment::Left,
-        GAP,
-        line::BUTTON_WIDTH,
-    );
+    let layout = line::pack_with_button(160, 0, line::ACTIVE_MAX, 4, 1, Alignment::Left, GAP, true);
     let bar = paint::bar(
         ROWS,
         &layout,

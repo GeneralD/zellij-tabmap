@@ -19,11 +19,6 @@ pub const ACTIVE_MAX: usize = 28;
 /// degrades a tab into a 0/1-column sliver.
 pub const INACTIVE_MIN: usize = 2;
 
-/// Drawn width of the inline new-tab `+` button block (#76): a centered `+`
-/// with one fill column of breathing room on each side. [`pack_with_button`]
-/// reserves this many columns at the end of the strip.
-pub const BUTTON_WIDTH: usize = 3;
-
 /// One visible tab's drawn column span, for hit-testing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabHit {
@@ -318,21 +313,39 @@ pub fn pack(
     }
 }
 
+/// The width to draw the inline new-tab `+` button at (#76): the width of an
+/// **inactive** tab in `layout`, so the button reads as just another slot at the
+/// end of the strip rather than a cramped icon. When the bar has no inactive tab
+/// to copy — a lone active tab — the active block's width is used instead, and an
+/// empty layout falls back to the [`INACTIVE_MIN`] floor.
+fn button_slot_width(layout: &LineLayout) -> usize {
+    layout
+        .tabs
+        .iter()
+        .find(|tab| !tab.active)
+        .or_else(|| layout.tabs.first())
+        .map_or(INACTIVE_MIN, |tab| tab.width)
+}
+
 /// Like [`pack`], but also reserves and records the inline new-tab `+` button
 /// at the end of the strip (#76).
 ///
-/// `button_width` columns plus one `gap` are held back from `cols` *before*
-/// packing, so the tabs never pack into the button's span. The button is then
-/// placed one `gap` past the last visible tab — "just another slot at the end
-/// of the strip" — rather than pinned to the far-right edge (a fill reads as
-/// part of the strip). On overflow the right `+N →` marker, which `pack` butts
-/// against the last visible tab, is shifted just past the button so the button
-/// stays **directly after the last visible tab** and the marker sits beyond it
-/// (closer to the edge) — the placement chosen in #76.
+/// The button is sized to match the bar's **inactive tabs** (see
+/// [`button_slot_width`]) so it reads as just another slot, not a cramped icon —
+/// a trial [`pack`] at the full budget reveals that width. That width plus one
+/// `gap` is held back from `cols` *before* packing, so the tabs never pack into
+/// the button's span. The button is then placed one `gap` past the last visible
+/// tab — "just another slot at the end of the strip" — rather than pinned to the
+/// far-right edge (a fill reads as part of the strip). On overflow the right
+/// `+N →` marker, which `pack` butts against the last visible tab, is shifted
+/// just past the button so the button stays **directly after the last visible
+/// tab** and the marker sits beyond it (closer to the edge) — the placement
+/// chosen in #76.
 ///
 /// Returns the same [`LineLayout`] as `pack` with `button` set, or with
-/// `button: None` (a plain `pack`) when the reserve does not fit `cols` — a bar
-/// too narrow to host the button drops it rather than overlapping the strip.
+/// `button: None` (a plain `pack`) when `with_button` is false, or when even an
+/// inactive-tab-sized reserve does not fit `cols` — a bar too narrow to host the
+/// button drops it rather than overlapping the strip.
 #[allow(clippy::too_many_arguments)]
 pub fn pack_with_button(
     cols: usize,
@@ -342,14 +355,10 @@ pub fn pack_with_button(
     active: usize,
     align: Alignment,
     gap: usize,
-    button_width: usize,
+    with_button: bool,
 ) -> LineLayout {
-    // Saturating throughout: `gap` is unbounded config input (`tab_gap`), so a
-    // pathological value collapses to "no room" (button dropped) instead of
-    // overflowing — mirroring `pack`'s entry clamp.
-    let reserve = button_width.saturating_add(gap);
-    if button_width == 0 || cols <= prefix_width.saturating_add(reserve) {
-        return pack(
+    let plain = || {
+        pack(
             cols,
             prefix_width,
             active_desired,
@@ -357,7 +366,22 @@ pub fn pack_with_button(
             active,
             align,
             gap,
-        );
+        )
+    };
+    if !with_button {
+        return plain();
+    }
+
+    // Size the button like an inactive tab: a trial pack at the full budget
+    // reveals the inactive block width this bar produces, so the "+" is a
+    // sibling slot rather than a fixed-width icon. Saturating throughout: `gap`
+    // is unbounded config input (`tab_gap`), so a pathological value collapses to
+    // "no room" (button dropped) instead of overflowing — mirroring `pack`'s
+    // entry clamp.
+    let button_width = button_slot_width(&plain());
+    let reserve = button_width.saturating_add(gap);
+    if cols <= prefix_width.saturating_add(reserve) {
+        return plain();
     }
 
     let mut layout = pack(
@@ -1039,7 +1063,7 @@ mod tests {
         // one `gap` past the last visible tab — not pinned to the far-right edge
         // (there is trailing slack beyond it).
         let gap = 2;
-        let layout = pack_with_button(120, 0, 20, 4, 1, Alignment::Left, gap, BUTTON_WIDTH);
+        let layout = pack_with_button(120, 0, 20, 4, 1, Alignment::Left, gap, true);
         let last_end = layout.tabs.last().map(|t| t.start + t.width);
         let button = layout.button;
         assert_eq!(
@@ -1047,7 +1071,18 @@ mod tests {
             last_end.map(|end| end + gap),
             "button starts one gap past the last tab"
         );
-        assert_eq!(button.map(|b| b.width), Some(BUTTON_WIDTH));
+        // The button is sized like an inactive tab — a sibling slot, not a
+        // fixed-width icon (#76 follow-up).
+        let inactive_w = layout.tabs.iter().find(|t| !t.active).map(|t| t.width);
+        assert!(
+            inactive_w.is_some(),
+            "the four-tab fixture has inactive tabs"
+        );
+        assert_eq!(
+            button.map(|b| b.width),
+            inactive_w,
+            "button matches an inactive tab's width"
+        );
         assert!(layout.right.is_none(), "no overflow with four tabs in 120");
         assert!(
             button.is_some_and(|b| b.start + b.width < 120),
@@ -1064,7 +1099,7 @@ mod tests {
         // [marker] order) — never overlapping, never past the bar.
         let cols = 40;
         let gap = 1;
-        let layout = pack_with_button(cols, 0, 16, 20, 10, Alignment::Center, gap, BUTTON_WIDTH);
+        let layout = pack_with_button(cols, 0, 16, 20, 10, Alignment::Center, gap, true);
         let last_end = layout.tabs.last().map(|t| t.start + t.width);
         let button = layout.button;
         let marker_start = layout.right.as_ref().map(|m| m.start);
@@ -1089,10 +1124,11 @@ mod tests {
 
     #[test]
     fn button_is_dropped_when_the_bar_is_too_narrow_to_host_it() {
-        // A bar with no room for the reserve falls back to a plain pack: no
-        // button rather than one overlapping the strip. The layout still equals
-        // what `pack` alone would produce for the same width.
-        let layout = pack_with_button(4, 0, 16, 3, 1, Alignment::Center, 1, BUTTON_WIDTH);
+        // A bar with no room for an inactive-tab-sized reserve falls back to a
+        // plain pack: no button rather than one overlapping the strip. With three
+        // tabs in four columns the active block fills the bar, so the reserve
+        // can't fit and the layout equals what `pack` alone would produce.
+        let layout = pack_with_button(4, 0, 16, 3, 1, Alignment::Center, 1, true);
         assert!(layout.button.is_none(), "too narrow → no button");
         assert_eq!(
             layout,
@@ -1102,10 +1138,10 @@ mod tests {
     }
 
     #[test]
-    fn zero_button_width_records_no_button() {
-        // A zero-width button is meaningless; `pack_with_button` degrades to a
-        // plain pack rather than reserving an empty span.
-        let layout = pack_with_button(120, 0, 20, 4, 1, Alignment::Left, 2, 0);
+    fn disabled_button_records_no_button() {
+        // `with_button: false` degrades to a plain pack, reclaiming the columns a
+        // button would have reserved for the tab strip (#76).
+        let layout = pack_with_button(120, 0, 20, 4, 1, Alignment::Left, 2, false);
         assert!(layout.button.is_none());
         assert_eq!(layout, pack(120, 0, 20, 4, 1, Alignment::Left, 2));
     }
@@ -1130,7 +1166,7 @@ mod tests {
         // are disjoint: no column resolves to both a tab switch and the button,
         // so click routing is unambiguous (#76).
         let cols = 60;
-        let layout = pack_with_button(cols, 0, 20, 5, 2, Alignment::Center, 1, BUTTON_WIDTH);
+        let layout = pack_with_button(cols, 0, 20, 5, 2, Alignment::Center, 1, true);
         let button = layout.button;
         assert!(button.is_some(), "the button is recorded");
         let collides = (0..cols).any(|column| {
@@ -1156,16 +1192,8 @@ mod tests {
                 for cols in (0..=160).step_by(3) {
                     for tab_count in 1..=40 {
                         for active in 0..tab_count {
-                            let layout = pack_with_button(
-                                cols,
-                                0,
-                                20,
-                                tab_count,
-                                active,
-                                align,
-                                gap,
-                                BUTTON_WIDTH,
-                            );
+                            let layout =
+                                pack_with_button(cols, 0, 20, tab_count, active, align, gap, true);
                             assert!(
                                 within_bounds(&layout, cols),
                                 "bounds: gap={gap} align={align:?} cols={cols} n={tab_count} a={active}"

@@ -87,6 +87,7 @@ default_tab_template {
             active_width "24"
             align "center"                              // "center" slides to keep the active tab centered; "left" anchors the row (all-fit only)
             reorder "false"                             // drag a tab to reorder; "true" also needs RunActionsAsUser
+            close_button "false"                        // "true" stamps a clickable "×" on each tab to close it
             scroll "tab"                                // mouse wheel: "tab" (default) switch tabs / "pane" walk panes across tabs / "off"
             tab_gap "2"                                 // cleared columns between tab blocks; "0" packs them flush
             gradient "sheen"                            // pane fill sweep: "sheen" (default) / "weave" (alternating rows) / "off" (flat)
@@ -123,6 +124,8 @@ Contributors hacking on the plugin [build from source](#build-from-source) and p
 > **`perspective` — lift the active tab with depth.** When `true` (default) **and** the bar is at least **4 rows tall**, every inactive tab recedes by one row — a half-row of terminal background inset at its top and bottom — while the active tab fills the full height, so the selected tab appears to float forward. The height comes from the layout's `pane size=N`, which the plugin can only read, not set: bump the tab-bar pane to `size=4` (or more) to see the effect. Below 4 rows the option is a no-op (every tab fills the bar), and `false` always renders every tab at full height. Pairs naturally with `inactive_dim` — color recede plus depth recede. The bar renders nothing if it is given fewer than 3 rows (the minimap needs that floor to stay legible).
 >
 > **Enabling `reorder`** requests a third permission, `RunActionsAsUser` (for the `MoveTabByTabId` action a tab drag performs). Granting is all-or-nothing for tab-template plugins, so when you set `reorder "true"` you must **re-run step 2** (the grant prompt then lists all three permissions) and restart — otherwise the bar freezes with no prompt. Left at the default (`false`), the plugin requests only the two permissions above, so an existing install keeps working unchanged across updates.
+>
+> **`close_button` — click to close a tab.** When `true`, each tab block stamps a small `×` in its **top-right** cell; left-clicking exactly that cell closes the tab (via `close_tab_with_index`, which falls under the existing `ChangeApplicationState` grant — no re-grant needed). The `×` only appears on blocks wide enough to draw a per-pane minimap, and never on the **last** remaining tab, so you can't close the bar out of existence. A click anywhere else on the block keeps its usual behavior (switch tab / focus the clicked pane), since the close target is that single cell, not the whole column. Default `false` keeps the strip uncluttered for keyboard-driven users; set `true` if you reach for the mouse.
 
 <details>
 <summary>Load straight from the release URL (quick try — does not auto-update)</summary>

@@ -62,6 +62,7 @@ fn main() {
                 0,
                 LabelMode::All,
                 Some("\u{2318} 1"),
+                false,
                 spec,
                 true,
             )

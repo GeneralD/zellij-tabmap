@@ -110,6 +110,7 @@ fn main() {
             GradientSpec::from_mode(GradientMode::Sheen),
             true,
             false,
+            false,
         )
     );
 }

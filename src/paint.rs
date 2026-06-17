@@ -33,6 +33,10 @@ use crate::tab_block::{self, TabBlock};
 ///
 /// The `← +N` / `+N →` overflow markers are placed at their own columns on the
 /// middle row.
+///
+/// `close` forwards the top-right "×" close affordance to every tab block (#86);
+/// the caller passes `true` only when the feature is enabled and closing a tab is
+/// safe (more than one tab open).
 #[allow(clippy::too_many_arguments)]
 pub fn bar(
     rows: usize,
@@ -43,6 +47,7 @@ pub fn bar(
     gradient: GradientSpec,
     inactive_dim: bool,
     perspective: bool,
+    close: bool,
 ) -> String {
     // #59: inactive tabs render through the canvas-receded palette while the
     // active tab keeps full vibrancy, so the selected tab reads at a glance.
@@ -71,6 +76,7 @@ pub fn bar(
                 gradient,
                 hit.active,
                 perspective,
+                close,
             )
         })
         .collect();
@@ -295,6 +301,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
+            false,
         );
         for row in 1..=3 {
             assert!(
@@ -321,6 +328,7 @@ mod tests {
             &Palette::default(),
             "\u{2318}",
             GradientSpec::OFF,
+            false,
             false,
             false,
         );
@@ -355,6 +363,7 @@ mod tests {
             &Palette::default(),
             "\u{2318}",
             GradientSpec::OFF,
+            false,
             false,
             false,
         );
@@ -409,6 +418,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             false,
+            false,
         );
         assert!(
             out.contains(&fg(palette.color_for(0))),
@@ -446,6 +456,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
+            false,
         );
         assert!(
             out.contains(&fg(palette.color_for(1))),
@@ -481,6 +492,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
+            false,
         );
         // Middle row (row 2): left marker at col 1, right marker at col 8.
         assert!(out.contains("\u{1b}[2;1H\u{2190} +2 "));
@@ -510,6 +522,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
+            false,
         );
         // rows=3 → middle row index 1 → 1-based row 2, button start col 18+1=19.
         assert!(
@@ -535,6 +548,7 @@ mod tests {
             &Palette::default(),
             "\u{2318}",
             GradientSpec::OFF,
+            false,
             false,
             false,
         );

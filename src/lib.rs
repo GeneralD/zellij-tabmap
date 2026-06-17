@@ -60,6 +60,12 @@ pub struct State {
     /// draw no per-pane regions, so a click there has no pane to resolve. Cleared
     /// on every render bail-out, so a click never hit-tests a stale frame.
     tab_panes: BTreeMap<usize, TabPaneGeom>,
+    /// The most recent render's per-tab close-button cells (#86) — one entry per
+    /// grid-rung tab that drew an "×". Re-recorded every `render()` alongside
+    /// `tab_layout` and cleared on the same bail-outs, so a `LeftClick` resolves
+    /// "close tab N" against the live frame. Empty whenever the close button is
+    /// disabled, only one tab is open, or no frame has drawn yet.
+    close_layout: Vec<line::CloseHit>,
 }
 
 /// One visible tab's drawn pane geometry, captured each render so a later click
@@ -217,6 +223,19 @@ impl ZellijPlugin for State {
                     let _opened = new_tab::<&str>(None, None);
                     return false;
                 }
+                // A click on a tab's top-right "×" cell closes that tab and
+                // consumes the gesture — checked before the focus/switch fallback
+                // so the corner cell closes rather than switches, and before any
+                // drag is armed. `close_tab_with_index` closes by position without
+                // focusing first, and rides the already-granted
+                // `ChangeApplicationState` (#86). The span is recorded only when
+                // the feature is on and >1 tab is open, so this guard is inert
+                // otherwise — and the last tab is never closeable.
+                if let Some(position) = self.clicked_close_button(row, column) {
+                    self.drag = None;
+                    close_tab_with_index(position);
+                    return false;
+                }
                 self.focus_or_switch_at(row, column);
                 self.drag = self.grab_at(column);
                 false
@@ -262,6 +281,7 @@ impl ZellijPlugin for State {
         self.tab_layout.clear();
         self.button_layout = None;
         self.tab_panes.clear();
+        self.close_layout.clear();
         if !self.permitted {
             return;
         }
@@ -321,6 +341,12 @@ impl ZellijPlugin for State {
             })
             .collect();
 
+        // Offer the close "×" only when enabled *and* more than one tab is open,
+        // so the last tab keeps no close target and can't be shut from under the
+        // session (#86). The same predicate gates both the painted glyph and the
+        // recorded click cells below, so draw and hit-test never disagree.
+        let close = self.config.close_button && self.tabs.len() > 1;
+
         print!(
             "{}",
             paint::bar(
@@ -332,6 +358,7 @@ impl ZellijPlugin for State {
                 self.config.gradient_spec(),
                 self.config.inactive_dim,
                 self.config.perspective,
+                close,
             )
         );
 
@@ -374,6 +401,30 @@ impl ZellijPlugin for State {
                 )
             })
             .collect();
+
+        // Record the close "×" cell for each tab that drew one (#86) — the same
+        // grid rungs (L0–L2) that `assemble` stamps the glyph on, and only when
+        // `close` is set (enabled + >1 tab). The glyph lands at the block's top
+        // text row, rightmost column, so the click cell is `(0, start + width-1)`
+        // — exactly where the minimap painted it.
+        self.close_layout = close
+            .then(|| {
+                self.tab_layout
+                    .iter()
+                    .filter(|hit| {
+                        matches!(
+                            tab_block::level_for(hit.width),
+                            tab_block::Level::L0 | tab_block::Level::L1 | tab_block::Level::L2
+                        )
+                    })
+                    .map(|hit| line::CloseHit {
+                        position: hit.position,
+                        row: 0,
+                        column: hit.start + hit.width - 1,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
     }
 }
 
@@ -452,6 +503,22 @@ impl State {
     /// [`reorder_plan`](Self::reorder_plan)/[`reorder`](Self::reorder) seam.
     fn clicked_new_tab_button(&self, column: usize) -> bool {
         self.button_layout.is_some_and(|hit| hit.contains(column))
+    }
+
+    /// The position of the tab whose close "×" cell is at (`row`, `column`), or
+    /// `None` when the click missed every close cell (#86). `row` is zellij's
+    /// click line (`isize`, negative above the pane); a negative row matches no
+    /// cell. Tests the last frame's recorded `close_layout`, which is empty
+    /// whenever the close button is disabled or only one tab is open — so this is
+    /// always a miss then, and the last tab is never closeable. Split from the
+    /// `close_tab_with_index` host effect so the routing is unit-tested without a
+    /// zellij host, mirroring [`Self::clicked_new_tab_button`].
+    fn clicked_close_button(&self, row: isize, column: usize) -> Option<usize> {
+        let row = usize::try_from(row).ok()?;
+        self.close_layout
+            .iter()
+            .find(|hit| hit.contains(row, column))
+            .map(|hit| hit.position)
     }
 
     /// Dispatch a wheel step to the configured navigation: switch tabs, walk
@@ -1541,6 +1608,108 @@ mod tests {
         assert!(
             state.button_layout.is_none(),
             "the disabled button records no span"
+        );
+    }
+
+    #[test]
+    fn clicked_close_button_hit_tests_the_recorded_close_cell() {
+        // The pure routing predicate behind a close click: only the exact
+        // (row, column) cell recorded for a tab resolves to its position. A
+        // click one row down (still in the block, but a pane/switch target) or
+        // one column off misses, and an empty `close_layout` (disabled or a lone
+        // tab) always misses — so the `close_tab_with_index` host effect is
+        // reached only past a true hit, and the last tab is never closeable.
+        let mut state = State::default();
+        assert_eq!(
+            state.clicked_close_button(0, 9),
+            None,
+            "no recorded close cell → every click misses"
+        );
+
+        state.close_layout = vec![line::CloseHit {
+            position: 2,
+            row: 0,
+            column: 9,
+        }];
+        assert_eq!(
+            state.clicked_close_button(0, 9),
+            Some(2),
+            "the exact close cell resolves to its tab position"
+        );
+        assert_eq!(
+            state.clicked_close_button(1, 9),
+            None,
+            "one row below the close cell misses (still a switch/focus target)"
+        );
+        assert_eq!(
+            state.clicked_close_button(0, 8),
+            None,
+            "one column left of the close cell misses"
+        );
+        assert_eq!(
+            state.clicked_close_button(-1, 9),
+            None,
+            "a negative click row (above the bar) matches no cell"
+        );
+    }
+
+    #[test]
+    fn render_records_close_cells_only_when_enabled_and_multi_tab() {
+        // With `close_button` on and more than one tab, each grid-rung block
+        // records a close cell at its top-right corner, so a later click can
+        // route to "close this tab". Turning the toggle off — or dropping to a
+        // single tab — records nothing, leaving the lone tab uncloseable.
+        let mut state = State::default();
+        state.permitted = true;
+        state.config = Config {
+            close_button: true,
+            ..Default::default()
+        };
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                ..tab(0, 1)
+            },
+            tab(1, 2),
+        ];
+
+        state.render(MIN_ROWS, 80);
+        assert_eq!(
+            state.close_layout.len(),
+            2,
+            "both wide tabs record a close cell when enabled"
+        );
+        assert!(
+            state.close_layout.iter().all(|hit| hit.row == 0
+                && state
+                    .tab_layout
+                    .iter()
+                    .any(|t| t.position == hit.position && hit.column == t.start + t.width - 1)),
+            "each close cell sits at its block's top-right corner"
+        );
+
+        state.tabs = vec![TabInfo {
+            active: true,
+            ..tab(0, 1)
+        }];
+        state.render(MIN_ROWS, 80);
+        assert!(
+            state.close_layout.is_empty(),
+            "a lone tab records no close cell — it can never be closed"
+        );
+
+        state.config = Config::default();
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                ..tab(0, 1)
+            },
+            tab(1, 2),
+        ];
+        state.render(MIN_ROWS, 80);
+        assert!(
+            state.close_layout.is_empty(),
+            "the disabled close button records no cells"
         );
     }
 

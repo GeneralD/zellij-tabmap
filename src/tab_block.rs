@@ -148,6 +148,13 @@ pub fn vinset_for(perspective: bool, rows: usize, active: bool) -> usize {
 /// forward. Below four rows, or for the active tab, the block fills its full
 /// height (the historical look). The narrow rungs (L3 glyph, L4 hint) already
 /// ride a blank-framed middle row, so the cue applies only to the grid rungs.
+///
+/// `close` stamps the top-right "×" close affordance (#86); the minimap reserves
+/// its cell from the badge and label. Only the grid rungs (L0–L2) honor it — the
+/// narrow rungs have no room and drop it like the rest of their detail. The
+/// caller passes `true` only when the close button is enabled *and* more than one
+/// tab is open (so the last tab keeps no close target), and records the matching
+/// click cell against the live frame.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble(
     panes: &[PaneRect],
@@ -159,6 +166,7 @@ pub fn assemble(
     gradient: GradientSpec,
     active: bool,
     perspective: bool,
+    close: bool,
 ) -> TabBlock {
     // Pixel rows of background to inset top and bottom of the minimap canvas: one
     // (a half text row) for an inactive block in perspective mode at ≥4 rows,
@@ -181,6 +189,7 @@ pub fn assemble(
             vinset,
             LabelMode::All,
             badge,
+            close,
             gradient,
             active,
         ),
@@ -192,6 +201,7 @@ pub fn assemble(
             vinset,
             LabelMode::Focused,
             badge,
+            close,
             gradient,
             active,
         ),
@@ -203,9 +213,12 @@ pub fn assemble(
             vinset,
             LabelMode::None,
             badge,
+            close,
             gradient,
             active,
         ),
+        // The narrow rungs (L3 glyph, L4 hint) have no room for a close "×" — it
+        // degrades away with the label and grid, so `close` is unused here (#86).
         Level::L3 => glyph_lines(panes, width, rows, active),
         Level::L4 => hint_lines(position, prefix, width, rows, active),
     };
@@ -286,11 +299,12 @@ fn grid_lines(
     vinset: usize,
     mode: LabelMode,
     badge: Option<&str>,
+    close: bool,
     gradient: GradientSpec,
     active: bool,
 ) -> Vec<StyledLine> {
     let block = minimap::render(
-        panes, palette, width, rows, vinset, mode, badge, gradient, active,
+        panes, palette, width, rows, vinset, mode, badge, close, gradient, active,
     );
     padded_rows(block.lines().map(str::to_string), width, rows)
 }
@@ -619,6 +633,7 @@ mod tests {
                     GradientSpec::OFF,
                     false,
                     false,
+                    false,
                 );
                 assert_eq!(
                     block.lines.len(),
@@ -678,6 +693,7 @@ mod tests {
                         GradientSpec::OFF,
                         false,
                         false,
+                        false,
                     );
                     for (row, line) in block.lines.iter().enumerate() {
                         assert_eq!(
@@ -710,6 +726,7 @@ mod tests {
                 GradientSpec::OFF,
                 false,
                 perspective,
+                false,
             )
             .lines
         };
@@ -743,6 +760,7 @@ mod tests {
                 GradientSpec::OFF,
                 true,
                 perspective,
+                false,
             )
             .lines
         };
@@ -788,6 +806,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
+            false,
         );
         for line in &block.lines {
             assert_eq!(measured(line), 2);
@@ -812,6 +831,7 @@ mod tests {
             9,
             "Cmd+",
             GradientSpec::OFF,
+            false,
             false,
             false,
         );
@@ -844,6 +864,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
+            false,
         );
         for line in &block.lines {
             for ch in ['a', 'b', 'c'] {
@@ -872,6 +893,7 @@ mod tests {
             0,
             "\u{2318}",
             GradientSpec::OFF,
+            false,
             false,
             false,
         );
@@ -903,6 +925,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
+            false,
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(
@@ -927,6 +950,7 @@ mod tests {
                 "\u{2318}",
                 GradientSpec::OFF,
                 active,
+                false,
                 false,
             )
             .lines
@@ -999,6 +1023,7 @@ mod tests {
                     GradientSpec::OFF,
                     active,
                     false,
+                    false,
                 )
                 .lines[1]
                     .as_str()
@@ -1033,6 +1058,7 @@ mod tests {
                 GradientSpec::OFF,
                 false,
                 false,
+                false,
             );
             let second = assemble(
                 &panes,
@@ -1042,6 +1068,7 @@ mod tests {
                 1,
                 "\u{2318}",
                 GradientSpec::OFF,
+                false,
                 false,
                 false,
             );
@@ -1073,6 +1100,7 @@ mod tests {
                 GradientSpec::OFF,
                 false,
                 false,
+                false,
             );
             let b = assemble(
                 &reversed,
@@ -1082,6 +1110,7 @@ mod tests {
                 1,
                 "\u{2318}",
                 GradientSpec::OFF,
+                false,
                 false,
                 false,
             );

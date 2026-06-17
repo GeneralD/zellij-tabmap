@@ -1,19 +1,18 @@
-//! Visual sample for #76 — the inline "+" new-tab button.
+//! Visual sample for #86 — the opt-in "×" close button on each tab block.
 //!
-//! The button renders like a normal tab: a muted, theme-aware *fill* (not
-//! line-art) with a centered "+", and it sits at the end of the tab strip,
-//! right after the last visible tab — exactly where the next tab would go.
-//! The fill is `CANVAS` lifted a little toward its luma-opposite (lighter on a
-//! dark bar, darker on a light one), so it reads as a quiet affordance rather
-//! than a competing tab.
+//! When `close_button` is enabled, every grid-rung tab block stamps a small "×"
+//! into its **top-right** cell — the mirror of the top-left `⌘N` shortcut badge.
+//! A left-click on exactly that cell closes the tab; the glyph is white on the
+//! active tab and muted toward the fill on inactive ones, so it reads as a quiet
+//! affordance rather than competing with the minimap. It never appears on the
+//! last remaining tab (here all four are shown, so each carries its "×").
 //!
-//! This drives the **real** render path — `line::pack_with_button` reserves and
-//! places the span, and `paint::bar` draws the button from the same
-//! `color::button_fill`/`button_glyph` the plugin uses — so the preview can
-//! never drift from what ships.
+//! This drives the **real** render path — `paint::bar` forwards `close: true`
+//! through `tab_block::assemble` into `minimap::render`, the same code the plugin
+//! runs — so the preview can never drift from what ships.
 //!
 //! Not part of the plugin — run with e.g.
-//! `cargo run --example render_new_tab_button --target aarch64-apple-darwin`
+//! `cargo run --example render_close_button --target aarch64-apple-darwin`
 //! (substitute your host triple to override the wasm32-wasip1 default).
 
 use std::collections::BTreeMap;
@@ -69,12 +68,9 @@ fn main() {
         ],
     );
 
-    // The real reserve-and-place path: `pack_with_button` keeps the strip clear
-    // of the button's span and records where the "+" goes; `paint::bar` then
-    // paints it one gap past the last visible tab. A wider-than-needed bar
-    // (160 cols, left-aligned) leaves the "+" sitting right after the last tab
-    // with empty canvas beyond — the "just another slot at the end" intent.
-    let layout = line::pack_with_button(160, 0, line::ACTIVE_MAX, 4, 1, Alignment::Left, GAP, true);
+    // Four tabs, none of them the lone survivor, so every block draws its "×".
+    // A plain `pack` (no "+" button) keeps the focus on the close affordance.
+    let layout = line::pack(160, 0, line::ACTIVE_MAX, 4, 1, Alignment::Left, GAP);
     let bar = paint::bar(
         ROWS,
         &layout,
@@ -84,11 +80,11 @@ fn main() {
         GradientSpec::from_mode(GradientMode::Sheen),
         true,
         true,
-        false,
+        true, // close_button enabled — stamp the "×" on every block
     );
 
     // Hide the cursor so a held screenshot doesn't catch a stray cursor block
-    // parked past the button. Move the cursor below the rendered bar and restore it
-    // so the demo doesn't leave the terminal in a hidden-cursor state.
+    // past the strip. Move the cursor below the rendered bar and restore it so the
+    // demo doesn't leave the terminal in a hidden-cursor state.
     print!("{bar}\u{1b}[?25l\u{1b}[{n};1H\u{1b}[?25h", n = ROWS + 2);
 }

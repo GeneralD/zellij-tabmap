@@ -1232,6 +1232,24 @@ mod tests {
     }
 
     #[test]
+    fn project_panes_yields_an_empty_grid_for_a_zero_dimension_canvas() {
+        // Belt-and-suspenders: `pane_at_cell` already rejects a zero-width or
+        // zero-row block before projecting, but `project_panes` is the shared
+        // geometry source and must stay safe on its own — never index a
+        // `ph * pw == 0` buffer — so a degenerate canvas yields an empty grid
+        // and no pane boxes.
+        let panes = vec![PaneRect::new(0, 0, 0, 80, 24, "sh", false)];
+
+        let (grid, boxes) = project_panes(&panes, 0, 4, 0);
+        assert!(grid.is_empty(), "zero width → empty grid");
+        assert!(boxes.is_empty(), "zero width → no pane boxes");
+
+        let (grid, boxes) = project_panes(&panes, 8, 0, 0);
+        assert!(grid.is_empty(), "zero height → empty grid");
+        assert!(boxes.is_empty(), "zero height → no pane boxes");
+    }
+
+    #[test]
     fn labels_appear_when_wide_and_drop_when_narrow() {
         let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "cargo", false)];
         // Wide enough: the label's leading char should be overlaid (dark text fg).

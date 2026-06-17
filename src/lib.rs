@@ -1134,6 +1134,67 @@ mod tests {
         assert_eq!(state.pane_at(1, 11), None);
     }
 
+    #[test]
+    fn focus_or_switch_at_dispatches_the_focus_and_the_switch_arms() {
+        // A click that resolves to a minimap pane drives the focus arm
+        // (`focus_terminal_pane`, a no-op host stub off-wasm); a click that
+        // resolves to no pane falls back to #8's tab-switch. Host effects are
+        // unobservable natively, so the contract is that both arms dispatch
+        // without panicking, over the same geometry `pane_at` reads.
+        let mut state = State::default();
+        state.tab_layout = vec![hit_active(0, 10, 20)];
+        state.tab_panes = [(0usize, geom(10, 20, &[(7, 0, 0, 80, 24)]))]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            state.pane_at(1, 12),
+            Some(7),
+            "precondition: click hits pane 7"
+        );
+        state.focus_or_switch_at(1, 12); // resolves to a pane → focus arm
+        state.focus_or_switch_at(1, 5); // off every block → switch fallback
+    }
+
+    #[test]
+    fn render_omits_narrow_tabs_from_the_click_geometry() {
+        // Squeezed into 80 columns, many tabs collapse to L3/L4 rungs that draw
+        // a glyph/hint rather than a per-pane minimap. The grid-rung filter
+        // drops them, so they get no `tab_panes` entry and a click there falls
+        // back to #8's plain tab-switch — never a wrong-pane focus (#74).
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = (0..24)
+            .map(|i| TabInfo {
+                active: i == 0,
+                ..tab(i, i + 1)
+            })
+            .collect();
+
+        state.render(MIN_ROWS, 80);
+
+        let narrow: Vec<_> = state
+            .tab_layout
+            .iter()
+            .filter(|h| {
+                matches!(
+                    tab_block::level_for(h.width),
+                    tab_block::Level::L3 | tab_block::Level::L4
+                )
+            })
+            .collect();
+        assert!(
+            !narrow.is_empty(),
+            "24 tabs in 80 columns must squeeze some to L3/L4"
+        );
+        assert!(
+            narrow
+                .iter()
+                .all(|h| !state.tab_panes.contains_key(&h.position)),
+            "narrow (L3/L4) tabs carry no click geometry"
+        );
+    }
+
     /// An active [`TabHit`] at `position` spanning `start..start + width`.
     fn hit_active(position: usize, start: usize, width: usize) -> line::TabHit {
         line::TabHit {

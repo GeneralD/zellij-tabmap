@@ -28,7 +28,7 @@
 //! [`crate::paint::compose`] so width accounting and the layer boundary hold.
 
 use crate::color::{self, Palette, Rgb};
-use crate::minimap::{self, GradientSpec, LabelMode, PaneRect};
+use crate::minimap::{self, Close, GradientSpec, LabelMode, PaneRect};
 use unicode_width::UnicodeWidthChar;
 
 /// Minimum width for the richest rung (L0): a wide active tab showing the color
@@ -149,12 +149,12 @@ pub fn vinset_for(perspective: bool, rows: usize, active: bool) -> usize {
 /// height (the historical look). The narrow rungs (L3 glyph, L4 hint) already
 /// ride a blank-framed middle row, so the cue applies only to the grid rungs.
 ///
-/// `close` stamps the top-right "×" close affordance (#86); the minimap reserves
-/// its cell from the badge and label. Only the grid rungs (L0–L2) honor it — the
-/// narrow rungs have no room and drop it like the rest of their detail. The
-/// caller passes `true` only when the close button is enabled *and* more than one
-/// tab is open (so the last tab keeps no close target), and records the matching
-/// click cell against the live frame.
+/// `close` ([`Close`]) stamps the top-right close affordance (#86); the minimap
+/// reserves its cell(s) from the badge and label. Only the grid rungs (L0–L2)
+/// honor it — the narrow rungs have no room and drop it like the rest of their
+/// detail. The caller passes an on-variant only when the close button is enabled
+/// *and* more than one tab is open (so the last tab keeps no close target), and
+/// records the matching click cell against the live frame.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble(
     panes: &[PaneRect],
@@ -166,7 +166,7 @@ pub fn assemble(
     gradient: GradientSpec,
     active: bool,
     perspective: bool,
-    close: bool,
+    close: Close,
 ) -> TabBlock {
     // Pixel rows of background to inset top and bottom of the minimap canvas: one
     // (a half text row) for an inactive block in perspective mode at ≥4 rows,
@@ -299,7 +299,7 @@ fn grid_lines(
     vinset: usize,
     mode: LabelMode,
     badge: Option<&str>,
-    close: bool,
+    close: Close,
     gradient: GradientSpec,
     active: bool,
 ) -> Vec<StyledLine> {
@@ -633,7 +633,7 @@ mod tests {
                     GradientSpec::OFF,
                     false,
                     false,
-                    false,
+                    Close::Off,
                 );
                 assert_eq!(
                     block.lines.len(),
@@ -693,7 +693,7 @@ mod tests {
                         GradientSpec::OFF,
                         false,
                         false,
-                        false,
+                        Close::Off,
                     );
                     for (row, line) in block.lines.iter().enumerate() {
                         assert_eq!(
@@ -726,7 +726,7 @@ mod tests {
                 GradientSpec::OFF,
                 false,
                 perspective,
-                false,
+                Close::Off,
             )
             .lines
         };
@@ -760,7 +760,7 @@ mod tests {
                 GradientSpec::OFF,
                 true,
                 perspective,
-                false,
+                Close::Off,
             )
             .lines
         };
@@ -806,7 +806,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
-            false,
+            Close::Off,
         );
         for line in &block.lines {
             assert_eq!(measured(line), 2);
@@ -833,7 +833,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
-            false,
+            Close::Off,
         );
         for line in &block.lines {
             assert_eq!(measured(line), 1, "a 1-column slot must stay 1 column");
@@ -864,7 +864,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
-            false,
+            Close::Off,
         );
         for line in &block.lines {
             for ch in ['a', 'b', 'c'] {
@@ -895,7 +895,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
-            false,
+            Close::Off,
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(joined.contains('a'), "focused pane's label should appear");
@@ -925,7 +925,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
-            false,
+            Close::Off,
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(
@@ -951,7 +951,7 @@ mod tests {
                 GradientSpec::OFF,
                 active,
                 false,
-                false,
+                Close::Off,
             )
             .lines
             .iter()
@@ -1023,7 +1023,7 @@ mod tests {
                     GradientSpec::OFF,
                     active,
                     false,
-                    false,
+                    Close::Off,
                 )
                 .lines[1]
                     .as_str()
@@ -1058,7 +1058,7 @@ mod tests {
                 GradientSpec::OFF,
                 false,
                 false,
-                false,
+                Close::Off,
             );
             let second = assemble(
                 &panes,
@@ -1070,7 +1070,7 @@ mod tests {
                 GradientSpec::OFF,
                 false,
                 false,
-                false,
+                Close::Off,
             );
             assert_eq!(first, second, "width {width} must render identically");
         }
@@ -1100,7 +1100,7 @@ mod tests {
                 GradientSpec::OFF,
                 false,
                 false,
-                false,
+                Close::Off,
             );
             let b = assemble(
                 &reversed,
@@ -1112,7 +1112,7 @@ mod tests {
                 GradientSpec::OFF,
                 false,
                 false,
-                false,
+                Close::Off,
             );
             assert_eq!(
                 a, b,

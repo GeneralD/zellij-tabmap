@@ -80,15 +80,17 @@ pub struct Config {
     /// gesture acts on the whole bar. Needs no permission beyond the default set
     /// (`ChangeApplicationState`). See [`ScrollMode`].
     pub scroll: ScrollMode,
-    /// Whether each tab block draws a clickable "×" close button at its top-right
-    /// corner, closing that tab on click (#86). Off by default: the close glyph
-    /// adds visual weight and an inactive tab's corner becomes a close target
-    /// rather than a switch target, so it is opt-in. When on, the "×" shows on
-    /// every grid-rung tab — but only while more than one tab is open, so the
-    /// last tab can never be closed out from under the session. Closing rides on
-    /// the already-granted `ChangeApplicationState` permission (same family as
-    /// `new_tab`, #76), so enabling it triggers no new permission prompt on
-    /// auto-update (zellij#4982).
+    /// Whether each tab block draws a clickable close button near its top-right
+    /// corner, closing that tab on click (#86). On by default (#94): the close
+    /// glyph rides on the already-granted `ChangeApplicationState` permission
+    /// (same family as `new_tab`, #76), so it triggers no new permission prompt on
+    /// auto-update (zellij#4982) — the policy is "features on out of the box unless
+    /// they need a new permission." The glyph shows on every grid-rung tab, but
+    /// only while more than one tab is open, so the last tab can never be closed
+    /// out from under the session. Set `false` to hide it: a misclick on an
+    /// inactive tab's corner then can't close it (the corner stays a switch
+    /// target). The drawn form follows the terminal — the Nerd Font glyph, or the
+    /// ASCII `×` under a simplified UI (#94).
     pub close_button: bool,
     /// Cooldown window in **milliseconds** between wheel navigation steps (#83). A
     /// stepless device (Magic Mouse, trackpad) fires a *burst* of scroll events for
@@ -147,9 +149,11 @@ impl Config {
     /// Default wheel behaviour — `Tab`, matching zellij's stock tab-bar (scroll
     /// switches tabs). Set `pane` to walk panes, `off` to disable (#80).
     pub const DEFAULT_SCROLL: ScrollMode = ScrollMode::Tab;
-    /// Default close-button state — off, so the bar keeps its v0.x look and no
-    /// tab corner is a close target unless the user opts in (#86).
-    pub const DEFAULT_CLOSE_BUTTON: bool = false;
+    /// Default close-button state — on (#94), so the close affordance is present
+    /// out of the box. It rides on the already-granted `ChangeApplicationState`
+    /// permission (#86), so enabling it by default costs existing users no new
+    /// prompt and no auto-update freeze (zellij#4982). Set `false` to hide it.
+    pub const DEFAULT_CLOSE_BUTTON: bool = true;
     /// Default wheel cooldown — `40` ms between steps, taming a stepless device's
     /// flick burst out of the box while still letting a deliberate notch step at
     /// once. Set `0` to disable the limiter (the pre-#83 one-step-per-event feel) (#83).
@@ -276,7 +280,7 @@ mod tests {
         assert!(config.perspective);
         assert!(config.new_tab_button);
         assert_eq!(config.scroll, ScrollMode::Tab);
-        assert!(!config.close_button);
+        assert!(config.close_button);
         assert_eq!(config.scroll_cooldown_ms, 40);
     }
 
@@ -487,16 +491,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_explicit_close_button_on() {
-        // The close "×" is off by default; an explicit `true` opts in.
-        assert!(config_from(&[("close_button", "true")]).close_button);
+    fn parses_explicit_close_button_off() {
+        // The close glyph is on by default (#94); an explicit `false` opts out.
+        assert!(!config_from(&[("close_button", "false")]).close_button);
     }
 
     #[test]
     fn malformed_close_button_falls_back() {
-        // A malformed or empty value keeps the off-by-default close button.
-        assert!(!config_from(&[("close_button", "yes")]).close_button);
-        assert!(!config_from(&[("close_button", "")]).close_button);
+        // A malformed or empty value keeps the on-by-default close button (#94).
+        assert!(config_from(&[("close_button", "yes")]).close_button);
+        assert!(config_from(&[("close_button", "")]).close_button);
     }
 
     #[test]

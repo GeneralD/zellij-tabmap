@@ -31,20 +31,63 @@ pub(crate) const ACTIVE_FG: Rgb = (255, 255, 255);
 /// enough to visually recede while remaining readable. A visual parameter —
 /// retune freely; not a correctness constant.
 pub(crate) const INACTIVE_LABEL_BLEND: u8 = 30;
-/// The glyph stamped into a tab block's top-right cell as its close affordance
-/// (#86). The Nerd Font `md-close_circle` (U+F0159, display width 1) reads as a
-/// close control while staying a single cell, so it never disturbs the column
-/// budget. Terminals without a Nerd Font — zellij's simplified UI, surfaced to
-/// the plugin as `capabilities.arrow_fonts` — can't render it, so the bar swaps
-/// in [`CLOSE_GLYPH_ASCII`] there (see `State::render`).
+/// The Nerd Font glyph stamped as a tab block's close affordance (#86). The
+/// Material Design `md-close_circle` (U+F0159) reads as a close control. It is
+/// drawn in alert red, one cell in from the block's right edge (#94) so a fill
+/// cell of breathing room sits between it and the corner. Terminals without a
+/// Nerd Font — zellij's simplified UI, surfaced to the plugin as
+/// `capabilities.arrow_fonts` — use the ASCII [`CLOSE_GLYPH_ASCII`] instead; which
+/// one a tab draws is carried by [`Close`], resolved at the render site.
 pub(crate) const CLOSE_GLYPH: char = '\u{F0159}';
 
-/// ASCII fallback for [`CLOSE_GLYPH`] under a simplified UI (no Nerd Font): `×`
-/// (U+00D7, display width 1) still reads as a close control in any font. The
-/// swap happens once at the render boundary rather than inside the pure renderer
-/// — the glyph is uniform across the whole bar, and whether a Nerd Font is
-/// available (`capabilities.arrow_fonts`) is known only at that boundary.
-pub(crate) const CLOSE_GLYPH_ASCII: &str = "×";
+/// ASCII close glyph for a terminal without a Nerd Font (zellij's simplified UI):
+/// `×` (U+00D7) still reads as a close control in any font. Drawn in black
+/// ([`CLOSE_FG_ASCII`]) at the same `pw - 2` cell as the Nerd Font glyph (#94) —
+/// one cell in from the block's right edge.
+pub(crate) const CLOSE_GLYPH_ASCII: char = '×';
+
+/// Foreground for the ASCII close `×` (#94): black. The Nerd Font glyph uses the
+/// theme's alert red ([`Palette::alert`]); the plain `×` reads better in black.
+pub(crate) const CLOSE_FG_ASCII: Rgb = (0, 0, 0);
+
+/// Which close affordance a tab block stamps near its top-right corner, in the form
+/// the terminal can draw (#86, #94). `Off` draws none. Both on-variants sit one
+/// cell in from the right edge and differ only in glyph and color:
+/// - [`NerdFont`](Close::NerdFont): [`CLOSE_GLYPH`] in alert red.
+/// - [`Ascii`](Close::Ascii): [`CLOSE_GLYPH_ASCII`] in black, for a terminal
+///   without a Nerd Font.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Close {
+    /// No close affordance.
+    #[default]
+    Off,
+    /// The Nerd Font glyph — the default when a Nerd Font is available.
+    NerdFont,
+    /// The ASCII `×` fallback — a simplified-UI terminal.
+    Ascii,
+}
+
+impl Close {
+    /// Whether any close glyph is drawn.
+    pub fn is_on(self) -> bool {
+        !matches!(self, Close::Off)
+    }
+
+    /// How many columns in from the block's right edge the glyph sits — and so how
+    /// many right-edge columns it reserves from the badge and labels (#94). Both
+    /// on-variants sit one cell in (2): the glyph takes the `pw - 2` cell and the
+    /// last column stays fill, leaving one cell of breathing room at the right
+    /// edge so the mark reads inset rather than crowding the corner. `Off`
+    /// reserves none. This is the single source of truth shared by the renderer
+    /// (placement) and the click hit-test in [`crate::State`] (the cell a
+    /// `LeftClick` closes from).
+    pub fn right_offset(self) -> usize {
+        match self {
+            Close::Off => 0,
+            Close::NerdFont | Close::Ascii => 2,
+        }
+    }
+}
 
 pub(crate) const RESET: &str = "\x1b[0m";
 
@@ -670,13 +713,15 @@ pub fn pane_at_cell(
 /// entirely — no ring, no bold — and subdue text toward the pane fill by
 /// [`INACTIVE_LABEL_BLEND`], so the active tab reads at a glance.
 ///
-/// `close` stamps a close affordance into the block's top-right cell (#86),
-/// the mirror of the top-left badge: drawn in zellij's alert red
-/// ([`Palette::alert`]) — full red on the active tab, toned toward the fill on
-/// inactive ones. The badge and any top-row label both yield their
-/// rightmost column so the glyph never overprints them. The caller only enables
-/// it on grid rungs wide enough to host it (see [`crate::tab_block::assemble`]),
-/// and records the matching click cell so a `LeftClick` there closes the tab.
+/// `close` ([`Close`]) stamps a close affordance near the block's top-right
+/// corner (#86), the mirror of the top-left badge. `Off` draws none; the Nerd
+/// Font glyph draws in alert red and the ASCII `×` in black, both one cell in
+/// from the right edge (#94) — full strength on the active tab, toned
+/// toward the fill on inactive ones. The badge and any top-row label both yield
+/// the reserved right column(s) so the glyph never overprints them. The caller
+/// only enables it on grid rungs wide enough to host it (see
+/// [`crate::tab_block::assemble`]) and records the matching click cell — at the
+/// same per-mode [`Close::right_offset`] — so a `LeftClick` there closes the tab.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     panes: &[PaneRect],
@@ -686,7 +731,7 @@ pub fn render(
     vinset: usize,
     mode: LabelMode,
     badge: Option<&str>,
-    close: bool,
+    close: Close,
     gradient: GradientSpec,
     active: bool,
 ) -> String {
@@ -732,23 +777,31 @@ pub fn render(
                 .collect()
         })
         .unwrap_or_default();
-    // The close glyph (#86) sits in the block's top-right corner — the last
-    // column — balancing the `⌘N` badge in the opposite corner. `close` is only
-    // ever set on grid rungs (pw >= L2_MIN = 5), so `pw - 1` is always a valid
-    // column; `saturating_sub` only guards the dead case where `close` is false
-    // (and `close_col` goes unused) at a sub-1-column width.
-    let close_col = pw.saturating_sub(1);
+    // The close glyph (#86) sits near the block's top-right corner, balancing the
+    // `⌘N` badge in the opposite corner. Both modes sit one cell in from the right
+    // edge, leaving a fill cell of breathing room at the corner (#94) —
+    // `Close::right_offset` is that inset, the single source of truth
+    // shared with the click hit-test in `State::render`. `close` is only ever set
+    // on grid rungs (pw >= L2_MIN = 5), so `pw - offset` (offset ≤ 2) is always a
+    // valid column; `.max(1)` keeps the dead `Off` case (close_col unused) in range.
+    let close_on = close.is_on();
+    let close_reserve = close.right_offset();
+    let close_col = pw.saturating_sub(close_reserve.max(1));
     // The close glyph only appears on tabs that don't recede — the active tab
     // (never receded) and, when perspective is off, every tab (#86) — so it
     // always rides the top text row, beside the badge. (Inactive perspective
     // tabs inset their top row (#66/#84) and simply carry no close glyph.)
     let close_text_row = 0;
-    // The close cell (the block's last column) is off-limits to the badge when
-    // close is on, so the two corner overlays never collide on a narrow rung.
-    // `saturating_sub` keeps the public `render` total even if a direct caller
-    // passes `close=true` at a width below `close_reserve` (the `tab_block`
-    // caller only sets `close` on rungs wide enough, so this never bites there).
-    let close_reserve = usize::from(close);
+    // Resolve the glyph and its base color once: the Nerd Font glyph in alert red,
+    // the ASCII `×` in black (#94); `None` when no close is drawn. The inactive
+    // tone is mixed per cell at the paint site from this base.
+    let close_render: Option<(char, Rgb)> = match close {
+        Close::Off => None,
+        Close::NerdFont => Some((CLOSE_GLYPH, palette.alert())),
+        Close::Ascii => Some((CLOSE_GLYPH_ASCII, CLOSE_FG_ASCII)),
+    };
+    // The close cell(s) are off-limits to the badge when close is on, so the two
+    // corner overlays never collide on a narrow rung.
     let badge_fits = !badge_cells.is_empty()
         && BADGE_COL + badge_cells.len() <= pw.saturating_sub(close_reserve);
 
@@ -845,12 +898,13 @@ pub fn render(
                 } else {
                     centered
                 };
-                // The close glyph sits in the top-right corner, so a label on the
+                // The close glyph sits near the top-right corner, so a label on the
                 // right-edge pane sharing its row must stop short of it — the
                 // mirror of the badge's left-edge `start` nudge above (#86).
                 // `close` is only set on non-receding tabs, so the glyph's row is
-                // the top one (`close_text_row`).
-                let right_bound = if close && row == close_text_row {
+                // the top one (`close_text_row`); `close_col` already carries the
+                // per-mode inset (#94).
+                let right_bound = if close_on && row == close_text_row {
                     px1.min(close_col)
                 } else {
                     px1
@@ -923,44 +977,47 @@ pub fn render(
                 out.push_str("\x1b[22m");
                 continue;
             }
-            if tr == close_text_row && close && c == close_col {
-                // The close glyph mirrors the badge in the opposite corner (#86),
-                // but in zellij's own alert red ([`Palette::alert`], from the
-                // theme's `exit_code_error.base`) — full red on the active tab,
-                // toned toward the fill where perspective is off and inactive
-                // tabs still carry it. It rides the top text row
-                // (`close_text_row`) — the tabs that show it never recede — and
-                // is sampled over that row's upper pixel (`2 * close_text_row`).
-                // Its cell is reserved from the badge and any same-row label, so
-                // it never overprints them.
-                let fill = pixel_color(
-                    &grid,
-                    &ring,
-                    panes,
-                    palette,
-                    &sweeps,
-                    pw,
-                    c,
-                    2 * close_text_row,
-                );
-                match fill {
-                    Some(f) => put_bg(&mut out, f),
-                    None => put_default_bg(&mut out),
+            if tr == close_text_row && c == close_col {
+                if let Some((glyph, base)) = close_render {
+                    // The close glyph mirrors the badge in the opposite corner
+                    // (#86): the Nerd Font glyph in alert red ([`Palette::alert`],
+                    // from the theme's `exit_code_error.base`), the ASCII `×` in
+                    // black (#94) — full strength on the active tab, toned toward
+                    // the fill where perspective is off and inactive tabs still
+                    // carry it. It rides the top text row (`close_text_row`) — the
+                    // tabs that show it never recede — and is sampled over that
+                    // row's upper pixel (`2 * close_text_row`). Its cell is reserved
+                    // from the badge and any same-row label, so it never overprints
+                    // them.
+                    let fill = pixel_color(
+                        &grid,
+                        &ring,
+                        panes,
+                        palette,
+                        &sweeps,
+                        pw,
+                        c,
+                        2 * close_text_row,
+                    );
+                    match fill {
+                        Some(f) => put_bg(&mut out, f),
+                        None => put_default_bg(&mut out),
+                    }
+                    let close_fg = if active {
+                        base
+                    } else {
+                        crate::color::mixed(
+                            base,
+                            fill.unwrap_or(crate::color::CANVAS),
+                            INACTIVE_LABEL_BLEND,
+                        )
+                    };
+                    put_fg(&mut out, close_fg);
+                    out.push_str("\x1b[1m");
+                    out.push(glyph);
+                    out.push_str("\x1b[22m");
+                    continue;
                 }
-                let close_fg = if active {
-                    palette.alert()
-                } else {
-                    crate::color::mixed(
-                        palette.alert(),
-                        fill.unwrap_or(crate::color::CANVAS),
-                        INACTIVE_LABEL_BLEND,
-                    )
-                };
-                put_fg(&mut out, close_fg);
-                out.push_str("\x1b[1m");
-                out.push(CLOSE_GLYPH);
-                out.push_str("\x1b[22m");
-                continue;
             }
             // A continuation cell is already covered on screen by its wide
             // glyph's advance — emit nothing so cells stay in lockstep.
@@ -1097,7 +1154,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1126,7 +1183,7 @@ mod tests {
             1,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             false,
         );
@@ -1160,7 +1217,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             false,
         );
@@ -1199,7 +1256,7 @@ mod tests {
             1,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             false,
         );
@@ -1234,7 +1291,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1255,7 +1312,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1275,7 +1332,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1303,7 +1360,7 @@ mod tests {
                 0,
                 LabelMode::None,
                 None,
-                false,
+                Close::Off,
                 GradientSpec::OFF,
                 true,
             )
@@ -1337,7 +1394,7 @@ mod tests {
                 0,
                 LabelMode::None,
                 None,
-                false,
+                Close::Off,
                 GradientSpec::OFF,
                 true
             )
@@ -1352,7 +1409,7 @@ mod tests {
                 0,
                 LabelMode::None,
                 None,
-                false,
+                Close::Off,
                 GradientSpec::OFF,
                 true
             )
@@ -1373,7 +1430,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1474,7 +1531,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1488,7 +1545,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1508,7 +1565,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1537,7 +1594,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1568,7 +1625,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1605,7 +1662,7 @@ mod tests {
             0,
             LabelMode::All,
             Some("F1"),
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1641,7 +1698,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1675,7 +1732,7 @@ mod tests {
             0,
             LabelMode::All,
             Some("F1"),
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1710,7 +1767,7 @@ mod tests {
             0,
             LabelMode::All,
             Some("F1"),
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1749,7 +1806,7 @@ mod tests {
                 0,
                 LabelMode::All,
                 Some("F1"),
-                false,
+                Close::Off,
                 GradientSpec::OFF,
                 true,
             );
@@ -1815,7 +1872,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1855,7 +1912,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1893,7 +1950,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1929,7 +1986,7 @@ mod tests {
             0,
             LabelMode::None,
             Some("⌘ 1"),
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1942,7 +1999,7 @@ mod tests {
             0,
             LabelMode::None,
             Some("⌘ 1"),
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -1969,7 +2026,7 @@ mod tests {
                 0,
                 LabelMode::None,
                 Some("⌘ 1"),
-                false,
+                Close::Off,
                 GradientSpec::OFF,
                 active,
             )
@@ -2015,7 +2072,7 @@ mod tests {
                 0,
                 LabelMode::Focused,
                 None,
-                false,
+                Close::Off,
                 GradientSpec::OFF,
                 active,
             )
@@ -2071,7 +2128,7 @@ mod tests {
             0,
             LabelMode::None,
             Some("符1"),
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -2103,7 +2160,7 @@ mod tests {
             0,
             LabelMode::None,
             Some("符符"),
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -2130,7 +2187,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -2152,7 +2209,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             GradientSpec::SHEEN,
             true,
         );
@@ -2180,7 +2237,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             GradientSpec::WEAVE,
             true,
         );
@@ -2206,7 +2263,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             GradientSpec::SHEEN,
             true,
         );
@@ -2357,7 +2414,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             lin(90),
             true,
         );
@@ -2399,7 +2456,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             radial(RadialDirection::Outward),
             true,
         );
@@ -2423,7 +2480,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            true,
+            Close::NerdFont,
             GradientSpec::OFF,
             true,
         );
@@ -2435,7 +2492,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            false,
+            Close::Off,
             GradientSpec::OFF,
             true,
         );
@@ -2462,7 +2519,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            true,
+            Close::NerdFont,
             GradientSpec::OFF,
             false,
         );
@@ -2497,7 +2554,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            true,
+            Close::NerdFont,
             GradientSpec::OFF,
             true,
         );
@@ -2523,7 +2580,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            true,
+            Close::NerdFont,
             GradientSpec::OFF,
             false,
         );
@@ -2561,7 +2618,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            true,
+            Close::NerdFont,
             GradientSpec::OFF,
             true,
         );
@@ -2588,7 +2645,7 @@ mod tests {
             0,
             LabelMode::None,
             Some("⌘ 1"),
-            true,
+            Close::NerdFont,
             GradientSpec::OFF,
             true,
         );
@@ -2601,10 +2658,10 @@ mod tests {
     }
 
     #[test]
-    fn close_sits_in_the_top_right_corner() {
-        // The close glyph occupies the block's last column — the top-right corner,
-        // balancing the badge's top-left corner (#86). No right margin: the glyph
-        // is flush to the edge of its block.
+    fn nerd_font_close_sits_one_cell_in_from_the_right_edge() {
+        // The Nerd Font glyph sits one cell in from the right edge (`pw - 2`,
+        // #94), leaving a fill cell at the corner. The ASCII "×" shares that
+        // column (see `ascii_close_sits_one_cell_in_from_the_right_edge`).
         let w = 12;
         let out = render(
             &one_plain(),
@@ -2614,16 +2671,56 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            true,
+            Close::NerdFont,
             GradientSpec::OFF,
             true,
         );
         let top: Vec<char> = visible_lines(&out)[0].chars().collect();
         assert_eq!(top.len(), w, "one visible char per cell: {top:?}");
         assert_eq!(
-            top[w - 1],
+            top[w - 2],
             CLOSE_GLYPH,
-            "the close glyph sits in the last column (top-right corner): {top:?}"
+            "the Nerd Font close glyph sits one cell in from the right edge: {top:?}"
+        );
+    }
+
+    #[test]
+    fn ascii_close_sits_one_cell_in_from_the_right_edge() {
+        // Under simplified UI (no Nerd Font), the close mark is a plain ASCII
+        // "×" painted black (#94), seated one cell in from the right edge
+        // (`pw - 2`) — the same column as the Nerd Font glyph.
+        let w = 12;
+        let out = render(
+            &one_plain(),
+            &test_palette(),
+            w,
+            3,
+            0,
+            LabelMode::None,
+            None,
+            Close::Ascii,
+            GradientSpec::OFF,
+            true,
+        );
+        let top_line = out.lines().next().unwrap_or_default();
+        assert!(
+            top_line.contains(CLOSE_GLYPH_ASCII),
+            "ASCII close uses the plain × sign: {top_line:?}"
+        );
+        assert!(
+            !top_line.contains(CLOSE_GLYPH),
+            "ASCII close never emits the Nerd Font glyph: {top_line:?}"
+        );
+        assert!(
+            top_line.contains(&fg(CLOSE_FG_ASCII)),
+            "ASCII close is painted black: {top_line:?}"
+        );
+        let top: Vec<char> = visible_lines(&out)[0].chars().collect();
+        assert_eq!(top.len(), w, "one visible char per cell: {top:?}");
+        assert_eq!(
+            top[w - 2],
+            CLOSE_GLYPH_ASCII,
+            "the ASCII close sits one cell in from the right edge: {top:?}"
         );
     }
 }

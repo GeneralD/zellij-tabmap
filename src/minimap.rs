@@ -721,12 +721,18 @@ pub fn render(
                 .collect()
         })
         .unwrap_or_default();
-    // The close "×" (#86) claims the top-right cell; the badge then fits in the
-    // columns to its left, so the two top-row overlays never collide. `close` is
-    // only ever set on grid rungs (pw >= L2_MIN), where this still leaves room for
-    // the badge — a width-1 reservation off a 5+ wide block.
-    let close_col = pw - 1;
-    let close_reserve = usize::from(close);
+    // The close "×" (#86) sits one column in from the right edge — mirroring the
+    // badge's `BADGE_COL` inset on the left — so the block's last column stays a
+    // margin and the glyph never butts against the inter-tab gap. The badge then
+    // fits in the columns to its left, so the two top-row overlays never collide.
+    // `close` is only ever set on grid rungs (pw >= L2_MIN = 5), so `pw - 2` is
+    // always a valid column with room to spare — `saturating_sub` only guards
+    // the dead case where `close` is false (and `close_col` goes unused) at a
+    // sub-2-column width.
+    let close_col = pw.saturating_sub(2);
+    // Two columns are off-limits to the badge when close is on: the "×" cell and
+    // the one-column margin to its right.
+    let close_reserve = 2 * usize::from(close);
     let badge_fits = !badge_cells.is_empty() && BADGE_COL + badge_cells.len() <= pw - close_reserve;
 
     for (i, p) in panes.iter().enumerate() {
@@ -822,8 +828,8 @@ pub fn render(
                 } else {
                     centered
                 };
-                // On the top row the close "×" owns the rightmost cell, so a
-                // label on the right-edge pane must stop one column short of it —
+                // On the top row the close "×" sits one column in from the right
+                // edge, so a label on the right-edge pane must stop short of it —
                 // the mirror of the badge's left-edge `start` nudge above (#86).
                 let right_bound = if close && row == 0 {
                     px1.min(close_col)
@@ -2497,6 +2503,38 @@ mod tests {
         assert!(
             top.contains(CLOSE_GLYPH),
             "close survives alongside badge: {top:?}"
+        );
+    }
+
+    #[test]
+    fn close_leaves_a_one_column_margin_to_its_right() {
+        // The "×" mirrors the badge's one-cell `BADGE_COL` inset: it sits one
+        // column in from the right edge, so the block's last column is a margin
+        // rather than the glyph butting against the inter-tab gap (#86).
+        let w = 12;
+        let out = render(
+            &one_plain(),
+            &test_palette(),
+            w,
+            3,
+            0,
+            LabelMode::None,
+            None,
+            true,
+            GradientSpec::OFF,
+            true,
+        );
+        let top: Vec<char> = visible_lines(&out)[0].chars().collect();
+        assert_eq!(top.len(), w, "one visible char per cell: {top:?}");
+        assert_eq!(
+            top[w - 2],
+            CLOSE_GLYPH,
+            "× sits one column in from the right edge: {top:?}"
+        );
+        assert_ne!(
+            top[w - 1],
+            CLOSE_GLYPH,
+            "the last column is the right margin, not the ×: {top:?}"
         );
     }
 }

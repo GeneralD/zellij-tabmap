@@ -405,8 +405,9 @@ impl ZellijPlugin for State {
         // Record the close "×" cell for each tab that drew one (#86) — the same
         // grid rungs (L0–L2) that `assemble` stamps the glyph on, and only when
         // `close` is set (enabled + >1 tab). The glyph lands at the block's top
-        // text row, rightmost column, so the click cell is `(0, start + width-1)`
-        // — exactly where the minimap painted it.
+        // text row, one column in from the right edge (a right margin mirrors the
+        // badge's left inset), so the click cell is `(0, start + width-2)` —
+        // exactly where the minimap painted it.
         self.close_layout = if close {
             self.tab_layout
                 .iter()
@@ -419,7 +420,7 @@ impl ZellijPlugin for State {
                 .map(|hit| line::CloseHit {
                     position: hit.position,
                     row: 0,
-                    column: hit.start + hit.width - 1,
+                    column: hit.start + hit.width - 2,
                 })
                 .collect()
         } else {
@@ -1684,8 +1685,8 @@ mod tests {
                 && state
                     .tab_layout
                     .iter()
-                    .any(|t| t.position == hit.position && hit.column == t.start + t.width - 1)),
-            "each close cell sits at its block's top-right corner"
+                    .any(|t| t.position == hit.position && hit.column == t.start + t.width - 2)),
+            "each close cell sits one column in from its block's top-right corner (right margin)"
         );
 
         state.tabs = vec![TabInfo {

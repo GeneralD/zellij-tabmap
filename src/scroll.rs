@@ -94,7 +94,9 @@ fn step(here: usize, len: usize, dir: ScrollDir) -> usize {
 /// momentum — the wheel feels responsive at the turn. One event moves `accum` by
 /// a single unit and `threshold >= 1`, so at most one step crosses per call.
 pub fn accumulate(accum: &mut isize, dir: ScrollDir, threshold: usize) -> usize {
-    let threshold = threshold.max(1) as isize;
+    // Clamp before the `as isize` cast: an absurd `scroll_throttle` past
+    // `isize::MAX` would otherwise wrap negative and corrupt the comparisons.
+    let threshold = threshold.clamp(1, isize::MAX as usize) as isize;
     let unit: isize = match dir {
         ScrollDir::Forward => 1,
         ScrollDir::Backward => -1,

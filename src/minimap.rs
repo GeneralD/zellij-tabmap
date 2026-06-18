@@ -33,17 +33,17 @@ pub(crate) const ACTIVE_FG: Rgb = (255, 255, 255);
 pub(crate) const INACTIVE_LABEL_BLEND: u8 = 30;
 /// The Nerd Font glyph stamped as a tab block's close affordance (#86). The
 /// Material Design `md-close_circle` (U+F0159) reads as a close control. It is
-/// drawn in alert red, flush in the block's right-edge cell (#94). Terminals
-/// without a Nerd Font — zellij's simplified UI, surfaced to the plugin as
+/// drawn in alert red, one cell in from the block's right edge (#94) so a fill
+/// cell of breathing room sits between it and the corner. Terminals without a
+/// Nerd Font — zellij's simplified UI, surfaced to the plugin as
 /// `capabilities.arrow_fonts` — use the ASCII [`CLOSE_GLYPH_ASCII`] instead; which
 /// one a tab draws is carried by [`Close`], resolved at the render site.
 pub(crate) const CLOSE_GLYPH: char = '\u{F0159}';
 
 /// ASCII close glyph for a terminal without a Nerd Font (zellij's simplified UI):
-/// `×` (U+00D7) still reads as a close control in any font. Unlike the Nerd Font
-/// glyph it is drawn in black ([`CLOSE_FG_ASCII`]) one cell in from the block's
-/// right edge (#94), where the bare `×` reads centered in the corner rather than
-/// crowding the edge.
+/// `×` (U+00D7) still reads as a close control in any font. Drawn in black
+/// ([`CLOSE_FG_ASCII`]) at the same `pw - 2` cell as the Nerd Font glyph (#94) —
+/// one cell in from the block's right edge.
 pub(crate) const CLOSE_GLYPH_ASCII: char = '×';
 
 /// Foreground for the ASCII close `×` (#94): black. The Nerd Font glyph uses the
@@ -51,12 +51,11 @@ pub(crate) const CLOSE_GLYPH_ASCII: char = '×';
 pub(crate) const CLOSE_FG_ASCII: Rgb = (0, 0, 0);
 
 /// Which close affordance a tab block stamps in its top-right corner, in the form
-/// the terminal can draw (#86, #94). `Off` draws none. The two on-variants differ
-/// in glyph, column, and color so each seats correctly:
-/// - [`NerdFont`](Close::NerdFont): [`CLOSE_GLYPH`] in alert red, flush in the
-///   block's right-edge cell.
-/// - [`Ascii`](Close::Ascii): [`CLOSE_GLYPH_ASCII`] in black, one cell in from the
-///   right edge, for a terminal without a Nerd Font.
+/// the terminal can draw (#86, #94). `Off` draws none. Both on-variants sit one
+/// cell in from the right edge and differ only in glyph and color:
+/// - [`NerdFont`](Close::NerdFont): [`CLOSE_GLYPH`] in alert red.
+/// - [`Ascii`](Close::Ascii): [`CLOSE_GLYPH_ASCII`] in black, for a terminal
+///   without a Nerd Font.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Close {
     /// No close affordance.
@@ -75,17 +74,17 @@ impl Close {
     }
 
     /// How many columns in from the block's right edge the glyph sits — and so how
-    /// many right-edge columns it reserves from the badge and labels (#94). The
-    /// Nerd Font glyph takes the last column (1); the ASCII `×` sits one cell
-    /// further left (2). The exact seat is tuned per glyph so each reads centered
-    /// in the corner on a real terminal. `Off` reserves none. This is the single
-    /// source of truth shared by the renderer (placement) and the click hit-test
-    /// in [`crate::State`] (the cell a `LeftClick` closes from).
+    /// many right-edge columns it reserves from the badge and labels (#94). Both
+    /// on-variants sit one cell in (2): the glyph takes the `pw - 2` cell and the
+    /// last column stays fill, leaving one cell of breathing room at the right
+    /// edge so the mark reads inset rather than crowding the corner. `Off`
+    /// reserves none. This is the single source of truth shared by the renderer
+    /// (placement) and the click hit-test in [`crate::State`] (the cell a
+    /// `LeftClick` closes from).
     pub fn right_offset(self) -> usize {
         match self {
             Close::Off => 0,
-            Close::NerdFont => 1,
-            Close::Ascii => 2,
+            Close::NerdFont | Close::Ascii => 2,
         }
     }
 }
@@ -716,8 +715,8 @@ pub fn pane_at_cell(
 ///
 /// `close` ([`Close`]) stamps a close affordance near the block's top-right
 /// corner (#86), the mirror of the top-left badge. `Off` draws none; the Nerd
-/// Font glyph draws in alert red at the right-edge cell, the ASCII `×` in black
-/// one cell in from the right edge (#94) — full strength on the active tab, toned
+/// Font glyph draws in alert red and the ASCII `×` in black, both one cell in
+/// from the right edge (#94) — full strength on the active tab, toned
 /// toward the fill on inactive ones. The badge and any top-row label both yield
 /// the reserved right column(s) so the glyph never overprints them. The caller
 /// only enables it on grid rungs wide enough to host it (see
@@ -779,9 +778,9 @@ pub fn render(
         })
         .unwrap_or_default();
     // The close glyph (#86) sits near the block's top-right corner, balancing the
-    // `⌘N` badge in the opposite corner. The Nerd Font glyph takes the last column;
-    // the ASCII `×` sits one cell further left (#94) —
-    // `Close::right_offset` is that per-mode inset, the single source of truth
+    // `⌘N` badge in the opposite corner. Both modes sit one cell in from the right
+    // edge, leaving a fill cell of breathing room at the corner (#94) —
+    // `Close::right_offset` is that inset, the single source of truth
     // shared with the click hit-test in `State::render`. `close` is only ever set
     // on grid rungs (pw >= L2_MIN = 5), so `pw - offset` (offset ≤ 2) is always a
     // valid column; `.max(1)` keeps the dead `Off` case (close_col unused) in range.
@@ -2659,10 +2658,10 @@ mod tests {
     }
 
     #[test]
-    fn nerd_font_close_sits_flush_in_the_last_column() {
-        // The Nerd Font glyph sits flush in the block's last column (`pw - 1`,
-        // #94). The ASCII "×" is the inset one — one cell further left at `pw - 2`
-        // (see `ascii_close_sits_one_cell_in_from_the_right_edge`).
+    fn nerd_font_close_sits_one_cell_in_from_the_right_edge() {
+        // The Nerd Font glyph sits one cell in from the right edge (`pw - 2`,
+        // #94), leaving a fill cell at the corner. The ASCII "×" shares that
+        // column (see `ascii_close_sits_one_cell_in_from_the_right_edge`).
         let w = 12;
         let out = render(
             &one_plain(),
@@ -2679,9 +2678,9 @@ mod tests {
         let top: Vec<char> = visible_lines(&out)[0].chars().collect();
         assert_eq!(top.len(), w, "one visible char per cell: {top:?}");
         assert_eq!(
-            top[w - 1],
+            top[w - 2],
             CLOSE_GLYPH,
-            "the Nerd Font close glyph sits flush in the last column: {top:?}"
+            "the Nerd Font close glyph sits one cell in from the right edge: {top:?}"
         );
     }
 
@@ -2689,7 +2688,7 @@ mod tests {
     fn ascii_close_sits_one_cell_in_from_the_right_edge() {
         // Under simplified UI (no Nerd Font), the close mark is a plain ASCII
         // "×" painted black (#94), seated one cell in from the right edge
-        // (`pw - 2`), not flush like the Nerd Font glyph.
+        // (`pw - 2`) — the same column as the Nerd Font glyph.
         let w = 12;
         let out = render(
             &one_plain(),

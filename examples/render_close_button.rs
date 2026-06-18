@@ -3,15 +3,14 @@
 //!
 //! When `close_button` is enabled, a tab block stamps a small close glyph into
 //! its **top-right corner** — balancing the top-left `⌘N` shortcut badge. A
-//! left-click on exactly that cell closes the tab. The glyph form, color, and
-//! exact column are **per terminal** (#94):
+//! left-click on exactly that cell closes the tab. The glyph form and color are
+//! **per terminal** (#94), but both modes seat the mark one cell in from the
+//! right edge (`pw - 2`), leaving a fill cell of breathing room at the corner;
+//! they differ only in glyph and color:
 //!
 //! - **Nerd Font** (default): the `md-close_circle` glyph in zellij's alert red
-//!   (the theme's `exit_code_error.base`), flush in the block's last column
-//!   (`pw - 1`).
-//! - **ASCII** (zellij's simplified UI — no Nerd Font): a plain `×` painted
-//!   black, seated one cell in from the right edge (`pw - 2`), where the bare `×`
-//!   reads centered in the corner rather than crowding the edge.
+//!   (the theme's `exit_code_error.base`).
+//! - **ASCII** (zellij's simplified UI — no Nerd Font): a plain `×` painted black.
 //!
 //! In both modes the glyph is full strength on the active tab and toned toward
 //! the fill where an inactive tab still carries it, so it reads as a quiet

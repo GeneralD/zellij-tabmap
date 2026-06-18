@@ -155,9 +155,11 @@ fn palette_from_style(style: &Style) -> color::Palette {
 /// uniform glyph is swapped for [`minimap::CLOSE_GLYPH_ASCII`] across the whole
 /// bar before it is printed. That glyph (U+F0159) appears nowhere else in the
 /// bar, so the replacement is unambiguous; a no-op when a Nerd Font is available
-/// (#86). Kept pure so the swap is unit-testable off-wasm.
+/// (#86). Kept pure so the swap is unit-testable off-wasm. The `contains` guard
+/// skips `replace`'s unconditional allocation when no glyph was stamped (the
+/// `close_button=false` default), so the swap costs nothing on a bar without one.
 fn fit_close_glyph(bar: String, simplified_ui: bool) -> String {
-    if !simplified_ui {
+    if !simplified_ui || !bar.contains(minimap::CLOSE_GLYPH) {
         return bar;
     }
     bar.replace(minimap::CLOSE_GLYPH, minimap::CLOSE_GLYPH_ASCII)
@@ -261,6 +263,10 @@ impl ZellijPlugin for State {
                 // otherwise — and the last tab is never closeable.
                 if let Some(position) = self.clicked_close_button(row, column) {
                     self.drag = None;
+                    // Consume the close target so a duplicate click on the same
+                    // cell can't re-dispatch off stale geometry before the next
+                    // render rebuilds `close_layout` (the close shifts positions).
+                    self.close_layout.clear();
                     close_tab_with_index(position);
                     return false;
                 }

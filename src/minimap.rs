@@ -670,9 +670,10 @@ pub fn pane_at_cell(
 /// entirely — no ring, no bold — and subdue text toward the pane fill by
 /// [`INACTIVE_LABEL_BLEND`], so the active tab reads at a glance.
 ///
-/// `close` stamps a "×" close affordance into the block's top-right cell (#86),
-/// the mirror of the top-left badge: white on the active tab, muted toward the
-/// fill on inactive ones. The badge and any top-row label both yield their
+/// `close` stamps a close affordance into the block's top-right cell (#86),
+/// the mirror of the top-left badge: drawn in zellij's alert red
+/// ([`Palette::alert`]) — full red on the active tab, toned toward the fill on
+/// inactive ones. The badge and any top-row label both yield their
 /// rightmost column so the glyph never overprints them. The caller only enables
 /// it on grid rungs wide enough to host it (see [`crate::tab_block::assemble`]),
 /// and records the matching click cell so a `LeftClick` there closes the tab.
@@ -744,8 +745,12 @@ pub fn render(
     let close_text_row = 0;
     // The close cell (the block's last column) is off-limits to the badge when
     // close is on, so the two corner overlays never collide on a narrow rung.
+    // `saturating_sub` keeps the public `render` total even if a direct caller
+    // passes `close=true` at a width below `close_reserve` (the `tab_block`
+    // caller only sets `close` on rungs wide enough, so this never bites there).
     let close_reserve = usize::from(close);
-    let badge_fits = !badge_cells.is_empty() && BADGE_COL + badge_cells.len() <= pw - close_reserve;
+    let badge_fits = !badge_cells.is_empty()
+        && BADGE_COL + badge_cells.len() <= pw.saturating_sub(close_reserve);
 
     for (i, p) in panes.iter().enumerate() {
         // `project_panes` already computed this pane's box and filled the grid;

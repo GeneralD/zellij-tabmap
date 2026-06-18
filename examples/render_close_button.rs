@@ -7,11 +7,11 @@
 //! exact column are **per terminal** (#94):
 //!
 //! - **Nerd Font** (default): the `md-close_circle` glyph in zellij's alert red
-//!   (the theme's `exit_code_error.base`). It is double-width, so it is seated
-//!   one cell in from the right edge (`pw - 2`) to keep its right half on the
-//!   block.
+//!   (the theme's `exit_code_error.base`), flush in the block's last column
+//!   (`pw - 1`).
 //! - **ASCII** (zellij's simplified UI — no Nerd Font): a plain `×` painted
-//!   black, flush in the block's last column (`pw - 1`).
+//!   black, seated one cell in from the right edge (`pw - 2`), where the bare `×`
+//!   reads centered in the corner rather than crowding the edge.
 //!
 //! In both modes the glyph is full strength on the active tab and toned toward
 //! the fill where an inactive tab still carries it, so it reads as a quiet

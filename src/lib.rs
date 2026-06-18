@@ -456,9 +456,9 @@ impl ZellijPlugin for State {
         // `active || !perspective` predicate `paint::bar` paints with, and only
         // when `close` is on (enabled + >1 tab). The glyph rides the top text row
         // — the tabs that show it never recede — seated `close.right_offset()`
-        // cells in from the block's right edge (the ASCII `×` at the last column,
-        // the Nerd Font glyph one further left, #94), the same per-mode inset the
-        // renderer paints at, so draw and hit-test never disagree.
+        // cells in from the block's right edge (the Nerd Font glyph at the last
+        // column, the ASCII `×` one further left, #94), the same per-mode inset
+        // the renderer paints at, so draw and hit-test never disagree.
         self.close_layout = if close.is_on() {
             self.tab_layout
                 .iter()
@@ -1842,8 +1842,8 @@ mod tests {
                 && state
                     .tab_layout
                     .iter()
-                    .any(|t| t.position == hit.position && hit.column == t.start + t.width - 2)),
-            "each close cell sits one cell in from its block's right edge \
+                    .any(|t| t.position == hit.position && hit.column == t.start + t.width - 1)),
+            "each close cell sits flush in its block's last column \
              (the Nerd Font glyph's column, #94)"
         );
 
@@ -1877,11 +1877,11 @@ mod tests {
     }
 
     #[test]
-    fn simplified_ui_seats_the_close_cell_flush_in_the_last_column() {
+    fn simplified_ui_insets_the_close_cell_one_column_from_the_right_edge() {
         // Under a simplified UI the ASCII "×" replaces the Nerd Font glyph and
-        // sits flush in the block's last column (`start + width - 1`), one cell
-        // right of the Nerd Font seat (#94). The recorded geometry must follow
-        // the painted column so a click still lands on the mark.
+        // sits one cell in from the right edge (`start + width - 2`), one cell
+        // left of the flush Nerd Font seat (#94). The recorded geometry must
+        // follow the painted column so a click still lands on the mark.
         let mut state = State::default();
         state.permitted = true;
         state.simplified_ui = true;
@@ -1905,8 +1905,8 @@ mod tests {
                 && state
                     .tab_layout
                     .iter()
-                    .any(|t| t.position == hit.position && hit.column == t.start + t.width - 1)),
-            "the ASCII close cell sits flush in the last column"
+                    .any(|t| t.position == hit.position && hit.column == t.start + t.width - 2)),
+            "the ASCII close cell sits one cell in from the right edge"
         );
     }
 

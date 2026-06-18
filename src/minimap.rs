@@ -740,6 +740,14 @@ pub fn render(
     // the dead case where `close` is false (and `close_col` goes unused) at a
     // sub-2-column width.
     let close_col = pw.saturating_sub(2);
+    // The close glyph rides the block's first *fully colored* text row, so on a
+    // receded tab (#66) it sits inside the color band rather than on the
+    // half-transparent inset row the badge keeps (#84/#86). `vinset` is in pixel
+    // rows and each text row spans two, so `div_ceil(2)` is the first text row
+    // whose upper pixel clears the top inset: row 0 when not receded (`vinset 0`),
+    // row 1 when receded (`vinset 1`). The active tab is never receded, so its
+    // glyph stays on the top row beside the badge.
+    let close_text_row = vinset.div_ceil(2);
     // Two columns are off-limits to the badge when close is on: the "×" cell and
     // the one-column margin to its right.
     let close_reserve = 2 * usize::from(close);
@@ -838,10 +846,12 @@ pub fn render(
                 } else {
                     centered
                 };
-                // On the top row the close "×" sits one column in from the right
+                // On the close glyph's row it sits one column in from the right
                 // edge, so a label on the right-edge pane must stop short of it —
                 // the mirror of the badge's left-edge `start` nudge above (#86).
-                let right_bound = if close && row == 0 {
+                // That row is the top one normally, or the first band row on a
+                // receded tab (`close_text_row`), so the guard tracks it.
+                let right_bound = if close && row == close_text_row {
                     px1.min(close_col)
                 } else {
                     px1
@@ -914,13 +924,25 @@ pub fn render(
                 out.push_str("\x1b[22m");
                 continue;
             }
-            if tr == 0 && close && c == close_col {
-                // The close "×" mirrors the badge in the opposite corner (#86):
-                // sampled over the same top-row fill (transparent on a receded
-                // tab's inset upper pixel), white on the active tab and muted
-                // toward the fill on inactive ones. Its cell is reserved from the
-                // badge and any top-row label above, so it never overprints them.
-                let fill = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 0);
+            if tr == close_text_row && close && c == close_col {
+                // The close glyph mirrors the badge in the opposite corner (#86),
+                // white on the active tab and muted toward the fill on inactive
+                // ones. It rides `close_text_row` — the top row normally, the
+                // first band row on a receded tab — so it is sampled over that
+                // row's upper pixel (`2 * close_text_row`), which is always a
+                // painted fill rather than the receded inset the badge sits on
+                // (#84). Its cell is reserved from the badge and any same-row
+                // label, so it never overprints them.
+                let fill = pixel_color(
+                    &grid,
+                    &ring,
+                    panes,
+                    palette,
+                    &sweeps,
+                    pw,
+                    c,
+                    2 * close_text_row,
+                );
                 match fill {
                     Some(f) => put_bg(&mut out, f),
                     None => put_default_bg(&mut out),
@@ -2455,6 +2477,42 @@ mod tests {
         assert!(
             lower.iter().all(|l| !l.contains(CLOSE_GLYPH)),
             "no × on any lower row: {lower:?}"
+        );
+    }
+
+    #[test]
+    fn close_drops_into_the_band_on_a_receded_tab() {
+        // A receded inactive tab (#66) insets its top pixel row, so the top text
+        // row is half-transparent (#84). The close glyph follows the color band
+        // down to the first fully painted text row instead of floating on that
+        // inset — `vinset: 1` here is the receded inset, so the glyph rides line 1,
+        // not line 0. (The active, un-receded tab keeps it on top; see the tests
+        // above, which all pass `vinset: 0`.)
+        let out = render(
+            &one_plain(),
+            &test_palette(),
+            12,
+            3,
+            1,
+            LabelMode::None,
+            None,
+            true,
+            GradientSpec::OFF,
+            false,
+        );
+        let lines = visible_lines(&out);
+        assert!(
+            !lines[0].contains(CLOSE_GLYPH),
+            "the inset top row keeps no close glyph on a receded tab: {lines:?}"
+        );
+        assert!(
+            lines[1].contains(CLOSE_GLYPH),
+            "the close glyph rides the first band row instead: {lines:?}"
+        );
+        assert_eq!(
+            out.matches(CLOSE_GLYPH).count(),
+            1,
+            "still exactly one close glyph: {out:?}"
         );
     }
 

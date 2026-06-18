@@ -435,10 +435,12 @@ impl ZellijPlugin for State {
 
         // Record the close "×" cell for each tab that drew one (#86) — the same
         // grid rungs (L0–L2) that `assemble` stamps the glyph on, and only when
-        // `close` is set (enabled + >1 tab). The glyph lands at the block's top
-        // text row, one column in from the right edge (a right margin mirrors the
-        // badge's left inset), so the click cell is `(0, start + width-2)` —
-        // exactly where the minimap painted it.
+        // `close` is set (enabled + >1 tab). The glyph lands one column in from
+        // the right edge (a right margin mirrors the badge's left inset), on the
+        // block's first fully colored text row — the top row normally, the first
+        // band row on a receded tab. `vinset_for(..).div_ceil(2)` mirrors exactly
+        // what `minimap::render` painted, so the click cell tracks the glyph as it
+        // moves into the band.
         self.close_layout = if close {
             self.tab_layout
                 .iter()
@@ -450,7 +452,8 @@ impl ZellijPlugin for State {
                 })
                 .map(|hit| line::CloseHit {
                     position: hit.position,
-                    row: 0,
+                    row: tab_block::vinset_for(self.config.perspective, rows, hit.active)
+                        .div_ceil(2),
                     column: hit.start + hit.width - 2,
                 })
                 .collect()
@@ -1786,6 +1789,48 @@ mod tests {
         assert!(
             state.close_layout.is_empty(),
             "the disabled close button records no cells"
+        );
+    }
+
+    #[test]
+    fn close_cell_follows_the_band_on_a_receded_tab() {
+        // With perspective on and ≥4 rows, an inactive tab recedes (#66) and its
+        // close glyph drops to the first band row — the recorded click cell must
+        // move with it, or the corner would stop closing the tab. The active tab
+        // never recedes, so its cell stays on the top row (#84/#86).
+        let mut state = State::default();
+        state.permitted = true;
+        state.config = Config {
+            close_button: true,
+            perspective: true,
+            ..Default::default()
+        };
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                ..tab(0, 1)
+            },
+            tab(1, 2),
+        ];
+
+        state.render(4, 80);
+
+        let row_of = |position: usize| {
+            state
+                .close_layout
+                .iter()
+                .find(|hit| hit.position == position)
+                .map(|hit| hit.row)
+        };
+        assert_eq!(
+            row_of(0),
+            Some(0),
+            "the active tab keeps its close cell on the top row"
+        );
+        assert_eq!(
+            row_of(1),
+            Some(1),
+            "the receded inactive tab's close cell drops to the first band row"
         );
     }
 

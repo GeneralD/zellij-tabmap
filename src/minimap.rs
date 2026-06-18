@@ -32,9 +32,19 @@ pub(crate) const ACTIVE_FG: Rgb = (255, 255, 255);
 /// retune freely; not a correctness constant.
 pub(crate) const INACTIVE_LABEL_BLEND: u8 = 30;
 /// The glyph stamped into a tab block's top-right cell as its close affordance
-/// (#86). `×` (U+00D7, display width 1) reads as a close control while staying a
-/// single cell, so it never disturbs the column budget.
-pub(crate) const CLOSE_GLYPH: char = '×';
+/// (#86). The Nerd Font `md-close_circle` (U+F0159, display width 1) reads as a
+/// close control while staying a single cell, so it never disturbs the column
+/// budget. Terminals without a Nerd Font — zellij's simplified UI, surfaced to
+/// the plugin as `capabilities.arrow_fonts` — can't render it, so the bar swaps
+/// in [`CLOSE_GLYPH_ASCII`] there (see `State::render`).
+pub(crate) const CLOSE_GLYPH: char = '\u{F0159}';
+
+/// ASCII fallback for [`CLOSE_GLYPH`] under a simplified UI (no Nerd Font): `×`
+/// (U+00D7, display width 1) still reads as a close control in any font. The
+/// swap happens once at the render boundary rather than inside the pure renderer
+/// — the glyph is uniform across the whole bar, and whether a Nerd Font is
+/// available (`capabilities.arrow_fonts`) is known only at that boundary.
+pub(crate) const CLOSE_GLYPH_ASCII: &str = "×";
 
 pub(crate) const RESET: &str = "\x1b[0m";
 

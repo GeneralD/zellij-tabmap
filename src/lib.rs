@@ -39,6 +39,14 @@ pub struct State {
     /// fallback (see [`color::Palette::default`]) and is refreshed on every
     /// `ModeUpdate`, which is how zellij delivers the active style.
     palette: color::Palette,
+    /// Whether the terminal runs zellij's simplified UI (no Nerd Font). zellij
+    /// surfaces this as `capabilities.arrow_fonts` — counterintuitively `true`
+    /// means *simplified* (the flag is its internal "fall back to ASCII
+    /// separators" signal), so this field mirrors it directly. Refreshed on
+    /// every `ModeUpdate` alongside the palette, and defaults to `false`
+    /// (assume a Nerd Font) until the first one lands. Drives the close-glyph
+    /// fallback so the affordance never renders as tofu (#86).
+    simplified_ui: bool,
     /// The most recent render's per-tab column spans — the source of truth for
     /// click hit-testing. Re-recorded on every `render()` (and renders fire on
     /// each Tab/Pane update), so a click always tests against what is currently
@@ -138,6 +146,20 @@ fn palette_from_style(style: &Style) -> color::Palette {
     color::Palette::new(slots, rgb(colors.frame_highlight.base))
 }
 
+/// Downgrade the close affordance to its ASCII fallback under a simplified UI.
+/// The renderer always stamps the Nerd Font [`minimap::CLOSE_GLYPH`]; a terminal
+/// without a Nerd Font can't draw it, so when `simplified_ui` is set the one
+/// uniform glyph is swapped for [`minimap::CLOSE_GLYPH_ASCII`] across the whole
+/// bar before it is printed. That glyph (U+F0159) appears nowhere else in the
+/// bar, so the replacement is unambiguous; a no-op when a Nerd Font is available
+/// (#86). Kept pure so the swap is unit-testable off-wasm.
+fn fit_close_glyph(bar: String, simplified_ui: bool) -> String {
+    if !simplified_ui {
+        return bar;
+    }
+    bar.replace(minimap::CLOSE_GLYPH, minimap::CLOSE_GLYPH_ASCII)
+}
+
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         // Deliberately NO `set_selectable(false)` here: the pane stays
@@ -194,7 +216,10 @@ impl ZellijPlugin for State {
             Event::ModeUpdate(mode_info) => {
                 // zellij delivers the active theme via the mode style. Refresh
                 // the palette and repaint so pane colors track theme changes.
+                // The same event carries the terminal's font capability, which
+                // selects the close-glyph (Nerd Font vs ASCII fallback, #86).
                 self.palette = palette_from_style(&mode_info.style);
+                self.simplified_ui = mode_info.capabilities.arrow_fonts;
                 true
             }
             Event::Mouse(Mouse::LeftClick(row, column)) => {
@@ -347,18 +372,24 @@ impl ZellijPlugin for State {
         // recorded click cells below, so draw and hit-test never disagree.
         let close = self.config.close_button && self.tabs.len() > 1;
 
+        // The renderer always stamps the Nerd Font close glyph; downgrade it to
+        // the ASCII fallback here when the terminal can't draw it (#86), the one
+        // spot that knows the font capability.
         print!(
             "{}",
-            paint::bar(
-                rows,
-                &layout,
-                &panes_by_position,
-                &self.palette,
-                &self.config.shortcut_prefix,
-                self.config.gradient_spec(),
-                self.config.inactive_dim,
-                self.config.perspective,
-                close,
+            fit_close_glyph(
+                paint::bar(
+                    rows,
+                    &layout,
+                    &panes_by_position,
+                    &self.palette,
+                    &self.config.shortcut_prefix,
+                    self.config.gradient_spec(),
+                    self.config.inactive_dim,
+                    self.config.perspective,
+                    close,
+                ),
+                self.simplified_ui,
             )
         );
 
@@ -1065,6 +1096,50 @@ mod tests {
 
         assert!(state.update(Event::ModeUpdate(mode_info)));
         assert_eq!(state.palette.color_for(0), (10, 20, 30));
+    }
+
+    #[test]
+    fn mode_update_records_the_simplified_ui_capability() {
+        // The same event carries the terminal's font capability. zellij's
+        // `arrow_fonts == true` means a simplified UI (no Nerd Font), so the
+        // field mirrors it directly and drives the close-glyph fallback (#86).
+        let mut state = State::default();
+        assert!(!state.simplified_ui, "defaults to assuming a Nerd Font");
+
+        let mut simplified = ModeInfo::default();
+        simplified.capabilities.arrow_fonts = true;
+        assert!(state.update(Event::ModeUpdate(simplified)));
+        assert!(
+            state.simplified_ui,
+            "arrow_fonts=true downgrades to simplified"
+        );
+
+        let mut fancy = ModeInfo::default();
+        fancy.capabilities.arrow_fonts = false;
+        assert!(state.update(Event::ModeUpdate(fancy)));
+        assert!(
+            !state.simplified_ui,
+            "arrow_fonts=false restores the Nerd Font path"
+        );
+    }
+
+    #[test]
+    fn fit_close_glyph_downgrades_only_under_simplified_ui() {
+        // The renderer always stamps the Nerd Font glyph; `fit_close_glyph` swaps
+        // it for the ASCII fallback only when the terminal lacks a Nerd Font, and
+        // touches nothing else (#86).
+        let painted = format!("a{0}b{0}c", minimap::CLOSE_GLYPH);
+
+        assert_eq!(
+            fit_close_glyph(painted.clone(), false),
+            painted,
+            "a Nerd Font terminal keeps the fancy glyph untouched"
+        );
+        assert_eq!(
+            fit_close_glyph(painted, true),
+            format!("a{0}b{0}c", minimap::CLOSE_GLYPH_ASCII),
+            "a simplified UI swaps every close glyph for the ASCII fallback"
+        );
     }
 
     #[test]

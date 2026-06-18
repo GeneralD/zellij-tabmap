@@ -80,6 +80,16 @@ pub struct Config {
     /// gesture acts on the whole bar. Needs no permission beyond the default set
     /// (`ChangeApplicationState`). See [`ScrollMode`].
     pub scroll: ScrollMode,
+    /// Whether each tab block draws a clickable "×" close button at its top-right
+    /// corner, closing that tab on click (#86). Off by default: the close glyph
+    /// adds visual weight and an inactive tab's corner becomes a close target
+    /// rather than a switch target, so it is opt-in. When on, the "×" shows on
+    /// every grid-rung tab — but only while more than one tab is open, so the
+    /// last tab can never be closed out from under the session. Closing rides on
+    /// the already-granted `ChangeApplicationState` permission (same family as
+    /// `new_tab`, #76), so enabling it triggers no new permission prompt on
+    /// auto-update (zellij#4982).
+    pub close_button: bool,
     /// Cooldown window in **milliseconds** between wheel navigation steps (#83). A
     /// stepless device (Magic Mouse, trackpad) fires a *burst* of scroll events for
     /// one flick, so the pre-#83 "one event = one step" raced through tabs/panes.
@@ -137,6 +147,9 @@ impl Config {
     /// Default wheel behaviour — `Tab`, matching zellij's stock tab-bar (scroll
     /// switches tabs). Set `pane` to walk panes, `off` to disable (#80).
     pub const DEFAULT_SCROLL: ScrollMode = ScrollMode::Tab;
+    /// Default close-button state — off, so the bar keeps its v0.x look and no
+    /// tab corner is a close target unless the user opts in (#86).
+    pub const DEFAULT_CLOSE_BUTTON: bool = false;
     /// Default wheel cooldown — `40` ms between steps, taming a stepless device's
     /// flick burst out of the box while still letting a deliberate notch step at
     /// once. Set `0` to disable the limiter (the pre-#83 one-step-per-event feel) (#83).
@@ -203,6 +216,10 @@ impl Config {
                 .get("scroll")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_SCROLL),
+            close_button: configuration
+                .get("close_button")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_CLOSE_BUTTON),
             scroll_cooldown_ms: configuration
                 .get("scroll_cooldown_ms")
                 .and_then(|raw| raw.parse().ok())
@@ -259,6 +276,7 @@ mod tests {
         assert!(config.perspective);
         assert!(config.new_tab_button);
         assert_eq!(config.scroll, ScrollMode::Tab);
+        assert!(!config.close_button);
         assert_eq!(config.scroll_cooldown_ms, 40);
     }
 
@@ -466,6 +484,19 @@ mod tests {
         assert_eq!(config_from(&[("scroll", "wheel")]).scroll, ScrollMode::Tab);
         assert_eq!(config_from(&[("scroll", "Tab")]).scroll, ScrollMode::Tab);
         assert_eq!(config_from(&[("scroll", "")]).scroll, ScrollMode::Tab);
+    }
+
+    #[test]
+    fn parses_explicit_close_button_on() {
+        // The close "×" is off by default; an explicit `true` opts in.
+        assert!(config_from(&[("close_button", "true")]).close_button);
+    }
+
+    #[test]
+    fn malformed_close_button_falls_back() {
+        // A malformed or empty value keeps the off-by-default close button.
+        assert!(!config_from(&[("close_button", "yes")]).close_button);
+        assert!(!config_from(&[("close_button", "")]).close_button);
     }
 
     #[test]

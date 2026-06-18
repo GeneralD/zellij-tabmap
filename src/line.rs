@@ -53,6 +53,29 @@ impl ButtonHit {
     }
 }
 
+/// One tab's close-button cell — the single top-right cell whose left-click
+/// closes that tab (#86). Unlike [`TabHit`] / [`ButtonHit`], which own a whole
+/// column range, the close target is **one exact cell**: it needs row precision
+/// so a click lower in the same column still switches to (or focuses a pane of)
+/// the tab rather than closing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CloseHit {
+    /// 0-based tab position to close (zellij `TabInfo.position`), passed straight
+    /// to `close_tab_with_index`.
+    pub position: usize,
+    /// 0-based row of the close cell in the bar (the top text row, `0`).
+    pub row: usize,
+    /// 0-based column of the close cell in the bar (the block's right edge).
+    pub column: usize,
+}
+
+impl CloseHit {
+    /// Whether a click at (`row`, `column`) lands exactly on the close cell.
+    pub fn contains(&self, row: usize, column: usize) -> bool {
+        self.row == row && self.column == column
+    }
+}
+
 /// A run of collapsed tabs at one end of the bar, drawn as `← +N` / `+N →`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Overflow {
@@ -1225,6 +1248,22 @@ mod tests {
         assert!(button.contains(12), "last column");
         assert!(!button.contains(9), "one before the start");
         assert!(!button.contains(13), "one past the end");
+    }
+
+    #[test]
+    fn close_contains_matches_exactly_one_cell() {
+        // The close target is a single cell — both row and column must match.
+        // The same column on another row, or the same row on another column, is a
+        // miss, so a click below the × still switches/focuses the tab (#86).
+        let close = CloseHit {
+            position: 2,
+            row: 0,
+            column: 11,
+        };
+        assert!(close.contains(0, 11), "the exact close cell");
+        assert!(!close.contains(1, 11), "same column, lower row");
+        assert!(!close.contains(0, 10), "same row, neighbour column");
+        assert!(!close.contains(0, 12), "same row, neighbour column");
     }
 
     #[test]

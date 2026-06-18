@@ -84,6 +84,7 @@ fn main() {
         GradientSpec::from_mode(GradientMode::Sheen),
         true,
         true,
+        false,
     );
 
     // Hide the cursor so a held screenshot doesn't catch a stray cursor block

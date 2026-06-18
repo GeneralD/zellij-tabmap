@@ -41,7 +41,7 @@ pub(crate) const CANVAS: Rgb = (26, 27, 38);
 /// Every color the default theme actually uses lands in the cube/grayscale
 /// ranges, where this table is exact; the 0–15 system colors are
 /// terminal-dependent and reproduced here at their conventional values.
-pub fn from_eightbit(c: u8) -> Rgb {
+pub const fn from_eightbit(c: u8) -> Rgb {
     // Conventional xterm/VGA values for the 16 ANSI system colors.
     const SYSTEM: [Rgb; 16] = [
         (0, 0, 0),
@@ -217,7 +217,18 @@ pub struct Palette {
     slots: Vec<Rgb>,
     hint: Rgb,
     accent: Rgb,
+    /// The theme's alert/error red (`exit_code_error.base`), used as the close
+    /// glyph foreground (#86). Defaults to zellij's own `EightBit(124)` when a
+    /// theme leaves it unset, so the close affordance is always a recognizable
+    /// red rather than borrowing a pane hue. Set from the live theme via
+    /// [`Palette::with_alert`].
+    alert: Rgb,
 }
+
+/// zellij's default error red — `EightBit(124)`, the value `exit_code_error`
+/// falls back to when a theme leaves it unset. The close glyph's stand-in red
+/// until [`Palette::with_alert`] supplies the live theme value.
+const DEFAULT_ALERT: Rgb = from_eightbit(124);
 
 impl Default for Palette {
     fn default() -> Self {
@@ -256,7 +267,18 @@ impl Palette {
             slots,
             hint,
             accent,
+            alert: DEFAULT_ALERT,
         }
+    }
+
+    /// Override the alert/close-glyph red with the theme's `exit_code_error.base`
+    /// (#86). An unset theme color collapses to the [`BLACK`] sentinel; that is
+    /// ignored so the visible [`DEFAULT_ALERT`] survives rather than turning the
+    /// close glyph invisible. A builder so the call site reads
+    /// `Palette::new(..).with_alert(..)` without widening [`new`](Self::new).
+    pub fn with_alert(mut self, alert: Rgb) -> Self {
+        self.alert = if alert == BLACK { self.alert } else { alert };
+        self
     }
 
     /// Pre-theme stopgap built from zellij's default style codes, so the
@@ -292,6 +314,15 @@ impl Palette {
         self.accent
     }
 
+    /// The alert/error red used for the close glyph (#86) — the theme's
+    /// `exit_code_error.base`, or [`DEFAULT_ALERT`] when the theme left it unset.
+    /// Carried through [`dimmed`](Self::dimmed) unchanged so an inactive tab's
+    /// close glyph reads as the same red, toned toward its fill at the call site
+    /// rather than receded into the canvas like a pane hue.
+    pub fn alert(&self) -> Rgb {
+        self.alert
+    }
+
     /// The inactive-tab variant of this palette (#59): every slot — and the
     /// hint/accent it seeds text from — receded toward [`CANVAS`] by
     /// [`Self::DIM_PERCENT`], so inactive blocks sink into the bar while the
@@ -304,6 +335,11 @@ impl Palette {
             slots: self.slots.iter().map(|&c| receded(c)).collect(),
             hint: receded(self.hint),
             accent: receded(self.accent),
+            // The alert red is *not* receded: the close glyph stays the same
+            // recognizable red on inactive tabs, toned toward the fill at the
+            // render site (`INACTIVE_LABEL_BLEND`) rather than sunk into the
+            // canvas here — mirroring how the white badge was a fixed shade.
+            alert: self.alert,
         }
     }
 

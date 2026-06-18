@@ -59,6 +59,7 @@ fn main() {
             GradientSpec::from_mode(GradientMode::Sheen),
             inactive_dim,
             false,
+            false,
         )
     );
 }

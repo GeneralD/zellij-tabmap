@@ -39,6 +39,14 @@ pub struct State {
     /// fallback (see [`color::Palette::default`]) and is refreshed on every
     /// `ModeUpdate`, which is how zellij delivers the active style.
     palette: color::Palette,
+    /// Whether the terminal runs zellij's simplified UI (no Nerd Font). zellij
+    /// surfaces this as `capabilities.arrow_fonts` — counterintuitively `true`
+    /// means *simplified* (the flag is its internal "fall back to ASCII
+    /// separators" signal), so this field mirrors it directly. Refreshed on
+    /// every `ModeUpdate` alongside the palette, and defaults to `false`
+    /// (assume a Nerd Font) until the first one lands. Drives the close-glyph
+    /// fallback so the affordance never renders as tofu (#86).
+    simplified_ui: bool,
     /// The most recent render's per-tab column spans — the source of truth for
     /// click hit-testing. Re-recorded on every `render()` (and renders fire on
     /// each Tab/Pane update), so a click always tests against what is currently
@@ -60,6 +68,12 @@ pub struct State {
     /// draw no per-pane regions, so a click there has no pane to resolve. Cleared
     /// on every render bail-out, so a click never hit-tests a stale frame.
     tab_panes: BTreeMap<usize, TabPaneGeom>,
+    /// The most recent render's per-tab close-button cells (#86) — one entry per
+    /// grid-rung tab that drew an "×". Re-recorded every `render()` alongside
+    /// `tab_layout` and cleared on the same bail-outs, so a `LeftClick` resolves
+    /// "close tab N" against the live frame. Empty whenever the close button is
+    /// disabled, only one tab is open, or no frame has drawn yet.
+    close_layout: Vec<line::CloseHit>,
     /// Whether the wheel cooldown window is currently open (#83). The first scroll
     /// event navigates and sets this, arming a `config.scroll_cooldown_ms` timer;
     /// events arriving while it's set are dropped (see [`scroll::gate`]), and the
@@ -115,7 +129,9 @@ fn rgb(c: PaletteColor) -> color::Rgb {
 /// focus ring is derived from that fill as a luminance-shifted shade — the
 /// outline stays in the pane's own hue family (issue #47).
 /// `frame_highlight.base` is the accent that seeds the degraded-rung hint
-/// text shade ([`color::Palette::hint`], issue #32).
+/// text shade ([`color::Palette::hint`], issue #32). `exit_code_error.base` —
+/// zellij's own semantic red — colors the close glyph ([`color::Palette::alert`],
+/// issue #86).
 fn palette_from_style(style: &Style) -> color::Palette {
     let colors = &style.colors;
     let players = colors.multiplayer_user_colors;
@@ -135,6 +151,23 @@ fn palette_from_style(style: &Style) -> color::Palette {
     .map(rgb)
     .collect();
     color::Palette::new(slots, rgb(colors.frame_highlight.base))
+        .with_alert(rgb(colors.exit_code_error.base))
+}
+
+/// Downgrade the close affordance to its ASCII fallback under a simplified UI.
+/// The renderer always stamps the Nerd Font [`minimap::CLOSE_GLYPH`]; a terminal
+/// without a Nerd Font can't draw it, so when `simplified_ui` is set the one
+/// uniform glyph is swapped for [`minimap::CLOSE_GLYPH_ASCII`] across the whole
+/// bar before it is printed. That glyph (U+F0159) appears nowhere else in the
+/// bar, so the replacement is unambiguous; a no-op when a Nerd Font is available
+/// (#86). Kept pure so the swap is unit-testable off-wasm. The `contains` guard
+/// skips `replace`'s unconditional allocation when no glyph was stamped (the
+/// `close_button=false` default), so the swap costs nothing on a bar without one.
+fn fit_close_glyph(bar: String, simplified_ui: bool) -> String {
+    if !simplified_ui || !bar.contains(minimap::CLOSE_GLYPH) {
+        return bar;
+    }
+    bar.replace(minimap::CLOSE_GLYPH, minimap::CLOSE_GLYPH_ASCII)
 }
 
 impl ZellijPlugin for State {
@@ -196,7 +229,10 @@ impl ZellijPlugin for State {
             Event::ModeUpdate(mode_info) => {
                 // zellij delivers the active theme via the mode style. Refresh
                 // the palette and repaint so pane colors track theme changes.
+                // The same event carries the terminal's font capability, which
+                // selects the close-glyph (Nerd Font vs ASCII fallback, #86).
                 self.palette = palette_from_style(&mode_info.style);
+                self.simplified_ui = mode_info.capabilities.arrow_fonts;
                 true
             }
             Event::Mouse(Mouse::LeftClick(row, column)) => {
@@ -223,6 +259,23 @@ impl ZellijPlugin for State {
                 if self.clicked_new_tab_button(column) {
                     self.drag = None;
                     let _opened = new_tab::<&str>(None, None);
+                    return false;
+                }
+                // A click on a tab's top-right "×" cell closes that tab and
+                // consumes the gesture — checked before the focus/switch fallback
+                // so the corner cell closes rather than switches, and before any
+                // drag is armed. `close_tab_with_index` closes by position without
+                // focusing first, and rides the already-granted
+                // `ChangeApplicationState` (#86). The span is recorded only when
+                // the feature is on and >1 tab is open, so this guard is inert
+                // otherwise — and the last tab is never closeable.
+                if let Some(position) = self.clicked_close_button(row, column) {
+                    self.drag = None;
+                    // Consume the close target so a duplicate click on the same
+                    // cell can't re-dispatch off stale geometry before the next
+                    // render rebuilds `close_layout` (the close shifts positions).
+                    self.close_layout.clear();
+                    close_tab_with_index(position);
                     return false;
                 }
                 self.focus_or_switch_at(row, column);
@@ -277,6 +330,7 @@ impl ZellijPlugin for State {
         self.tab_layout.clear();
         self.button_layout = None;
         self.tab_panes.clear();
+        self.close_layout.clear();
         if !self.permitted {
             return;
         }
@@ -336,17 +390,32 @@ impl ZellijPlugin for State {
             })
             .collect();
 
+        // Offer the close glyph only when enabled *and* more than one tab is open,
+        // so the last tab keeps no close target and can't be shut from under the
+        // session (#86). Per tab it lands on the active tab — and, with perspective
+        // off, on every tab — but not on inactive perspective tabs (that per-tab
+        // gate lives in `paint::bar` and in the `close_layout` filter below, kept
+        // identical so draw and hit-test never disagree).
+        let close = self.config.close_button && self.tabs.len() > 1;
+
+        // The renderer always stamps the Nerd Font close glyph; downgrade it to
+        // the ASCII fallback here when the terminal can't draw it (#86), the one
+        // spot that knows the font capability.
         print!(
             "{}",
-            paint::bar(
-                rows,
-                &layout,
-                &panes_by_position,
-                &self.palette,
-                &self.config.shortcut_prefix,
-                self.config.gradient_spec(),
-                self.config.inactive_dim,
-                self.config.perspective,
+            fit_close_glyph(
+                paint::bar(
+                    rows,
+                    &layout,
+                    &panes_by_position,
+                    &self.palette,
+                    &self.config.shortcut_prefix,
+                    self.config.gradient_spec(),
+                    self.config.inactive_dim,
+                    self.config.perspective,
+                    close,
+                ),
+                self.simplified_ui,
             )
         );
 
@@ -389,6 +458,32 @@ impl ZellijPlugin for State {
                 )
             })
             .collect();
+
+        // Record the close cell for each tab that drew one (#86) — the grid rungs
+        // (L0–L2) that `assemble` stamps the glyph on, gated by the same
+        // `active || !perspective` predicate `paint::bar` paints with, and only
+        // when `close` is set (enabled + >1 tab). The glyph lands in the block's
+        // top-right corner (last column) on the top text row — the tabs that show
+        // it never recede — so the cell is a fixed `(row 0, start + width - 1)`.
+        self.close_layout = if close {
+            self.tab_layout
+                .iter()
+                .filter(|hit| {
+                    (hit.active || !self.config.perspective)
+                        && matches!(
+                            tab_block::level_for(hit.width),
+                            tab_block::Level::L0 | tab_block::Level::L1 | tab_block::Level::L2
+                        )
+                })
+                .map(|hit| line::CloseHit {
+                    position: hit.position,
+                    row: 0,
+                    column: hit.start + hit.width - 1,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
     }
 }
 
@@ -467,6 +562,22 @@ impl State {
     /// [`reorder_plan`](Self::reorder_plan)/[`reorder`](Self::reorder) seam.
     fn clicked_new_tab_button(&self, column: usize) -> bool {
         self.button_layout.is_some_and(|hit| hit.contains(column))
+    }
+
+    /// The position of the tab whose close "×" cell is at (`row`, `column`), or
+    /// `None` when the click missed every close cell (#86). `row` is zellij's
+    /// click line (`isize`, negative above the pane); a negative row matches no
+    /// cell. Tests the last frame's recorded `close_layout`, which is empty
+    /// whenever the close button is disabled or only one tab is open — so this is
+    /// always a miss then, and the last tab is never closeable. Split from the
+    /// `close_tab_with_index` host effect so the routing is unit-tested without a
+    /// zellij host, mirroring [`Self::clicked_new_tab_button`].
+    fn clicked_close_button(&self, row: isize, column: usize) -> Option<usize> {
+        let row = usize::try_from(row).ok()?;
+        self.close_layout
+            .iter()
+            .find(|hit| hit.contains(row, column))
+            .map(|hit| hit.position)
     }
 
     /// Dispatch a wheel event to the configured navigation: switch tabs, walk
@@ -1032,6 +1143,50 @@ mod tests {
 
         assert!(state.update(Event::ModeUpdate(mode_info)));
         assert_eq!(state.palette.color_for(0), (10, 20, 30));
+    }
+
+    #[test]
+    fn mode_update_records_the_simplified_ui_capability() {
+        // The same event carries the terminal's font capability. zellij's
+        // `arrow_fonts == true` means a simplified UI (no Nerd Font), so the
+        // field mirrors it directly and drives the close-glyph fallback (#86).
+        let mut state = State::default();
+        assert!(!state.simplified_ui, "defaults to assuming a Nerd Font");
+
+        let mut simplified = ModeInfo::default();
+        simplified.capabilities.arrow_fonts = true;
+        assert!(state.update(Event::ModeUpdate(simplified)));
+        assert!(
+            state.simplified_ui,
+            "arrow_fonts=true downgrades to simplified"
+        );
+
+        let mut fancy = ModeInfo::default();
+        fancy.capabilities.arrow_fonts = false;
+        assert!(state.update(Event::ModeUpdate(fancy)));
+        assert!(
+            !state.simplified_ui,
+            "arrow_fonts=false restores the Nerd Font path"
+        );
+    }
+
+    #[test]
+    fn fit_close_glyph_downgrades_only_under_simplified_ui() {
+        // The renderer always stamps the Nerd Font glyph; `fit_close_glyph` swaps
+        // it for the ASCII fallback only when the terminal lacks a Nerd Font, and
+        // touches nothing else (#86).
+        let painted = format!("a{0}b{0}c", minimap::CLOSE_GLYPH);
+
+        assert_eq!(
+            fit_close_glyph(painted.clone(), false),
+            painted,
+            "a Nerd Font terminal keeps the fancy glyph untouched"
+        );
+        assert_eq!(
+            fit_close_glyph(painted, true),
+            format!("a{0}b{0}c", minimap::CLOSE_GLYPH_ASCII),
+            "a simplified UI swaps every close glyph for the ASCII fallback"
+        );
     }
 
     #[test]
@@ -1634,6 +1789,220 @@ mod tests {
         assert!(
             state.button_layout.is_none(),
             "the disabled button records no span"
+        );
+    }
+
+    #[test]
+    fn clicked_close_button_hit_tests_the_recorded_close_cell() {
+        // The pure routing predicate behind a close click: only the exact
+        // (row, column) cell recorded for a tab resolves to its position. A
+        // click one row down (still in the block, but a pane/switch target) or
+        // one column off misses, and an empty `close_layout` (disabled or a lone
+        // tab) always misses — so the `close_tab_with_index` host effect is
+        // reached only past a true hit, and the last tab is never closeable.
+        let mut state = State::default();
+        assert_eq!(
+            state.clicked_close_button(0, 9),
+            None,
+            "no recorded close cell → every click misses"
+        );
+
+        state.close_layout = vec![line::CloseHit {
+            position: 2,
+            row: 0,
+            column: 9,
+        }];
+        assert_eq!(
+            state.clicked_close_button(0, 9),
+            Some(2),
+            "the exact close cell resolves to its tab position"
+        );
+        assert_eq!(
+            state.clicked_close_button(1, 9),
+            None,
+            "one row below the close cell misses (still a switch/focus target)"
+        );
+        assert_eq!(
+            state.clicked_close_button(0, 8),
+            None,
+            "one column left of the close cell misses"
+        );
+        assert_eq!(
+            state.clicked_close_button(-1, 9),
+            None,
+            "a negative click row (above the bar) matches no cell"
+        );
+    }
+
+    #[test]
+    fn render_records_close_cells_only_when_enabled_and_multi_tab() {
+        // With `close_button` on and more than one tab, each grid-rung block
+        // records a close cell at its top-right corner, so a later click can
+        // route to "close this tab". Perspective is off here, so every tab carries
+        // one (#86). Turning the toggle off — or dropping to a single tab —
+        // records nothing, leaving the lone tab uncloseable.
+        let mut state = State::default();
+        state.permitted = true;
+        state.config = Config {
+            close_button: true,
+            perspective: false,
+            ..Default::default()
+        };
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                ..tab(0, 1)
+            },
+            tab(1, 2),
+        ];
+
+        state.render(MIN_ROWS, 80);
+        assert_eq!(
+            state.close_layout.len(),
+            2,
+            "with perspective off both wide tabs record a close cell when enabled"
+        );
+        assert!(
+            state.close_layout.iter().all(|hit| hit.row == 0
+                && state
+                    .tab_layout
+                    .iter()
+                    .any(|t| t.position == hit.position && hit.column == t.start + t.width - 1)),
+            "each close cell sits in its block's top-right corner (last column)"
+        );
+
+        state.tabs = vec![TabInfo {
+            active: true,
+            ..tab(0, 1)
+        }];
+        state.render(MIN_ROWS, 80);
+        assert!(
+            state.close_layout.is_empty(),
+            "a lone tab records no close cell — it can never be closed"
+        );
+
+        state.config = Config::default();
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                ..tab(0, 1)
+            },
+            tab(1, 2),
+        ];
+        state.render(MIN_ROWS, 80);
+        assert!(
+            state.close_layout.is_empty(),
+            "the disabled close button records no cells"
+        );
+    }
+
+    #[test]
+    fn perspective_limits_the_close_cell_to_the_active_tab() {
+        // With perspective on, inactive tabs recede (#66); a close glyph in their
+        // inset corner reads as unbalanced, so only the active tab — which never
+        // recedes — carries one (#86). The active cell rides the top row.
+        let mut state = State::default();
+        state.permitted = true;
+        state.config = Config {
+            close_button: true,
+            perspective: true,
+            ..Default::default()
+        };
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                ..tab(0, 1)
+            },
+            tab(1, 2),
+        ];
+
+        state.render(4, 80);
+
+        let positions: std::collections::HashSet<usize> =
+            state.close_layout.iter().map(|hit| hit.position).collect();
+        assert_eq!(
+            positions,
+            std::collections::HashSet::from([0]),
+            "only the active tab records a close cell under perspective"
+        );
+        assert!(
+            state.close_layout.iter().all(|hit| hit.row == 0),
+            "the active tab's close cell rides the top row"
+        );
+    }
+
+    #[test]
+    fn render_omits_narrow_tabs_from_the_close_geometry() {
+        // The close cell rides the same grid rungs the glyph is painted on
+        // (L0–L2). Tabs squeezed to L3/L4 draw no per-tab minimap and so get no
+        // "×" — the filter must drop them from `close_layout`, mirroring how #74
+        // drops them from the click geometry. Exercises the filter's reject arm.
+        // Perspective is off so every wide tab records — isolating the L3/L4 size
+        // filter from the active-only perspective gate.
+        let mut state = State::default();
+        state.permitted = true;
+        state.config = Config {
+            close_button: true,
+            perspective: false,
+            ..Default::default()
+        };
+        state.tabs = (0..24)
+            .map(|i| TabInfo {
+                active: i == 0,
+                ..tab(i, i + 1)
+            })
+            .collect();
+
+        state.render(MIN_ROWS, 80);
+
+        let narrow: Vec<_> = state
+            .tab_layout
+            .iter()
+            .filter(|h| {
+                matches!(
+                    tab_block::level_for(h.width),
+                    tab_block::Level::L3 | tab_block::Level::L4
+                )
+            })
+            .collect();
+        assert!(
+            !narrow.is_empty(),
+            "24 tabs in 80 columns must squeeze some to L3/L4"
+        );
+        let closeable: std::collections::HashSet<usize> =
+            state.close_layout.iter().map(|hit| hit.position).collect();
+        assert!(
+            narrow.iter().all(|h| !closeable.contains(&h.position)),
+            "narrow (L3/L4) tabs carry no close cell"
+        );
+        assert!(
+            !state.close_layout.is_empty(),
+            "the wide tabs still record their close cells"
+        );
+    }
+
+    #[test]
+    fn left_click_on_the_close_cell_closes_the_tab_and_consumes_the_gesture() {
+        // A press on a recorded "×" cell closes that tab via the host (stubbed
+        // here), drops any armed drag, and requests no repaint — the close
+        // arrives back as a TabUpdate, which drives the redraw. Checked before
+        // the focus/switch fallback so the corner closes rather than switches,
+        // and before any drag is armed (#86).
+        let mut state = State::default();
+        state.drag = Some(DragState {
+            grabbed_tab_id: 7,
+            dragging: false,
+        });
+        state.close_layout = vec![line::CloseHit {
+            position: 2,
+            row: 0,
+            column: 9,
+        }];
+
+        assert!(!state.update(Event::Mouse(Mouse::LeftClick(0, 9))));
+        assert!(
+            state.drag.is_none(),
+            "closing consumes the gesture and drops any stale drag"
         );
     }
 

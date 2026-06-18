@@ -469,18 +469,18 @@ impl State {
     /// stepless device's event stream no longer races through tabs/panes. `off`
     /// mode short-circuits before accumulating, leaving the detent at rest.
     fn scroll(&mut self, dir: scroll::ScrollDir) {
-        let mode = self.config.scroll;
-        if mode == scroll::ScrollMode::Off {
-            return;
-        }
+        // Resolve the per-mode handler up front so `off` short-circuits before
+        // the detent ever sees the event — and so every arm here is live (an
+        // `off` arm after the accumulate gate would be unreachable dead code).
+        let step: fn(&Self, scroll::ScrollDir) = match self.config.scroll {
+            scroll::ScrollMode::Off => return,
+            scroll::ScrollMode::Tab => Self::scroll_tabs,
+            scroll::ScrollMode::Pane => Self::scroll_panes,
+        };
         if scroll::accumulate(&mut self.scroll_accum, dir, self.config.scroll_throttle) == 0 {
             return;
         }
-        match mode {
-            scroll::ScrollMode::Tab => self.scroll_tabs(dir),
-            scroll::ScrollMode::Pane => self.scroll_panes(dir),
-            scroll::ScrollMode::Off => {}
-        }
+        step(self, dir);
     }
 
     /// Switch one tab in `dir` from the active tab, wrapping at the ends. No-op

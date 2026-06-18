@@ -76,6 +76,43 @@ fn step(here: usize, len: usize, dir: ScrollDir) -> usize {
     }
 }
 
+/// What a wheel event does under the leading-edge cooldown rate-limiter (#83).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gate {
+    /// Navigate now; the limiter is off (`cooldown_ms == 0`), so nothing is armed.
+    Navigate,
+    /// Navigate now *and* open the cooldown window — the caller arms a
+    /// `cooldown_ms` timer and ignores further events until it fires.
+    NavigateThenCool,
+    /// Drop this event: a cooldown window is already open.
+    Ignore,
+}
+
+/// Decide a wheel event's fate under the cooldown limiter (#83). zellij emits one
+/// `Mouse::ScrollUp` / `ScrollDown` per sub-notch, and a stepless device (Magic
+/// Mouse, trackpad) fires a *burst* of them for a single flick — so "one event =
+/// one nav step" (#80) races through several tabs/panes. We can't tell the
+/// devices apart (the `Mouse` event carries no device identity), so instead of a
+/// physical detent we rate-limit by *timing*: the first event navigates at once
+/// and opens a `cooldown_ms` window; events arriving inside the window are
+/// dropped. A fast burst collapses to one step per window, while a deliberate,
+/// well-spaced notch (its window long since elapsed) always navigates
+/// immediately — responsive on a detented wheel, damped on a flick.
+///
+/// `cooling` is whether a cooldown window is currently open; `cooldown_ms == 0`
+/// disables the limiter so every event navigates (the pre-#83 one-step-per-event
+/// feel). The leading edge is never delayed — unlike a trailing-edge debounce the
+/// step lands *on* the event, not after the window closes.
+pub fn gate(cooling: bool, cooldown_ms: usize) -> Gate {
+    if cooldown_ms == 0 {
+        return Gate::Navigate;
+    }
+    if cooling {
+        return Gate::Ignore;
+    }
+    Gate::NavigateThenCool
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +190,27 @@ mod tests {
         // A lone pane (e.g. a single tab with one pane) steps to itself.
         assert_eq!(next_pane(&[7], 7, ScrollDir::Forward), Some(7));
         assert_eq!(next_pane(&[7], 7, ScrollDir::Backward), Some(7));
+    }
+
+    #[test]
+    fn gate_navigates_and_opens_the_window_on_the_leading_edge() {
+        // First event (not yet cooling): navigate now and open the cooldown
+        // window — the immediate, no-latency response a detented wheel wants.
+        assert_eq!(gate(false, 40), Gate::NavigateThenCool);
+    }
+
+    #[test]
+    fn gate_ignores_events_inside_the_window() {
+        // While cooling, a flick's burst of follow-up events is dropped so it
+        // can't race through tabs.
+        assert_eq!(gate(true, 40), Gate::Ignore);
+    }
+
+    #[test]
+    fn gate_zero_cooldown_disables_the_limiter() {
+        // `0` = off: every event navigates and nothing is armed — the pre-#83
+        // one-step-per-event feel — regardless of the cooling flag.
+        assert_eq!(gate(false, 0), Gate::Navigate);
+        assert_eq!(gate(true, 0), Gate::Navigate);
     }
 }

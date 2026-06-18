@@ -369,10 +369,12 @@ impl ZellijPlugin for State {
             })
             .collect();
 
-        // Offer the close "×" only when enabled *and* more than one tab is open,
+        // Offer the close glyph only when enabled *and* more than one tab is open,
         // so the last tab keeps no close target and can't be shut from under the
-        // session (#86). The same predicate gates both the painted glyph and the
-        // recorded click cells below, so draw and hit-test never disagree.
+        // session (#86). Per tab it lands on the active tab — and, with perspective
+        // off, on every tab — but not on inactive perspective tabs (that per-tab
+        // gate lives in `paint::bar` and in the `close_layout` filter below, kept
+        // identical so draw and hit-test never disagree).
         let close = self.config.close_button && self.tabs.len() > 1;
 
         // The renderer always stamps the Nerd Font close glyph; downgrade it to
@@ -436,28 +438,26 @@ impl ZellijPlugin for State {
             })
             .collect();
 
-        // Record the close "×" cell for each tab that drew one (#86) — the same
-        // grid rungs (L0–L2) that `assemble` stamps the glyph on, and only when
-        // `close` is set (enabled + >1 tab). The glyph lands one column in from
-        // the right edge (a right margin mirrors the badge's left inset), on the
-        // block's first fully colored text row — the top row normally, the first
-        // band row on a receded tab. `vinset_for(..).div_ceil(2)` mirrors exactly
-        // what `minimap::render` painted, so the click cell tracks the glyph as it
-        // moves into the band.
+        // Record the close cell for each tab that drew one (#86) — the grid rungs
+        // (L0–L2) that `assemble` stamps the glyph on, gated by the same
+        // `active || !perspective` predicate `paint::bar` paints with, and only
+        // when `close` is set (enabled + >1 tab). The glyph lands in the block's
+        // top-right corner (last column) on the top text row — the tabs that show
+        // it never recede — so the cell is a fixed `(row 0, start + width - 1)`.
         self.close_layout = if close {
             self.tab_layout
                 .iter()
                 .filter(|hit| {
-                    matches!(
-                        tab_block::level_for(hit.width),
-                        tab_block::Level::L0 | tab_block::Level::L1 | tab_block::Level::L2
-                    )
+                    (hit.active || !self.config.perspective)
+                        && matches!(
+                            tab_block::level_for(hit.width),
+                            tab_block::Level::L0 | tab_block::Level::L1 | tab_block::Level::L2
+                        )
                 })
                 .map(|hit| line::CloseHit {
                     position: hit.position,
-                    row: tab_block::vinset_for(self.config.perspective, rows, hit.active)
-                        .div_ceil(2),
-                    column: hit.start + hit.width - 2,
+                    row: 0,
+                    column: hit.start + hit.width - 1,
                 })
                 .collect()
         } else {
@@ -1739,12 +1739,14 @@ mod tests {
     fn render_records_close_cells_only_when_enabled_and_multi_tab() {
         // With `close_button` on and more than one tab, each grid-rung block
         // records a close cell at its top-right corner, so a later click can
-        // route to "close this tab". Turning the toggle off — or dropping to a
-        // single tab — records nothing, leaving the lone tab uncloseable.
+        // route to "close this tab". Perspective is off here, so every tab carries
+        // one (#86). Turning the toggle off — or dropping to a single tab —
+        // records nothing, leaving the lone tab uncloseable.
         let mut state = State::default();
         state.permitted = true;
         state.config = Config {
             close_button: true,
+            perspective: false,
             ..Default::default()
         };
         state.tabs = vec![
@@ -1759,15 +1761,15 @@ mod tests {
         assert_eq!(
             state.close_layout.len(),
             2,
-            "both wide tabs record a close cell when enabled"
+            "with perspective off both wide tabs record a close cell when enabled"
         );
         assert!(
             state.close_layout.iter().all(|hit| hit.row == 0
                 && state
                     .tab_layout
                     .iter()
-                    .any(|t| t.position == hit.position && hit.column == t.start + t.width - 2)),
-            "each close cell sits one column in from its block's top-right corner (right margin)"
+                    .any(|t| t.position == hit.position && hit.column == t.start + t.width - 1)),
+            "each close cell sits in its block's top-right corner (last column)"
         );
 
         state.tabs = vec![TabInfo {
@@ -1796,11 +1798,10 @@ mod tests {
     }
 
     #[test]
-    fn close_cell_follows_the_band_on_a_receded_tab() {
-        // With perspective on and ≥4 rows, an inactive tab recedes (#66) and its
-        // close glyph drops to the first band row — the recorded click cell must
-        // move with it, or the corner would stop closing the tab. The active tab
-        // never recedes, so its cell stays on the top row (#84/#86).
+    fn perspective_limits_the_close_cell_to_the_active_tab() {
+        // With perspective on, inactive tabs recede (#66); a close glyph in their
+        // inset corner reads as unbalanced, so only the active tab — which never
+        // recedes — carries one (#86). The active cell rides the top row.
         let mut state = State::default();
         state.permitted = true;
         state.config = Config {
@@ -1818,22 +1819,16 @@ mod tests {
 
         state.render(4, 80);
 
-        let row_of = |position: usize| {
-            state
-                .close_layout
-                .iter()
-                .find(|hit| hit.position == position)
-                .map(|hit| hit.row)
-        };
+        let positions: std::collections::HashSet<usize> =
+            state.close_layout.iter().map(|hit| hit.position).collect();
         assert_eq!(
-            row_of(0),
-            Some(0),
-            "the active tab keeps its close cell on the top row"
+            positions,
+            std::collections::HashSet::from([0]),
+            "only the active tab records a close cell under perspective"
         );
-        assert_eq!(
-            row_of(1),
-            Some(1),
-            "the receded inactive tab's close cell drops to the first band row"
+        assert!(
+            state.close_layout.iter().all(|hit| hit.row == 0),
+            "the active tab's close cell rides the top row"
         );
     }
 
@@ -1843,10 +1838,13 @@ mod tests {
         // (L0–L2). Tabs squeezed to L3/L4 draw no per-tab minimap and so get no
         // "×" — the filter must drop them from `close_layout`, mirroring how #74
         // drops them from the click geometry. Exercises the filter's reject arm.
+        // Perspective is off so every wide tab records — isolating the L3/L4 size
+        // filter from the active-only perspective gate.
         let mut state = State::default();
         state.permitted = true;
         state.config = Config {
             close_button: true,
+            perspective: false,
             ..Default::default()
         };
         state.tabs = (0..24)

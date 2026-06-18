@@ -34,9 +34,11 @@ use crate::tab_block::{self, TabBlock};
 /// The `← +N` / `+N →` overflow markers are placed at their own columns on the
 /// middle row.
 ///
-/// `close` forwards the top-right "×" close affordance to every tab block (#86);
-/// the caller passes `true` only when the feature is enabled and closing a tab is
-/// safe (more than one tab open).
+/// `close` enables the top-right close affordance (#86); the caller passes `true`
+/// only when the feature is on and closing a tab is safe (more than one tab open).
+/// It lands per tab on the active tab — and, when `perspective` is off, on every
+/// tab — but not on inactive perspective tabs, whose receded corner would carry it
+/// unbalanced.
 #[allow(clippy::too_many_arguments)]
 pub fn bar(
     rows: usize,
@@ -66,6 +68,11 @@ pub fn bar(
                 Some(dim) if !hit.active => dim,
                 _ => palette,
             };
+            // Close lands on the active tab, plus every tab when perspective is
+            // off (#86) — inactive perspective tabs recede, where a corner glyph
+            // reads unbalanced, so they skip it. Same predicate as the click
+            // hit-test in `State::render`, so draw and hit-test never disagree.
+            let tab_close = close && (hit.active || !perspective);
             tab_block::assemble(
                 panes,
                 tab_palette,
@@ -76,7 +83,7 @@ pub fn bar(
                 gradient,
                 hit.active,
                 perspective,
-                close,
+                tab_close,
             )
         })
         .collect();

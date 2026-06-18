@@ -731,26 +731,20 @@ pub fn render(
                 .collect()
         })
         .unwrap_or_default();
-    // The close "×" (#86) sits one column in from the right edge — mirroring the
-    // badge's `BADGE_COL` inset on the left — so the block's last column stays a
-    // margin and the glyph never butts against the inter-tab gap. The badge then
-    // fits in the columns to its left, so the two top-row overlays never collide.
-    // `close` is only ever set on grid rungs (pw >= L2_MIN = 5), so `pw - 2` is
-    // always a valid column with room to spare — `saturating_sub` only guards
-    // the dead case where `close` is false (and `close_col` goes unused) at a
-    // sub-2-column width.
-    let close_col = pw.saturating_sub(2);
-    // The close glyph rides the block's first *fully colored* text row, so on a
-    // receded tab (#66) it sits inside the color band rather than on the
-    // half-transparent inset row the badge keeps (#84/#86). `vinset` is in pixel
-    // rows and each text row spans two, so `div_ceil(2)` is the first text row
-    // whose upper pixel clears the top inset: row 0 when not receded (`vinset 0`),
-    // row 1 when receded (`vinset 1`). The active tab is never receded, so its
-    // glyph stays on the top row beside the badge.
-    let close_text_row = vinset.div_ceil(2);
-    // Two columns are off-limits to the badge when close is on: the "×" cell and
-    // the one-column margin to its right.
-    let close_reserve = 2 * usize::from(close);
+    // The close glyph (#86) sits in the block's top-right corner — the last
+    // column — balancing the `⌘N` badge in the opposite corner. `close` is only
+    // ever set on grid rungs (pw >= L2_MIN = 5), so `pw - 1` is always a valid
+    // column; `saturating_sub` only guards the dead case where `close` is false
+    // (and `close_col` goes unused) at a sub-1-column width.
+    let close_col = pw.saturating_sub(1);
+    // The close glyph only appears on tabs that don't recede — the active tab
+    // (never receded) and, when perspective is off, every tab (#86) — so it
+    // always rides the top text row, beside the badge. (Inactive perspective
+    // tabs inset their top row (#66/#84) and simply carry no close glyph.)
+    let close_text_row = 0;
+    // The close cell (the block's last column) is off-limits to the badge when
+    // close is on, so the two corner overlays never collide on a narrow rung.
+    let close_reserve = usize::from(close);
     let badge_fits = !badge_cells.is_empty() && BADGE_COL + badge_cells.len() <= pw - close_reserve;
 
     for (i, p) in panes.iter().enumerate() {
@@ -846,11 +840,11 @@ pub fn render(
                 } else {
                     centered
                 };
-                // On the close glyph's row it sits one column in from the right
-                // edge, so a label on the right-edge pane must stop short of it —
-                // the mirror of the badge's left-edge `start` nudge above (#86).
-                // That row is the top one normally, or the first band row on a
-                // receded tab (`close_text_row`), so the guard tracks it.
+                // The close glyph sits in the top-right corner, so a label on the
+                // right-edge pane sharing its row must stop short of it — the
+                // mirror of the badge's left-edge `start` nudge above (#86).
+                // `close` is only set on non-receding tabs, so the glyph's row is
+                // the top one (`close_text_row`).
                 let right_bound = if close && row == close_text_row {
                     px1.min(close_col)
                 } else {
@@ -928,13 +922,12 @@ pub fn render(
                 // The close glyph mirrors the badge in the opposite corner (#86),
                 // but in zellij's own alert red ([`Palette::alert`], from the
                 // theme's `exit_code_error.base`) — full red on the active tab,
-                // toned toward the fill on inactive ones. It rides
-                // `close_text_row` — the top row normally, the
-                // first band row on a receded tab — so it is sampled over that
-                // row's upper pixel (`2 * close_text_row`), which is always a
-                // painted fill rather than the receded inset the badge sits on
-                // (#84). Its cell is reserved from the badge and any same-row
-                // label, so it never overprints them.
+                // toned toward the fill where perspective is off and inactive
+                // tabs still carry it. It rides the top text row
+                // (`close_text_row`) — the tabs that show it never recede — and
+                // is sampled over that row's upper pixel (`2 * close_text_row`).
+                // Its cell is reserved from the badge and any same-row label, so
+                // it never overprints them.
                 let fill = pixel_color(
                     &grid,
                     &ring,
@@ -2545,42 +2538,6 @@ mod tests {
     }
 
     #[test]
-    fn close_drops_into_the_band_on_a_receded_tab() {
-        // A receded inactive tab (#66) insets its top pixel row, so the top text
-        // row is half-transparent (#84). The close glyph follows the color band
-        // down to the first fully painted text row instead of floating on that
-        // inset — `vinset: 1` here is the receded inset, so the glyph rides line 1,
-        // not line 0. (The active, un-receded tab keeps it on top; see the tests
-        // above, which all pass `vinset: 0`.)
-        let out = render(
-            &one_plain(),
-            &test_palette(),
-            12,
-            3,
-            1,
-            LabelMode::None,
-            None,
-            true,
-            GradientSpec::OFF,
-            false,
-        );
-        let lines = visible_lines(&out);
-        assert!(
-            !lines[0].contains(CLOSE_GLYPH),
-            "the inset top row keeps no close glyph on a receded tab: {lines:?}"
-        );
-        assert!(
-            lines[1].contains(CLOSE_GLYPH),
-            "the close glyph rides the first band row instead: {lines:?}"
-        );
-        assert_eq!(
-            out.matches(CLOSE_GLYPH).count(),
-            1,
-            "still exactly one close glyph: {out:?}"
-        );
-    }
-
-    #[test]
     fn close_clips_a_top_row_label_off_its_own_cell() {
         // With close on, a label that lands on the top row is bounded one column
         // short of the "×" cell so the two never overprint — the row-0 mirror of
@@ -2639,10 +2596,10 @@ mod tests {
     }
 
     #[test]
-    fn close_leaves_a_one_column_margin_to_its_right() {
-        // The "×" mirrors the badge's one-cell `BADGE_COL` inset: it sits one
-        // column in from the right edge, so the block's last column is a margin
-        // rather than the glyph butting against the inter-tab gap (#86).
+    fn close_sits_in_the_top_right_corner() {
+        // The close glyph occupies the block's last column — the top-right corner,
+        // balancing the badge's top-left corner (#86). No right margin: the glyph
+        // is flush to the edge of its block.
         let w = 12;
         let out = render(
             &one_plain(),
@@ -2659,14 +2616,9 @@ mod tests {
         let top: Vec<char> = visible_lines(&out)[0].chars().collect();
         assert_eq!(top.len(), w, "one visible char per cell: {top:?}");
         assert_eq!(
-            top[w - 2],
-            CLOSE_GLYPH,
-            "× sits one column in from the right edge: {top:?}"
-        );
-        assert_ne!(
             top[w - 1],
             CLOSE_GLYPH,
-            "the last column is the right margin, not the ×: {top:?}"
+            "the close glyph sits in the last column (top-right corner): {top:?}"
         );
     }
 }

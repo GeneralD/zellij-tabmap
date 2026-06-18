@@ -1,16 +1,17 @@
 //! Visual sample for #86 — the opt-in close button on each tab block.
 //!
-//! When `close_button` is enabled, every grid-rung tab block stamps a small
-//! close glyph (the Nerd Font `md-close_circle`) into its **top-right** cell —
-//! the mirror of the top-left `⌘N` shortcut badge. A left-click on exactly that
-//! cell closes the tab; the glyph is zellij's alert red (the theme's
-//! `exit_code_error.base`) — full red on the active tab and toned toward the
-//! fill on inactive ones, so it reads as a quiet "close here" affordance rather
-//! than competing with the minimap. On the perspective-receded inactive tabs it
-//! rides the first colored row instead of the half-transparent top inset, so it
-//! sits inside the band; the active tab keeps it on top beside the badge. It
-//! never appears on the last remaining tab (here all four are shown, so each
-//! carries its close glyph).
+//! When `close_button` is enabled, a tab block stamps a small close glyph (the
+//! Nerd Font `md-close_circle`) into its **top-right corner** — balancing the
+//! top-left `⌘N` shortcut badge. A left-click on exactly that cell closes the
+//! tab; the glyph is zellij's alert red (the theme's `exit_code_error.base`),
+//! full red on the active tab and toned toward the fill where an inactive tab
+//! still carries it, so it reads as a quiet "close here" affordance rather than
+//! competing with the minimap. It lands on the **active tab** — and, when the
+//! perspective depth cue is off, on **every** tab — but not on the
+//! perspective-receded inactive tabs, whose inset corner would carry it
+//! unbalanced. This sample runs with perspective **on**, so only the active
+//! (lifted) tab shows the glyph; the receded inactive tabs deliberately show
+//! none. It never appears on the last remaining tab either.
 //!
 //! This sample drives `paint::bar` directly, so it shows the Nerd Font glyph;
 //! the plugin downgrades it to a plain `×` on terminals running zellij's
@@ -80,8 +81,10 @@ fn main() {
         ],
     );
 
-    // Four tabs, none of them the lone survivor, so every block draws its close
-    // glyph. A plain `pack` (no "+" button) keeps the focus on the affordance.
+    // Four tabs, none of them the lone survivor. Perspective is on (below), so
+    // only the active tab (position 1) draws its close glyph; the receded
+    // inactive tabs show none. A plain `pack` (no "+" button) keeps the focus on
+    // the affordance.
     let layout = line::pack(160, 0, line::ACTIVE_MAX, 4, 1, Alignment::Left, GAP);
     let bar = paint::bar(
         ROWS,
@@ -90,9 +93,9 @@ fn main() {
         &palette,
         "\u{2318} ",
         GradientSpec::from_mode(GradientMode::Sheen),
-        true,
-        true,
-        true, // close_button enabled — stamp the close glyph on every block
+        true, // inactive_dim
+        true, // perspective on — so only the active tab shows the close glyph
+        true, // close_button enabled
     );
 
     // Hide the cursor so a held screenshot doesn't catch a stray cursor block

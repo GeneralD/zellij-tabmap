@@ -76,44 +76,41 @@ fn step(here: usize, len: usize, dir: ScrollDir) -> usize {
     }
 }
 
-/// A software detent for the wheel (#83). zellij emits one `Mouse::ScrollUp` /
-/// `ScrollDown` per sub-notch of motion, and a stepless device (Magic Mouse,
-/// trackpad) quantizes a single flick into a *stream* of them — so "one event =
-/// one nav step" (#80) races through several tabs/panes per flick. This recreates
-/// the missing physical detent: feed each event in `dir` into `accum` and report
-/// whether a navigation step is due now (`1`) or not yet (`0`).
+/// What a wheel event does under the leading-edge cooldown rate-limiter (#83).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gate {
+    /// Navigate now; the limiter is off (`cooldown_ms == 0`), so nothing is armed.
+    Navigate,
+    /// Navigate now *and* open the cooldown window — the caller arms a
+    /// `cooldown_ms` timer and ignores further events until it fires.
+    NavigateThenCool,
+    /// Drop this event: a cooldown window is already open.
+    Ignore,
+}
+
+/// Decide a wheel event's fate under the cooldown limiter (#83). zellij emits one
+/// `Mouse::ScrollUp` / `ScrollDown` per sub-notch, and a stepless device (Magic
+/// Mouse, trackpad) fires a *burst* of them for a single flick — so "one event =
+/// one nav step" (#80) races through several tabs/panes. We can't tell the
+/// devices apart (the `Mouse` event carries no device identity), so instead of a
+/// physical detent we rate-limit by *timing*: the first event navigates at once
+/// and opens a `cooldown_ms` window; events arriving inside the window are
+/// dropped. A fast burst collapses to one step per window, while a deliberate,
+/// well-spaced notch (its window long since elapsed) always navigates
+/// immediately — responsive on a detented wheel, damped on a flick.
 ///
-/// `accum` is the signed sub-threshold remainder carried between calls (positive
-/// = forward, negative = backward); seed it `0`. `threshold` is the events per
-/// step — `1` reproduces the pre-#83 one-step-per-event feel, higher values damp
-/// the wheel. A `0` threshold is treated as `1`, so a misconfigured `0` can never
-/// wedge the wheel by demanding an unreachable count.
-///
-/// A direction reversal first clears any remainder pointing the other way, so a
-/// back-flick starts counting fresh instead of burning through leftover forward
-/// momentum — the wheel feels responsive at the turn. One event moves `accum` by
-/// a single unit and `threshold >= 1`, so at most one step crosses per call.
-pub fn accumulate(accum: &mut isize, dir: ScrollDir, threshold: usize) -> usize {
-    // Clamp before the `as isize` cast: an absurd `scroll_throttle` past
-    // `isize::MAX` would otherwise wrap negative and corrupt the comparisons.
-    let threshold = threshold.clamp(1, isize::MAX as usize) as isize;
-    let unit: isize = match dir {
-        ScrollDir::Forward => 1,
-        ScrollDir::Backward => -1,
-    };
-    if accum.signum() == -unit {
-        *accum = 0;
+/// `cooling` is whether a cooldown window is currently open; `cooldown_ms == 0`
+/// disables the limiter so every event navigates (the pre-#83 one-step-per-event
+/// feel). The leading edge is never delayed — unlike a trailing-edge debounce the
+/// step lands *on* the event, not after the window closes.
+pub fn gate(cooling: bool, cooldown_ms: usize) -> Gate {
+    if cooldown_ms == 0 {
+        return Gate::Navigate;
     }
-    *accum += unit;
-    if *accum >= threshold {
-        *accum -= threshold;
-        return 1;
+    if cooling {
+        return Gate::Ignore;
     }
-    if *accum <= -threshold {
-        *accum += threshold;
-        return 1;
-    }
-    0
+    Gate::NavigateThenCool
 }
 
 #[cfg(test)]
@@ -196,60 +193,24 @@ mod tests {
     }
 
     #[test]
-    fn accumulate_threshold_one_steps_every_event() {
-        // threshold 1 is the pre-#83 feel: each event yields a step, in either
-        // direction, and the accumulator returns to rest each time.
-        let mut accum = 0isize;
-        assert_eq!(accumulate(&mut accum, ScrollDir::Forward, 1), 1);
-        assert_eq!(accum, 0);
-        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 1), 1);
-        assert_eq!(accum, 0);
+    fn gate_navigates_and_opens_the_window_on_the_leading_edge() {
+        // First event (not yet cooling): navigate now and open the cooldown
+        // window — the immediate, no-latency response a detented wheel wants.
+        assert_eq!(gate(false, 40), Gate::NavigateThenCool);
     }
 
     #[test]
-    fn accumulate_crosses_only_on_the_threshold_event() {
-        // threshold 3: the first two events accumulate silently (carry visible in
-        // `accum`), and only the third crosses — then the remainder resets to 0.
-        let mut accum = 0isize;
-        assert_eq!(accumulate(&mut accum, ScrollDir::Forward, 3), 0);
-        assert_eq!(accum, 1);
-        assert_eq!(accumulate(&mut accum, ScrollDir::Forward, 3), 0);
-        assert_eq!(accum, 2);
-        assert_eq!(accumulate(&mut accum, ScrollDir::Forward, 3), 1);
-        assert_eq!(accum, 0);
+    fn gate_ignores_events_inside_the_window() {
+        // While cooling, a flick's burst of follow-up events is dropped so it
+        // can't race through tabs.
+        assert_eq!(gate(true, 40), Gate::Ignore);
     }
 
     #[test]
-    fn accumulate_steps_backward_on_the_threshold_event() {
-        // The backward direction is symmetric: three backward events cross once.
-        let mut accum = 0isize;
-        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 3), 0);
-        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 3), 0);
-        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 3), 1);
-        assert_eq!(accum, 0);
-    }
-
-    #[test]
-    fn accumulate_reversal_clears_opposing_carry() {
-        // Two forward events leave a +2 carry; a single backward event wipes it
-        // and starts the backward count fresh (-1), rather than netting to +1. So
-        // the turn then needs a full `threshold` of backward events to cross.
-        let mut accum = 0isize;
-        accumulate(&mut accum, ScrollDir::Forward, 3);
-        accumulate(&mut accum, ScrollDir::Forward, 3);
-        assert_eq!(accum, 2);
-        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 3), 0);
-        assert_eq!(accum, -1);
-        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 3), 0);
-        assert_eq!(accumulate(&mut accum, ScrollDir::Backward, 3), 1);
-    }
-
-    #[test]
-    fn accumulate_treats_zero_threshold_as_one() {
-        // A misconfigured `0` must not wedge the wheel by demanding an
-        // unreachable count — it falls back to stepping on every event.
-        let mut accum = 0isize;
-        assert_eq!(accumulate(&mut accum, ScrollDir::Forward, 0), 1);
-        assert_eq!(accum, 0);
+    fn gate_zero_cooldown_disables_the_limiter() {
+        // `0` = off: every event navigates and nothing is armed — the pre-#83
+        // one-step-per-event feel — regardless of the cooling flag.
+        assert_eq!(gate(false, 0), Gate::Navigate);
+        assert_eq!(gate(true, 0), Gate::Navigate);
     }
 }

@@ -80,14 +80,17 @@ pub struct Config {
     /// gesture acts on the whole bar. Needs no permission beyond the default set
     /// (`ChangeApplicationState`). See [`ScrollMode`].
     pub scroll: ScrollMode,
-    /// Wheel events required per navigation step (#83). A stepless device (Magic
-    /// Mouse, trackpad) fires a *stream* of scroll events for one flick, so the
-    /// pre-#83 "one event = one step" raced through tabs/panes. This is a software
-    /// detent: `3` (default) takes a step every third event, `1` restores the
-    /// pre-#83 one-step-per-event feel, higher values damp the wheel further. `0`
-    /// is treated as `1`. Ignored when `scroll` is `off`. See
-    /// [`crate::scroll::accumulate`].
-    pub scroll_throttle: usize,
+    /// Cooldown window in **milliseconds** between wheel navigation steps (#83). A
+    /// stepless device (Magic Mouse, trackpad) fires a *burst* of scroll events for
+    /// one flick, so the pre-#83 "one event = one step" raced through tabs/panes.
+    /// This is a leading-edge rate limiter: the first event navigates at once and
+    /// opens the window, and events arriving within `scroll_cooldown_ms` of it are
+    /// dropped — so a flick advances about one step per window while a deliberate,
+    /// well-spaced notch always steps immediately. `40` (default) suits both a
+    /// notched wheel and a trackpad; raise it to damp the wheel further. `0`
+    /// disables the limiter (every event steps, the pre-#83 feel). Ignored when
+    /// `scroll` is `off`. See [`crate::scroll::gate`].
+    pub scroll_cooldown_ms: usize,
 }
 
 impl Config {
@@ -134,9 +137,10 @@ impl Config {
     /// Default wheel behaviour — `Tab`, matching zellij's stock tab-bar (scroll
     /// switches tabs). Set `pane` to walk panes, `off` to disable (#80).
     pub const DEFAULT_SCROLL: ScrollMode = ScrollMode::Tab;
-    /// Default wheel throttle — a step every `3` events, taming stepless devices
-    /// out of the box. Set `1` to restore the pre-#83 one-step-per-event feel (#83).
-    pub const DEFAULT_SCROLL_THROTTLE: usize = 3;
+    /// Default wheel cooldown — `40` ms between steps, taming a stepless device's
+    /// flick burst out of the box while still letting a deliberate notch step at
+    /// once. Set `0` to disable the limiter (the pre-#83 one-step-per-event feel) (#83).
+    pub const DEFAULT_SCROLL_COOLDOWN_MS: usize = 40;
 
     /// Parse the configuration map, falling back to a default for any missing or
     /// malformed value. Total: never panics on bad input.
@@ -199,10 +203,10 @@ impl Config {
                 .get("scroll")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_SCROLL),
-            scroll_throttle: configuration
-                .get("scroll_throttle")
+            scroll_cooldown_ms: configuration
+                .get("scroll_cooldown_ms")
                 .and_then(|raw| raw.parse().ok())
-                .unwrap_or(Self::DEFAULT_SCROLL_THROTTLE),
+                .unwrap_or(Self::DEFAULT_SCROLL_COOLDOWN_MS),
         }
     }
 
@@ -255,7 +259,7 @@ mod tests {
         assert!(config.perspective);
         assert!(config.new_tab_button);
         assert_eq!(config.scroll, ScrollMode::Tab);
-        assert_eq!(config.scroll_throttle, 3);
+        assert_eq!(config.scroll_cooldown_ms, 40);
     }
 
     #[test]
@@ -465,24 +469,36 @@ mod tests {
     }
 
     #[test]
-    fn parses_scroll_throttle() {
-        // A valid count is preserved verbatim; `1` is the documented value for
-        // restoring the pre-#83 one-step-per-event feel.
-        assert_eq!(config_from(&[("scroll_throttle", "5")]).scroll_throttle, 5);
-        assert_eq!(config_from(&[("scroll_throttle", "1")]).scroll_throttle, 1);
+    fn parses_scroll_cooldown_ms() {
+        // A valid millisecond window is preserved verbatim; `0` is the documented
+        // value for disabling the limiter (the pre-#83 one-step-per-event feel).
+        assert_eq!(
+            config_from(&[("scroll_cooldown_ms", "80")]).scroll_cooldown_ms,
+            80
+        );
+        assert_eq!(
+            config_from(&[("scroll_cooldown_ms", "0")]).scroll_cooldown_ms,
+            0
+        );
     }
 
     #[test]
-    fn malformed_scroll_throttle_falls_back() {
+    fn malformed_scroll_cooldown_ms_falls_back() {
         // Non-numeric / negative / empty values keep the taming default. An
-        // explicit `0` parses fine here (range concerns live at the use site,
-        // where `accumulate` treats it as `1`).
+        // explicit `0` parses fine here (it disables the limiter at the use site,
+        // where `gate` short-circuits to `Navigate`).
         assert_eq!(
-            config_from(&[("scroll_throttle", "fast")]).scroll_throttle,
-            3
+            config_from(&[("scroll_cooldown_ms", "fast")]).scroll_cooldown_ms,
+            40
         );
-        assert_eq!(config_from(&[("scroll_throttle", "-1")]).scroll_throttle, 3);
-        assert_eq!(config_from(&[("scroll_throttle", "")]).scroll_throttle, 3);
+        assert_eq!(
+            config_from(&[("scroll_cooldown_ms", "-1")]).scroll_cooldown_ms,
+            40
+        );
+        assert_eq!(
+            config_from(&[("scroll_cooldown_ms", "")]).scroll_cooldown_ms,
+            40
+        );
     }
 
     #[test]

@@ -74,6 +74,11 @@ pub struct State {
     /// "close tab N" against the live frame. Empty whenever the close button is
     /// disabled, only one tab is open, or no frame has drawn yet.
     close_layout: Vec<line::CloseHit>,
+    /// Whether the wheel cooldown window is currently open (#83). The first scroll
+    /// event navigates and sets this, arming a `config.scroll_cooldown_ms` timer;
+    /// events arriving while it's set are dropped (see [`scroll::gate`]), and the
+    /// `Timer` event clears it. Starts `false`.
+    scroll_cooling: bool,
 }
 
 /// One visible tab's drawn pane geometry, captured each render so a later click
@@ -192,6 +197,9 @@ impl ZellijPlugin for State {
             EventType::PaneUpdate,
             EventType::ModeUpdate,
             EventType::Mouse,
+            // Drives the wheel cooldown window (#83): the `set_timeout` armed on a
+            // scroll step delivers back a `Timer` that reopens the wheel.
+            EventType::Timer,
         ]);
     }
 
@@ -290,15 +298,22 @@ impl ZellijPlugin for State {
             }
             Event::Mouse(Mouse::ScrollUp(_)) => {
                 // Wheel up = forward (next tab / next pane), matching zellij's
-                // stock tab-bar direction. The line count is ignored — one event
-                // is one step, for predictability. The navigation arrives back as
-                // a Tab/Pane update that drives the repaint, so request none (#80).
+                // stock tab-bar direction. The line count is ignored — each event
+                // is one notch, rate-limited by the cooldown window (#83). The
+                // navigation arrives back as a Tab/Pane update that drives the
+                // repaint, so request none (#80).
                 self.scroll(scroll::ScrollDir::Forward);
                 false
             }
             Event::Mouse(Mouse::ScrollDown(_)) => {
                 // Wheel down = backward (previous tab / previous pane). See above.
                 self.scroll(scroll::ScrollDir::Backward);
+                false
+            }
+            Event::Timer(_) => {
+                // The wheel cooldown window (#83) elapsed — reopen the wheel so the
+                // next scroll event navigates again. No repaint of our own.
+                self.scroll_cooling = false;
                 false
             }
             // Remaining events need no repaint.
@@ -565,15 +580,35 @@ impl State {
             .map(|hit| hit.position)
     }
 
-    /// Dispatch a wheel step to the configured navigation: switch tabs, walk
+    /// Dispatch a wheel event to the configured navigation: switch tabs, walk
     /// panes, or do nothing (#80). zellij scroll events carry no position, so the
     /// gesture is bar-wide — it acts on the live tab/pane set, not a clicked spot.
-    fn scroll(&self, dir: scroll::ScrollDir) {
-        match self.config.scroll {
-            scroll::ScrollMode::Off => {}
-            scroll::ScrollMode::Tab => self.scroll_tabs(dir),
-            scroll::ScrollMode::Pane => self.scroll_panes(dir),
+    ///
+    /// A leading-edge cooldown rate-limits the wheel (#83): the first event
+    /// navigates at once and opens a `scroll_cooldown_ms` window; events inside it
+    /// are dropped, so a stepless device's burst no longer races through
+    /// tabs/panes. `off` mode short-circuits before the limiter, leaving the wheel
+    /// at rest.
+    fn scroll(&mut self, dir: scroll::ScrollDir) {
+        // Resolve the per-mode handler up front so `off` short-circuits before
+        // the limiter ever sees the event — and so every arm here is live (an
+        // `off` arm after the gate would be unreachable dead code).
+        let step: fn(&Self, scroll::ScrollDir) = match self.config.scroll {
+            scroll::ScrollMode::Off => return,
+            scroll::ScrollMode::Tab => Self::scroll_tabs,
+            scroll::ScrollMode::Pane => Self::scroll_panes,
+        };
+        match scroll::gate(self.scroll_cooling, self.config.scroll_cooldown_ms) {
+            scroll::Gate::Ignore => return,
+            scroll::Gate::NavigateThenCool => {
+                // Open the window and arm the timer that will reopen the wheel
+                // (`set_timeout` takes seconds; the config is milliseconds).
+                self.scroll_cooling = true;
+                set_timeout(self.config.scroll_cooldown_ms as f64 / 1000.0);
+            }
+            scroll::Gate::Navigate => {}
         }
+        step(self, dir);
     }
 
     /// Switch one tab in `dir` from the active tab, wrapping at the ends. No-op
@@ -1528,16 +1563,74 @@ mod tests {
     fn scroll_dispatches_each_mode_without_panicking() {
         // Host effects (`switch_tab_to` / `focus_terminal_pane`) are no-op stubs
         // off-wasm, so the contract is that every mode dispatches both directions
-        // without panicking over the live tab/pane set.
+        // without panicking over the live tab/pane set. Disable the cooldown
+        // (`scroll_cooldown_ms = 0`) so every event reaches the dispatch rather
+        // than being dropped inside the window.
         for mode in [
             scroll::ScrollMode::Tab,
             scroll::ScrollMode::Pane,
             scroll::ScrollMode::Off,
         ] {
-            let state = scroll_state(mode, Some(20));
+            let mut state = scroll_state(mode, Some(20));
+            state.config.scroll_cooldown_ms = 0;
             state.scroll(scroll::ScrollDir::Forward);
             state.scroll(scroll::ScrollDir::Backward);
         }
+    }
+
+    #[test]
+    fn scroll_opens_a_cooldown_on_the_first_event_and_drops_the_rest() {
+        // Leading edge (#83): the first wheel event navigates and opens the
+        // cooldown window; further events arriving inside it are dropped, so the
+        // flag stays set rather than racing through tabs.
+        let mut state = scroll_state(scroll::ScrollMode::Tab, Some(10));
+        assert!(!state.scroll_cooling);
+        state.scroll(scroll::ScrollDir::Forward);
+        assert!(
+            state.scroll_cooling,
+            "first event opens the cooldown window"
+        );
+        state.scroll(scroll::ScrollDir::Forward);
+        assert!(
+            state.scroll_cooling,
+            "events inside the window are dropped, leaving it open"
+        );
+    }
+
+    #[test]
+    fn scroll_timer_reopens_the_wheel() {
+        // The `Timer` the cooldown armed clears the window, so the next wheel
+        // event navigates again.
+        let mut state = scroll_state(scroll::ScrollMode::Tab, Some(10));
+        state.scroll(scroll::ScrollDir::Forward);
+        assert!(state.scroll_cooling);
+        assert!(!state.update(Event::Timer(0.04)));
+        assert!(
+            !state.scroll_cooling,
+            "the cooldown timer reopens the wheel"
+        );
+    }
+
+    #[test]
+    fn scroll_zero_cooldown_never_cools() {
+        // `scroll_cooldown_ms = 0` disables the limiter: every event navigates and
+        // no window opens (the pre-#83 one-step-per-event feel).
+        let mut state = scroll_state(scroll::ScrollMode::Tab, Some(10));
+        state.config.scroll_cooldown_ms = 0;
+        state.scroll(scroll::ScrollDir::Forward);
+        assert!(!state.scroll_cooling);
+        state.scroll(scroll::ScrollDir::Forward);
+        assert!(!state.scroll_cooling);
+    }
+
+    #[test]
+    fn scroll_off_mode_never_cools() {
+        // `off` short-circuits before the limiter, so it never opens a cooldown
+        // window — toggling back to tab/pane later starts from a clean state.
+        let mut state = scroll_state(scroll::ScrollMode::Off, Some(10));
+        state.scroll(scroll::ScrollDir::Forward);
+        state.scroll(scroll::ScrollDir::Forward);
+        assert!(!state.scroll_cooling);
     }
 
     #[test]

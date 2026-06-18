@@ -87,7 +87,7 @@ default_tab_template {
             active_width "24"
             align "center"                              // "center" slides to keep the active tab centered; "left" anchors the row (all-fit only)
             reorder "false"                             // drag a tab to reorder; "true" also needs RunActionsAsUser
-            close_button "false"                        // "true" stamps a clickable "×" on each tab to close it
+            close_button "false"                        // "true" stamps a clickable close button on each tab
             scroll "tab"                                // mouse wheel: "tab" (default) switch tabs / "pane" walk panes across tabs / "off"
             tab_gap "2"                                 // cleared columns between tab blocks; "0" packs them flush
             gradient "sheen"                            // pane fill sweep: "sheen" (default) / "weave" (alternating rows) / "off" (flat)
@@ -125,7 +125,7 @@ Contributors hacking on the plugin [build from source](#build-from-source) and p
 >
 > **Enabling `reorder`** requests a third permission, `RunActionsAsUser` (for the `MoveTabByTabId` action a tab drag performs). Granting is all-or-nothing for tab-template plugins, so when you set `reorder "true"` you must **re-run step 2** (the grant prompt then lists all three permissions) and restart — otherwise the bar freezes with no prompt. Left at the default (`false`), the plugin requests only the two permissions above, so an existing install keeps working unchanged across updates.
 >
-> **`close_button` — click to close a tab.** When `true`, each tab block stamps a small `×` in its **top-right** cell; left-clicking exactly that cell closes the tab (via `close_tab_with_index`, which falls under the existing `ChangeApplicationState` grant — no re-grant needed). The `×` only appears on blocks wide enough to draw a per-pane minimap, and never on the **last** remaining tab, so you can't close the bar out of existence. A click anywhere else on the block keeps its usual behavior (switch tab / focus the clicked pane), since the close target is that single cell, not the whole column. Default `false` keeps the strip uncluttered for keyboard-driven users; set `true` if you reach for the mouse.
+> **`close_button` — click to close a tab.** When `true`, each tab block stamps a small close glyph (the Nerd Font *close-circle*, or a plain `×` where your terminal runs zellij's simplified UI without a Nerd Font) in its **top-right** cell; left-clicking exactly that cell closes the tab (via `close_tab_with_index`, which falls under the existing `ChangeApplicationState` grant — no re-grant needed). The glyph only appears on blocks wide enough to draw a per-pane minimap, and never on the **last** remaining tab, so you can't close the bar out of existence. On a perspective-receded inactive tab it rides the first colored row instead of the half-transparent top inset, so it always sits inside the tab. A click anywhere else on the block keeps its usual behavior (switch tab / focus the clicked pane), since the close target is that single cell, not the whole column. Default `false` keeps the strip uncluttered for keyboard-driven users; set `true` if you reach for the mouse.
 
 <details>
 <summary>Load straight from the release URL (quick try — does not auto-update)</summary>

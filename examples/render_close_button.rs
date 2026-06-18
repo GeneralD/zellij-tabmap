@@ -1,11 +1,19 @@
-//! Visual sample for #86 — the opt-in "×" close button on each tab block.
+//! Visual sample for #86 — the opt-in close button on each tab block.
 //!
-//! When `close_button` is enabled, every grid-rung tab block stamps a small "×"
-//! into its **top-right** cell — the mirror of the top-left `⌘N` shortcut badge.
-//! A left-click on exactly that cell closes the tab; the glyph is white on the
-//! active tab and muted toward the fill on inactive ones, so it reads as a quiet
-//! affordance rather than competing with the minimap. It never appears on the
-//! last remaining tab (here all four are shown, so each carries its "×").
+//! When `close_button` is enabled, every grid-rung tab block stamps a small
+//! close glyph (the Nerd Font `md-close_circle`) into its **top-right** cell —
+//! the mirror of the top-left `⌘N` shortcut badge. A left-click on exactly that
+//! cell closes the tab; the glyph is white on the active tab and muted toward
+//! the fill on inactive ones, so it reads as a quiet affordance rather than
+//! competing with the minimap. On the perspective-receded inactive tabs it
+//! rides the first colored row instead of the half-transparent top inset, so it
+//! sits inside the band; the active tab keeps it on top beside the badge. It
+//! never appears on the last remaining tab (here all four are shown, so each
+//! carries its close glyph).
+//!
+//! This sample drives `paint::bar` directly, so it shows the Nerd Font glyph;
+//! the plugin downgrades it to a plain `×` on terminals running zellij's
+//! simplified UI (see `State::render`).
 //!
 //! This drives the **real** render path — `paint::bar` forwards `close: true`
 //! through `tab_block::assemble` into `minimap::render`, the same code the plugin
@@ -68,8 +76,8 @@ fn main() {
         ],
     );
 
-    // Four tabs, none of them the lone survivor, so every block draws its "×".
-    // A plain `pack` (no "+" button) keeps the focus on the close affordance.
+    // Four tabs, none of them the lone survivor, so every block draws its close
+    // glyph. A plain `pack` (no "+" button) keeps the focus on the affordance.
     let layout = line::pack(160, 0, line::ACTIVE_MAX, 4, 1, Alignment::Left, GAP);
     let bar = paint::bar(
         ROWS,
@@ -80,7 +88,7 @@ fn main() {
         GradientSpec::from_mode(GradientMode::Sheen),
         true,
         true,
-        true, // close_button enabled — stamp the "×" on every block
+        true, // close_button enabled — stamp the close glyph on every block
     );
 
     // Hide the cursor so a held screenshot doesn't catch a stray cursor block

@@ -362,13 +362,15 @@ template-loaded plugin — it sends users into a duplicated-pane recovery path.
 
 ## 15. Adding a new permission **silently freezes the bar** for existing users (zellij#4982)
 
-Once a user grants permissions for a plugin, that grant is keyed to the
-**exact set of permissions** they approved and stored in `permissions.kdl`.
-If a new release adds a *new* permission to the `request_permission()` call,
-the existing grant does **not** cover it — and because the bar is
-layout-loaded (non-selectable, see #2), zellij cannot present the interactive
-prompt again. The result: the new permission is silently never granted,
-the feature that needs it quietly fails for **all existing users** until they
+Once a user grants permissions for a plugin, zellij stores the approved
+**set of permissions** in `permissions.kdl`, keyed by the plugin's **location
+string** (see #1, #11). If a new release adds a *new* permission to the
+`request_permission()` call, the cached set does **not** cover it — and
+because the bar is layout-loaded from `default_tab_template`, zellij cannot
+present the interactive prompt again (zellij#4982, see #2). zellij withholds
+event delivery until the *full* requested set is granted, so `permitted`
+never flips and `render()` keeps bailing: the **whole bar freezes** (it draws
+nothing, not just the new feature) for **all existing users** until they
 manually re-grant.
 
 **Way out (design rule):** any feature that requires a permission beyond the
@@ -397,5 +399,6 @@ Confirmed to fall under the existing `ChangeApplicationState` grant (see #15):
 no new permission is required.
 
 The `position` argument is the **0-based tab index** matching
-`TabInfo::position`. Store it on the `TabHit` geometry struct and pass it
-directly from the `LeftClick` close-button handler.
+`TabInfo::position` — already carried on the `TabHit` geometry struct as
+`TabHit.position` (`src/line.rs`), so the `LeftClick` close-button handler
+passes it straight through.

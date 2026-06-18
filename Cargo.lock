@@ -2725,7 +2725,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-tabmap"
-version = "0.9.1"
+version = "0.11.0"
 dependencies = [
  "unicode-width",
  "zellij-tile",

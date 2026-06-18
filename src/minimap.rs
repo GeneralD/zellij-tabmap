@@ -50,7 +50,7 @@ pub(crate) const CLOSE_GLYPH_ASCII: char = '×';
 /// theme's alert red ([`Palette::alert`]); the plain `×` reads better in black.
 pub(crate) const CLOSE_FG_ASCII: Rgb = (0, 0, 0);
 
-/// Which close affordance a tab block stamps in its top-right corner, in the form
+/// Which close affordance a tab block stamps near its top-right corner, in the form
 /// the terminal can draw (#86, #94). `Off` draws none. Both on-variants sit one
 /// cell in from the right edge and differ only in glyph and color:
 /// - [`NerdFont`](Close::NerdFont): [`CLOSE_GLYPH`] in alert red.

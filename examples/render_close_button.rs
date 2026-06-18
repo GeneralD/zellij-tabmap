@@ -1,9 +1,10 @@
 //! Visual sample for #86 — the close button on each tab block (on by default
 //! since #94).
 //!
-//! When `close_button` is enabled, a tab block stamps a small close glyph into
-//! its **top-right corner** — balancing the top-left `⌘N` shortcut badge. A
-//! left-click on exactly that cell closes the tab. The glyph form and color are
+//! When `close_button` is enabled, a tab block stamps a small close glyph
+//! **near its top-right corner** — balancing the top-left `⌘N` shortcut badge.
+//! A left-click on exactly that glyph cell closes the tab. The glyph form and
+//! color are
 //! **per terminal** (#94), but both modes seat the mark one cell in from the
 //! right edge (`pw - 2`), leaving a fill cell of breathing room at the corner;
 //! they differ only in glyph and color:

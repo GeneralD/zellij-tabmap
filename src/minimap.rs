@@ -926,8 +926,10 @@ pub fn render(
             }
             if tr == close_text_row && close && c == close_col {
                 // The close glyph mirrors the badge in the opposite corner (#86),
-                // white on the active tab and muted toward the fill on inactive
-                // ones. It rides `close_text_row` — the top row normally, the
+                // but in zellij's own alert red ([`Palette::alert`], from the
+                // theme's `exit_code_error.base`) — full red on the active tab,
+                // toned toward the fill on inactive ones. It rides
+                // `close_text_row` — the top row normally, the
                 // first band row on a receded tab — so it is sampled over that
                 // row's upper pixel (`2 * close_text_row`), which is always a
                 // painted fill rather than the receded inset the badge sits on
@@ -948,10 +950,10 @@ pub fn render(
                     None => put_default_bg(&mut out),
                 }
                 let close_fg = if active {
-                    ACTIVE_FG
+                    palette.alert()
                 } else {
                     crate::color::mixed(
-                        ACTIVE_FG,
+                        palette.alert(),
                         fill.unwrap_or(crate::color::CANVAS),
                         INACTIVE_LABEL_BLEND,
                     )
@@ -2477,6 +2479,68 @@ mod tests {
         assert!(
             lower.iter().all(|l| !l.contains(CLOSE_GLYPH)),
             "no × on any lower row: {lower:?}"
+        );
+    }
+
+    #[test]
+    fn close_glyph_renders_in_the_alert_red() {
+        // The close glyph is painted in the theme's alert red (#86) — zellij's
+        // `exit_code_error.base`, carried on the palette as `alert`. A
+        // distinctive value pins that the foreground is the alert color and not
+        // the old white badge shade: full red on the active tab, toned toward
+        // the fill (never the raw red, never white) on an inactive one.
+        let alert = (222, 11, 99);
+        let palette = test_palette().with_alert(alert);
+        let active = render(
+            &one_plain(),
+            &palette,
+            12,
+            3,
+            0,
+            LabelMode::None,
+            None,
+            true,
+            GradientSpec::OFF,
+            true,
+        );
+        let active_top = active.lines().next().unwrap_or_default();
+        assert!(
+            active_top.contains(CLOSE_GLYPH),
+            "close glyph rides the top row: {active_top:?}"
+        );
+        assert!(
+            active_top.contains(&fg(alert)),
+            "active close glyph is painted in the full alert red: {active_top:?}"
+        );
+        assert!(
+            !active_top.contains(&fg(ACTIVE_FG)),
+            "active close glyph no longer borrows the white badge shade: {active_top:?}"
+        );
+
+        let inactive = render(
+            &one_plain(),
+            &palette,
+            12,
+            3,
+            0,
+            LabelMode::None,
+            None,
+            true,
+            GradientSpec::OFF,
+            false,
+        );
+        let inactive_top = inactive.lines().next().unwrap_or_default();
+        assert!(
+            inactive_top.contains(CLOSE_GLYPH),
+            "inactive close glyph still rides the top row: {inactive_top:?}"
+        );
+        assert!(
+            !inactive_top.contains(&fg(alert)),
+            "inactive close glyph is toned toward the fill, not the raw red: {inactive_top:?}"
+        );
+        assert!(
+            !inactive_top.contains(&fg(ACTIVE_FG)),
+            "inactive close glyph is not the white badge shade either: {inactive_top:?}"
         );
     }
 

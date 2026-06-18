@@ -124,7 +124,9 @@ fn rgb(c: PaletteColor) -> color::Rgb {
 /// focus ring is derived from that fill as a luminance-shifted shade — the
 /// outline stays in the pane's own hue family (issue #47).
 /// `frame_highlight.base` is the accent that seeds the degraded-rung hint
-/// text shade ([`color::Palette::hint`], issue #32).
+/// text shade ([`color::Palette::hint`], issue #32). `exit_code_error.base` —
+/// zellij's own semantic red — colors the close glyph ([`color::Palette::alert`],
+/// issue #86).
 fn palette_from_style(style: &Style) -> color::Palette {
     let colors = &style.colors;
     let players = colors.multiplayer_user_colors;
@@ -144,6 +146,7 @@ fn palette_from_style(style: &Style) -> color::Palette {
     .map(rgb)
     .collect();
     color::Palette::new(slots, rgb(colors.frame_highlight.base))
+        .with_alert(rgb(colors.exit_code_error.base))
 }
 
 /// Downgrade the close affordance to its ASCII fallback under a simplified UI.

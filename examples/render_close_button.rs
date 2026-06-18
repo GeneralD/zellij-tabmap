@@ -3,9 +3,10 @@
 //! When `close_button` is enabled, every grid-rung tab block stamps a small
 //! close glyph (the Nerd Font `md-close_circle`) into its **top-right** cell —
 //! the mirror of the top-left `⌘N` shortcut badge. A left-click on exactly that
-//! cell closes the tab; the glyph is white on the active tab and muted toward
-//! the fill on inactive ones, so it reads as a quiet affordance rather than
-//! competing with the minimap. On the perspective-receded inactive tabs it
+//! cell closes the tab; the glyph is zellij's alert red (the theme's
+//! `exit_code_error.base`) — full red on the active tab and toned toward the
+//! fill on inactive ones, so it reads as a quiet "close here" affordance rather
+//! than competing with the minimap. On the perspective-receded inactive tabs it
 //! rides the first colored row instead of the half-transparent top inset, so it
 //! sits inside the band; the active tab keeps it on top beside the badge. It
 //! never appears on the last remaining tab (here all four are shown, so each
@@ -46,7 +47,10 @@ fn main() {
             (247, 118, 142), // red
         ],
         (255, 158, 100),
-    );
+    )
+    // Tokyonight's red as the alert/close-glyph color, standing in for the
+    // theme's `exit_code_error.base` the plugin reads at runtime (#86).
+    .with_alert((247, 118, 142));
     let mut panes = BTreeMap::new();
     // ⌘1 — a two-column split.
     panes.insert(

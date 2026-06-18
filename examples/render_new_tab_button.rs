@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 
 use zellij_tabmap::color::Palette;
 use zellij_tabmap::line::{self, Alignment};
-use zellij_tabmap::minimap::{GradientMode, GradientSpec, PaneRect};
+use zellij_tabmap::minimap::{Close, GradientMode, GradientSpec, PaneRect};
 use zellij_tabmap::paint;
 
 const ROWS: usize = 4;
@@ -84,7 +84,7 @@ fn main() {
         GradientSpec::from_mode(GradientMode::Sheen),
         true,
         true,
-        false,
+        Close::Off,
     );
 
     // Hide the cursor so a held screenshot doesn't catch a stray cursor block

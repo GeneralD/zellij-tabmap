@@ -154,22 +154,6 @@ fn palette_from_style(style: &Style) -> color::Palette {
         .with_alert(rgb(colors.exit_code_error.base))
 }
 
-/// Downgrade the close affordance to its ASCII fallback under a simplified UI.
-/// The renderer always stamps the Nerd Font [`minimap::CLOSE_GLYPH`]; a terminal
-/// without a Nerd Font can't draw it, so when `simplified_ui` is set the one
-/// uniform glyph is swapped for [`minimap::CLOSE_GLYPH_ASCII`] across the whole
-/// bar before it is printed. That glyph (U+F0159) appears nowhere else in the
-/// bar, so the replacement is unambiguous; a no-op when a Nerd Font is available
-/// (#86). Kept pure so the swap is unit-testable off-wasm. The `contains` guard
-/// skips `replace`'s unconditional allocation when no glyph was stamped (the
-/// `close_button=false` default), so the swap costs nothing on a bar without one.
-fn fit_close_glyph(bar: String, simplified_ui: bool) -> String {
-    if !simplified_ui || !bar.contains(minimap::CLOSE_GLYPH) {
-        return bar;
-    }
-    bar.replace(minimap::CLOSE_GLYPH, minimap::CLOSE_GLYPH_ASCII)
-}
-
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         // Deliberately NO `set_selectable(false)` here: the pane stays
@@ -395,27 +379,35 @@ impl ZellijPlugin for State {
         // session (#86). Per tab it lands on the active tab — and, with perspective
         // off, on every tab — but not on inactive perspective tabs (that per-tab
         // gate lives in `paint::bar` and in the `close_layout` filter below, kept
-        // identical so draw and hit-test never disagree).
-        let close = self.config.close_button && self.tabs.len() > 1;
+        // identical so draw and hit-test never disagree). The glyph form follows
+        // the terminal: the ASCII `×` under a simplified UI (no Nerd Font), the
+        // Nerd Font glyph otherwise — chosen here, the one spot that knows the
+        // font capability (#94).
+        let close = if self.config.close_button && self.tabs.len() > 1 {
+            if self.simplified_ui {
+                minimap::Close::Ascii
+            } else {
+                minimap::Close::NerdFont
+            }
+        } else {
+            minimap::Close::Off
+        };
 
-        // The renderer always stamps the Nerd Font close glyph; downgrade it to
-        // the ASCII fallback here when the terminal can't draw it (#86), the one
-        // spot that knows the font capability.
+        // `close` already carries the per-terminal glyph form (#86, #94), so the
+        // renderer stamps the right glyph, column, and color directly — no
+        // post-render swap.
         print!(
             "{}",
-            fit_close_glyph(
-                paint::bar(
-                    rows,
-                    &layout,
-                    &panes_by_position,
-                    &self.palette,
-                    &self.config.shortcut_prefix,
-                    self.config.gradient_spec(),
-                    self.config.inactive_dim,
-                    self.config.perspective,
-                    close,
-                ),
-                self.simplified_ui,
+            paint::bar(
+                rows,
+                &layout,
+                &panes_by_position,
+                &self.palette,
+                &self.config.shortcut_prefix,
+                self.config.gradient_spec(),
+                self.config.inactive_dim,
+                self.config.perspective,
+                close,
             )
         );
 
@@ -462,10 +454,12 @@ impl ZellijPlugin for State {
         // Record the close cell for each tab that drew one (#86) — the grid rungs
         // (L0–L2) that `assemble` stamps the glyph on, gated by the same
         // `active || !perspective` predicate `paint::bar` paints with, and only
-        // when `close` is set (enabled + >1 tab). The glyph lands in the block's
-        // top-right corner (last column) on the top text row — the tabs that show
-        // it never recede — so the cell is a fixed `(row 0, start + width - 1)`.
-        self.close_layout = if close {
+        // when `close` is on (enabled + >1 tab). The glyph rides the top text row
+        // — the tabs that show it never recede — seated `close.right_offset()`
+        // cells in from the block's right edge (the ASCII `×` at the last column,
+        // the Nerd Font glyph one further left, #94), the same per-mode inset the
+        // renderer paints at, so draw and hit-test never disagree.
+        self.close_layout = if close.is_on() {
             self.tab_layout
                 .iter()
                 .filter(|hit| {
@@ -478,7 +472,7 @@ impl ZellijPlugin for State {
                 .map(|hit| line::CloseHit {
                     position: hit.position,
                     row: 0,
-                    column: hit.start + hit.width - 1,
+                    column: hit.start + hit.width - close.right_offset(),
                 })
                 .collect()
         } else {
@@ -1171,25 +1165,6 @@ mod tests {
     }
 
     #[test]
-    fn fit_close_glyph_downgrades_only_under_simplified_ui() {
-        // The renderer always stamps the Nerd Font glyph; `fit_close_glyph` swaps
-        // it for the ASCII fallback only when the terminal lacks a Nerd Font, and
-        // touches nothing else (#86).
-        let painted = format!("a{0}b{0}c", minimap::CLOSE_GLYPH);
-
-        assert_eq!(
-            fit_close_glyph(painted.clone(), false),
-            painted,
-            "a Nerd Font terminal keeps the fancy glyph untouched"
-        );
-        assert_eq!(
-            fit_close_glyph(painted, true),
-            format!("a{0}b{0}c", minimap::CLOSE_GLYPH_ASCII),
-            "a simplified UI swaps every close glyph for the ASCII fallback"
-        );
-    }
-
-    #[test]
     fn left_click_on_a_tab_arms_a_drag_and_defers_the_repaint() {
         // The click switches tabs via the host (stubbed here) and records the
         // press as a potential drag. No repaint is requested — the switch
@@ -1867,8 +1842,9 @@ mod tests {
                 && state
                     .tab_layout
                     .iter()
-                    .any(|t| t.position == hit.position && hit.column == t.start + t.width - 1)),
-            "each close cell sits in its block's top-right corner (last column)"
+                    .any(|t| t.position == hit.position && hit.column == t.start + t.width - 2)),
+            "each close cell sits one cell in from its block's right edge \
+             (the Nerd Font glyph's column, #94)"
         );
 
         state.tabs = vec![TabInfo {
@@ -1881,7 +1857,11 @@ mod tests {
             "a lone tab records no close cell — it can never be closed"
         );
 
-        state.config = Config::default();
+        state.config = Config {
+            close_button: false,
+            perspective: false,
+            ..Default::default()
+        };
         state.tabs = vec![
             TabInfo {
                 active: true,
@@ -1893,6 +1873,40 @@ mod tests {
         assert!(
             state.close_layout.is_empty(),
             "the disabled close button records no cells"
+        );
+    }
+
+    #[test]
+    fn simplified_ui_seats_the_close_cell_flush_in_the_last_column() {
+        // Under a simplified UI the ASCII "×" replaces the Nerd Font glyph and
+        // sits flush in the block's last column (`start + width - 1`), one cell
+        // right of the Nerd Font seat (#94). The recorded geometry must follow
+        // the painted column so a click still lands on the mark.
+        let mut state = State::default();
+        state.permitted = true;
+        state.simplified_ui = true;
+        state.config = Config {
+            close_button: true,
+            perspective: false,
+            ..Default::default()
+        };
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                ..tab(0, 1)
+            },
+            tab(1, 2),
+        ];
+
+        state.render(MIN_ROWS, 80);
+        assert_eq!(state.close_layout.len(), 2, "both wide tabs record a cell");
+        assert!(
+            state.close_layout.iter().all(|hit| hit.row == 0
+                && state
+                    .tab_layout
+                    .iter()
+                    .any(|t| t.position == hit.position && hit.column == t.start + t.width - 1)),
+            "the ASCII close cell sits flush in the last column"
         );
     }
 

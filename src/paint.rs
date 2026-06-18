@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use crate::color::Palette;
 use crate::line::LineLayout;
-use crate::minimap::{GradientSpec, PaneRect};
+use crate::minimap::{Close, GradientSpec, PaneRect};
 use crate::tab_block::{self, TabBlock};
 
 /// Render a packed [`LineLayout`] into the full multi-row bar string.
@@ -34,11 +34,11 @@ use crate::tab_block::{self, TabBlock};
 /// The `← +N` / `+N →` overflow markers are placed at their own columns on the
 /// middle row.
 ///
-/// `close` enables the top-right close affordance (#86); the caller passes `true`
-/// only when the feature is on and closing a tab is safe (more than one tab open).
-/// It lands per tab on the active tab — and, when `perspective` is off, on every
-/// tab — but not on inactive perspective tabs, whose receded corner would carry it
-/// unbalanced.
+/// `close` ([`Close`]) enables the top-right close affordance (#86); the caller
+/// passes an on-variant (carrying the Nerd Font vs ASCII form, #94) only when the
+/// feature is on and closing a tab is safe (more than one tab open). It lands per
+/// tab on the active tab — and, when `perspective` is off, on every tab — but not
+/// on inactive perspective tabs, whose receded corner would carry it unbalanced.
 #[allow(clippy::too_many_arguments)]
 pub fn bar(
     rows: usize,
@@ -49,7 +49,7 @@ pub fn bar(
     gradient: GradientSpec,
     inactive_dim: bool,
     perspective: bool,
-    close: bool,
+    close: Close,
 ) -> String {
     // #59: inactive tabs render through the canvas-receded palette while the
     // active tab keeps full vibrancy, so the selected tab reads at a glance.
@@ -70,9 +70,15 @@ pub fn bar(
             };
             // Close lands on the active tab, plus every tab when perspective is
             // off (#86) — inactive perspective tabs recede, where a corner glyph
-            // reads unbalanced, so they skip it. Same predicate as the click
-            // hit-test in `State::render`, so draw and hit-test never disagree.
-            let tab_close = close && (hit.active || !perspective);
+            // reads unbalanced, so they skip it (carrying `Close::Off`). Same
+            // predicate as the click hit-test in `State::render`, so draw and
+            // hit-test never disagree. Tabs that keep it carry the bar-wide form
+            // (#94).
+            let tab_close = if close.is_on() && (hit.active || !perspective) {
+                close
+            } else {
+                Close::Off
+            };
             tab_block::assemble(
                 panes,
                 tab_palette,
@@ -308,7 +314,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
-            false,
+            Close::Off,
         );
         for row in 1..=3 {
             assert!(
@@ -337,7 +343,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
-            false,
+            Close::Off,
         );
         assert!(out.contains("\u{2318}4"), "position 3 → ⌘4");
         assert!(out.contains("\u{2318}5"), "position 4 → ⌘5");
@@ -372,7 +378,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
-            false,
+            Close::Off,
         );
         assert!(
             out.contains("\u{2318}2"),
@@ -425,7 +431,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             false,
-            false,
+            Close::Off,
         );
         assert!(
             out.contains(&fg(palette.color_for(0))),
@@ -463,7 +469,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
-            false,
+            Close::Off,
         );
         assert!(
             out.contains(&fg(palette.color_for(1))),
@@ -499,7 +505,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
-            false,
+            Close::Off,
         );
         // Middle row (row 2): left marker at col 1, right marker at col 8.
         assert!(out.contains("\u{1b}[2;1H\u{2190} +2 "));
@@ -529,7 +535,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
-            false,
+            Close::Off,
         );
         // rows=3 → middle row index 1 → 1-based row 2, button start col 18+1=19.
         assert!(
@@ -557,7 +563,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             false,
-            false,
+            Close::Off,
         );
         assert!(!out.contains('+'), "no button reserved → no + drawn");
     }

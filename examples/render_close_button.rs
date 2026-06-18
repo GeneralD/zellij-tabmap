@@ -1,35 +1,42 @@
-//! Visual sample for #86 — the opt-in close button on each tab block.
+//! Visual sample for #86 — the close button on each tab block (on by default
+//! since #94).
 //!
-//! When `close_button` is enabled, a tab block stamps a small close glyph (the
-//! Nerd Font `md-close_circle`) into its **top-right corner** — balancing the
-//! top-left `⌘N` shortcut badge. A left-click on exactly that cell closes the
-//! tab; the glyph is zellij's alert red (the theme's `exit_code_error.base`),
-//! full red on the active tab and toned toward the fill where an inactive tab
-//! still carries it, so it reads as a quiet "close here" affordance rather than
-//! competing with the minimap. It lands on the **active tab** — and, when the
-//! perspective depth cue is off, on **every** tab — but not on the
-//! perspective-receded inactive tabs, whose inset corner would carry it
-//! unbalanced. This sample runs with perspective **on**, so only the active
-//! (lifted) tab shows the glyph; the receded inactive tabs deliberately show
-//! none. It never appears on the last remaining tab either.
+//! When `close_button` is enabled, a tab block stamps a small close glyph into
+//! its **top-right corner** — balancing the top-left `⌘N` shortcut badge. A
+//! left-click on exactly that cell closes the tab. The glyph form, color, and
+//! exact column are **per terminal** (#94):
 //!
-//! This sample drives `paint::bar` directly, so it shows the Nerd Font glyph;
-//! the plugin downgrades it to a plain `×` on terminals running zellij's
-//! simplified UI (see `State::render`).
+//! - **Nerd Font** (default): the `md-close_circle` glyph in zellij's alert red
+//!   (the theme's `exit_code_error.base`). It is double-width, so it is seated
+//!   one cell in from the right edge (`pw - 2`) to keep its right half on the
+//!   block.
+//! - **ASCII** (zellij's simplified UI — no Nerd Font): a plain `×` painted
+//!   black, flush in the block's last column (`pw - 1`).
 //!
-//! This drives the **real** render path — `paint::bar` forwards `close: true`
+//! In both modes the glyph is full strength on the active tab and toned toward
+//! the fill where an inactive tab still carries it, so it reads as a quiet
+//! "close here" affordance rather than competing with the minimap. It lands on
+//! the **active tab** — and, when the perspective depth cue is off, on **every**
+//! tab — but not on the perspective-receded inactive tabs, whose inset corner
+//! would carry it unbalanced. This sample runs with perspective **on**, so only
+//! the active (lifted) tab shows the glyph; the receded inactive tabs
+//! deliberately show none. It never appears on the last remaining tab either.
+//!
+//! This drives the **real** render path — `paint::bar` forwards the `Close` mode
 //! through `tab_block::assemble` into `minimap::render`, the same code the plugin
 //! runs — so the preview can never drift from what ships.
 //!
 //! Not part of the plugin — run with e.g.
 //! `cargo run --example render_close_button --target aarch64-apple-darwin`
 //! (substitute your host triple to override the wasm32-wasip1 default).
+//! Pass `ascii` as the first argument to preview the simplified-UI `×` fallback
+//! instead of the Nerd Font glyph.
 
 use std::collections::BTreeMap;
 
 use zellij_tabmap::color::Palette;
 use zellij_tabmap::line::{self, Alignment};
-use zellij_tabmap::minimap::{GradientMode, GradientSpec, PaneRect};
+use zellij_tabmap::minimap::{Close, GradientMode, GradientSpec, PaneRect};
 use zellij_tabmap::paint;
 
 const ROWS: usize = 4;
@@ -81,6 +88,13 @@ fn main() {
         ],
     );
 
+    // `ascii` previews the simplified-UI `×` fallback; the default is the Nerd
+    // Font glyph the plugin uses on a fancy terminal.
+    let close = match std::env::args().nth(1).as_deref() {
+        Some("ascii") => Close::Ascii,
+        _ => Close::NerdFont,
+    };
+
     // Four tabs, none of them the lone survivor. Perspective is on (below), so
     // only the active tab (position 1) draws its close glyph; the receded
     // inactive tabs show none. A plain `pack` (no "+" button) keeps the focus on
@@ -93,9 +107,9 @@ fn main() {
         &palette,
         "\u{2318} ",
         GradientSpec::from_mode(GradientMode::Sheen),
-        true, // inactive_dim
-        true, // perspective on — so only the active tab shows the close glyph
-        true, // close_button enabled
+        true,  // inactive_dim
+        true,  // perspective on — so only the active tab shows the close glyph
+        close, // Nerd Font glyph (default) or ASCII `×` (arg = "ascii")
     );
 
     // Hide the cursor so a held screenshot doesn't catch a stray cursor block

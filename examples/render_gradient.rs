@@ -6,7 +6,7 @@
 
 use zellij_tabmap::color::Palette;
 use zellij_tabmap::minimap::{
-    GradientMode, GradientShape, GradientSpec, LabelMode, PaneRect, RadialDirection, render,
+    Close, GradientMode, GradientShape, GradientSpec, LabelMode, PaneRect, RadialDirection, render,
 };
 
 /// A linear sheen at `angle` degrees.
@@ -62,7 +62,7 @@ fn main() {
                 0,
                 LabelMode::All,
                 Some("\u{2318} 1"),
-                false,
+                Close::Off,
                 spec,
                 true,
             )

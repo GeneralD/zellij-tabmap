@@ -11,7 +11,6 @@ pub mod line;
 pub mod minimap;
 pub mod paint;
 pub mod projection;
-pub mod scroll;
 pub mod tab_block;
 pub mod title;
 
@@ -74,12 +73,6 @@ pub struct State {
     /// "close tab N" against the live frame. Empty whenever the close button is
     /// disabled, only one tab is open, or no frame has drawn yet.
     close_layout: Vec<line::CloseHit>,
-    /// Whether the wheel cooldown window is currently open (#83). The first scroll
-    /// event navigates and sets this, arming a `config.scroll_cooldown_ms` timer;
-    /// events arriving while it's set are dropped (see [`scroll::gate`]). The `Timer`
-    /// reopens the wheel, so a continuous scroll paces at one step per window —
-    /// a leading-edge throttle. Starts `false`.
-    scroll_cooling: bool,
 }
 
 /// One visible tab's drawn pane geometry, captured each render so a later click
@@ -182,9 +175,6 @@ impl ZellijPlugin for State {
             EventType::PaneUpdate,
             EventType::ModeUpdate,
             EventType::Mouse,
-            // Drives the wheel cooldown window (#83): the `set_timeout` armed on a
-            // scroll step delivers back a `Timer` that reopens the wheel.
-            EventType::Timer,
         ]);
     }
 
@@ -280,29 +270,6 @@ impl ZellijPlugin for State {
                 let moved = self.commit_drag_at(column);
                 self.drag = None;
                 moved
-            }
-            Event::Mouse(Mouse::ScrollUp(_)) => {
-                // Wheel up = forward (next tab / next pane), matching zellij's
-                // stock tab-bar direction. The line count is ignored — each event
-                // is one notch, rate-limited by the cooldown window (#83). The
-                // navigation arrives back as a Tab/Pane update that drives the
-                // repaint, so request none (#80).
-                self.scroll(scroll::ScrollDir::Forward);
-                false
-            }
-            Event::Mouse(Mouse::ScrollDown(_)) => {
-                // Wheel down = backward (previous tab / previous pane). See above.
-                self.scroll(scroll::ScrollDir::Backward);
-                false
-            }
-            Event::Timer(_) => {
-                // The wheel cooldown window (#83) elapsed: reopen the wheel so the
-                // next event navigates. A continuous scroll therefore paces at one
-                // step per window — a leading-edge throttle — rather than racing
-                // through tabs or locking out until the stream goes silent. No
-                // repaint of our own.
-                self.scroll_cooling = false;
-                false
             }
             // Remaining events need no repaint.
             _ => false,
@@ -583,103 +550,6 @@ impl State {
             .iter()
             .find(|hit| hit.contains(row, column))
             .map(|hit| hit.position)
-    }
-
-    /// Dispatch a wheel event to the configured navigation: switch tabs, walk
-    /// panes, or do nothing (#80). zellij scroll events carry no position, so the
-    /// gesture is bar-wide — it acts on the live tab/pane set, not a clicked spot.
-    ///
-    /// A leading-edge cooldown rate-limits the wheel (#83): the first event
-    /// navigates at once and opens a `scroll_cooldown_ms` window; events inside it
-    /// are dropped, so a stepless device's burst no longer races through
-    /// tabs/panes. `off` mode short-circuits before the limiter, leaving the wheel
-    /// at rest.
-    fn scroll(&mut self, dir: scroll::ScrollDir) {
-        // Resolve the per-mode handler up front so `off` short-circuits before
-        // the limiter ever sees the event — and so every arm here is live (an
-        // `off` arm after the gate would be unreachable dead code).
-        let step: fn(&Self, scroll::ScrollDir) = match self.config.scroll {
-            scroll::ScrollMode::Off => return,
-            scroll::ScrollMode::Tab => Self::scroll_tabs,
-            scroll::ScrollMode::Pane => Self::scroll_panes,
-        };
-        match scroll::gate(self.scroll_cooling, self.config.scroll_cooldown_ms) {
-            scroll::Gate::Ignore => return, // inside the window: drop the step.
-            scroll::Gate::NavigateThenCool => {
-                // Leading edge: open a fresh window and arm its timer.
-                self.scroll_cooling = true;
-                self.arm_scroll_cooldown();
-            }
-            scroll::Gate::Navigate => {}
-        }
-        step(self, dir);
-    }
-
-    /// Arm the wheel cooldown timer for `scroll_cooldown_ms` (#83). `set_timeout`
-    /// takes seconds; the config is milliseconds, hence the `/ 1000.0`.
-    fn arm_scroll_cooldown(&self) {
-        set_timeout(self.config.scroll_cooldown_ms as f64 / 1000.0);
-    }
-
-    /// Switch one tab in `dir` from the active tab, wrapping at the ends. No-op
-    /// when there is no active tab (a mid-transition snapshot).
-    fn scroll_tabs(&self, dir: scroll::ScrollDir) {
-        let Some(active) = projection::active_tab(&self.tabs).map(|tab| tab.position) else {
-            return;
-        };
-        let Some(target) = scroll::next_tab(active, self.tabs.len(), dir) else {
-            return;
-        };
-        // `next_tab` works in 0-based positions; `switch_tab_to` is 1-based.
-        switch_tab_to((target + 1) as u32);
-    }
-
-    /// Move the focused pane one step in `dir` along the reading-order traversal
-    /// of every tab's panes, crossing tab boundaries and wrapping globally (#80).
-    /// Focusing is absolute (`focus_terminal_pane`), which both switches to the
-    /// pane's tab and emits a session-state report — so the highlight follows,
-    /// sidestepping the next-direction freeze of #37 that `focus_next_pane` hits.
-    /// No-op when nothing tiled is focused.
-    fn scroll_panes(&self, dir: scroll::ScrollDir) {
-        let Some(current) = self.focused_pane_id() else {
-            return;
-        };
-        let Some(target) = scroll::next_pane(&self.pane_focus_order(), current, dir) else {
-            return;
-        };
-        // A visible tiled terminal pane is never hidden, so both float/in-place
-        // flags are moot — pass `false`, exactly as the click-to-focus path (#74).
-        focus_terminal_pane(target, false, false);
-    }
-
-    /// The id of the focused tiled terminal pane in the active tab, if any — the
-    /// anchor the wheel steps from in `pane` mode.
-    fn focused_pane_id(&self) -> Option<u32> {
-        let active = projection::active_tab(&self.tabs)?;
-        self.panes
-            .panes
-            .get(&active.position)?
-            .iter()
-            .filter(|pane| projection::is_tiled_terminal(pane))
-            .find(|pane| pane.is_focused)
-            .map(|pane| pane.id)
-    }
-
-    /// Every tab's tiled terminal panes flattened into one wheel-traversal order:
-    /// tabs in ascending position, panes in reading order within each tab (#80).
-    ///
-    /// Tab order comes from the authoritative `self.tabs`, not the `PaneManifest`
-    /// keys: `TabUpdate` and `PaneUpdate` arrive as separate events, so a just-
-    /// closed tab can still linger as a stale position in the manifest. Walking
-    /// `self.tabs` drops those, so the wheel never steps into a pane of a tab that
-    /// no longer exists.
-    fn pane_focus_order(&self) -> Vec<u32> {
-        let mut tabs: Vec<&TabInfo> = self.tabs.iter().collect();
-        tabs.sort_by_key(|tab| tab.position);
-        tabs.into_iter()
-            .filter_map(|tab| self.panes.panes.get(&tab.position))
-            .flat_map(|panes| projection::pane_ids_in_reading_order(panes))
-            .collect()
     }
 
     /// Record a potential drag for the tab drawn at `column`. `None` when the
@@ -1460,211 +1330,6 @@ mod tests {
         );
         state.focus_or_switch_at(1, 12); // resolves to a pane → focus arm
         state.focus_or_switch_at(1, 5); // off every block → switch fallback
-    }
-
-    /// A tiled terminal pane `id` at `(x, y=1)`, `is_focused` set — the shape the
-    /// wheel's `pane`-mode anchor and traversal read (#80).
-    fn focusable_pane(id: u32, x: usize, focused: bool) -> PaneInfo {
-        PaneInfo {
-            id,
-            pane_x: x,
-            pane_y: 1,
-            pane_columns: 40,
-            pane_rows: 24,
-            is_focused: focused,
-            title: "sh".to_string(),
-            ..Default::default()
-        }
-    }
-
-    /// A two-tab session for the wheel tests: tab 0 (active) holds panes 10 (x=0)
-    /// and 20 (x=40); tab 1 holds pane 30. `focused` marks which id, if any, is the
-    /// active tab's focused pane; `mode` selects the wheel behaviour.
-    fn scroll_state(mode: scroll::ScrollMode, focused: Option<u32>) -> State {
-        let mut manifest = PaneManifest::default();
-        manifest.panes.insert(
-            0,
-            vec![
-                focusable_pane(10, 0, focused == Some(10)),
-                focusable_pane(20, 40, focused == Some(20)),
-            ],
-        );
-        manifest
-            .panes
-            .insert(1, vec![focusable_pane(30, 0, focused == Some(30))]);
-
-        let mut state = State::default();
-        state.config = Config {
-            scroll: mode,
-            ..Default::default()
-        };
-        state.tabs = vec![
-            TabInfo {
-                active: true,
-                ..tab(0, 1)
-            },
-            TabInfo {
-                active: false,
-                ..tab(1, 2)
-            },
-        ];
-        state.panes = manifest;
-        state
-    }
-
-    #[test]
-    fn focused_pane_id_resolves_the_active_tabs_focused_pane() {
-        // The anchor is the focused pane of the *active* tab only — tab 1's pane
-        // is never the answer even though it sits earlier in the manifest map.
-        let state = scroll_state(scroll::ScrollMode::Pane, Some(20));
-        assert_eq!(state.focused_pane_id(), Some(20));
-    }
-
-    #[test]
-    fn focused_pane_id_is_none_without_a_focus() {
-        // No focused pane in the active tab → no anchor, so `pane` mode leaves
-        // focus untouched rather than guessing a target.
-        let state = scroll_state(scroll::ScrollMode::Pane, None);
-        assert_eq!(state.focused_pane_id(), None);
-    }
-
-    #[test]
-    fn pane_focus_order_flattens_tabs_then_reading_order() {
-        // Tabs in ascending position, panes in reading order within each: tab 0's
-        // 10 (x=0) then 20 (x=40), then tab 1's 30 — the global wheel traversal.
-        let state = scroll_state(scroll::ScrollMode::Pane, Some(10));
-        assert_eq!(state.pane_focus_order(), vec![10, 20, 30]);
-    }
-
-    #[test]
-    fn pane_focus_order_ignores_manifest_positions_not_in_the_tabs() {
-        // `TabUpdate` and `PaneUpdate` arrive separately, so a just-closed tab can
-        // linger as a stale position in the manifest. The traversal walks the
-        // authoritative `self.tabs`, so that stale pane (99 at position 5) is never
-        // visited — the wheel can't step into a tab that no longer exists.
-        let mut state = scroll_state(scroll::ScrollMode::Pane, Some(10));
-        state
-            .panes
-            .panes
-            .insert(5, vec![focusable_pane(99, 0, false)]);
-        assert_eq!(state.pane_focus_order(), vec![10, 20, 30]);
-    }
-
-    #[test]
-    fn scroll_dispatches_each_mode_without_panicking() {
-        // Host effects (`switch_tab_to` / `focus_terminal_pane`) are no-op stubs
-        // off-wasm, so the contract is that every mode dispatches both directions
-        // without panicking over the live tab/pane set. Disable the cooldown
-        // (`scroll_cooldown_ms = 0`) so every event reaches the dispatch rather
-        // than being dropped inside the window.
-        for mode in [
-            scroll::ScrollMode::Tab,
-            scroll::ScrollMode::Pane,
-            scroll::ScrollMode::Off,
-        ] {
-            let mut state = scroll_state(mode, Some(20));
-            state.config.scroll_cooldown_ms = 0;
-            state.scroll(scroll::ScrollDir::Forward);
-            state.scroll(scroll::ScrollDir::Backward);
-        }
-    }
-
-    #[test]
-    fn scroll_opens_a_cooldown_on_the_first_event_and_drops_the_rest() {
-        // Leading edge (#83): the first wheel event navigates and opens the
-        // cooldown window; further events arriving inside it are dropped, so the
-        // flag stays set rather than racing through tabs.
-        let mut state = scroll_state(scroll::ScrollMode::Tab, Some(10));
-        assert!(!state.scroll_cooling);
-        state.scroll(scroll::ScrollDir::Forward);
-        assert!(
-            state.scroll_cooling,
-            "first event opens the cooldown window"
-        );
-        state.scroll(scroll::ScrollDir::Forward);
-        assert!(
-            state.scroll_cooling,
-            "events inside the window are dropped, leaving it open"
-        );
-    }
-
-    #[test]
-    fn scroll_timer_reopens_the_wheel() {
-        // The `Timer` the cooldown armed clears the window, so the next wheel
-        // event navigates again.
-        let mut state = scroll_state(scroll::ScrollMode::Tab, Some(10));
-        state.scroll(scroll::ScrollDir::Forward);
-        assert!(state.scroll_cooling);
-        assert!(!state.update(Event::Timer(0.04)));
-        assert!(
-            !state.scroll_cooling,
-            "the cooldown timer reopens the wheel"
-        );
-    }
-
-    #[test]
-    fn scroll_paces_continuous_input_one_step_per_window() {
-        // Leading-edge throttle (#100, regression fix for #96): while a continuous
-        // stream flows, each Timer reopens the wheel so the next event steps again —
-        // pacing at one step per window. The wheel must NOT lock out until silence
-        // (the #96 bug, where a mid-stream Timer re-armed and stayed closed forever).
-        let mut state = scroll_state(scroll::ScrollMode::Tab, Some(10));
-
-        // Leading edge: step now and open the window.
-        state.scroll(scroll::ScrollDir::Forward);
-        assert!(state.scroll_cooling);
-
-        // An event lands inside the window — dropped, window stays open.
-        state.scroll(scroll::ScrollDir::Forward);
-        assert!(state.scroll_cooling);
-
-        // The timer fires *while the stream is still flowing*: it reopens the wheel
-        // regardless of that activity (this is the fix — #96 stayed closed here).
-        assert!(!state.update(Event::Timer(0.04)));
-        assert!(
-            !state.scroll_cooling,
-            "a timer reopens the wheel even mid-stream — no lock-out"
-        );
-
-        // So the very next event steps again and re-opens: continuous input paces,
-        // it is never rejected until you stop.
-        state.scroll(scroll::ScrollDir::Forward);
-        assert!(
-            state.scroll_cooling,
-            "the next event after a reopen navigates and re-arms (paced stepping)"
-        );
-    }
-
-    #[test]
-    fn scroll_zero_cooldown_never_cools() {
-        // `scroll_cooldown_ms = 0` disables the limiter: every event navigates and
-        // no window opens (the pre-#83 one-step-per-event feel).
-        let mut state = scroll_state(scroll::ScrollMode::Tab, Some(10));
-        state.config.scroll_cooldown_ms = 0;
-        state.scroll(scroll::ScrollDir::Forward);
-        assert!(!state.scroll_cooling);
-        state.scroll(scroll::ScrollDir::Forward);
-        assert!(!state.scroll_cooling);
-    }
-
-    #[test]
-    fn scroll_off_mode_never_cools() {
-        // `off` short-circuits before the limiter, so it never opens a cooldown
-        // window — toggling back to tab/pane later starts from a clean state.
-        let mut state = scroll_state(scroll::ScrollMode::Off, Some(10));
-        state.scroll(scroll::ScrollDir::Forward);
-        state.scroll(scroll::ScrollDir::Forward);
-        assert!(!state.scroll_cooling);
-    }
-
-    #[test]
-    fn scroll_events_request_no_immediate_repaint() {
-        // A wheel step navigates via the host; the redraw arrives as the resulting
-        // TabUpdate / PaneUpdate, so the Mouse arms themselves request no repaint
-        // (return false) — mirroring the click path (#8/#74).
-        let mut state = scroll_state(scroll::ScrollMode::Tab, Some(10));
-        assert!(!state.update(Event::Mouse(Mouse::ScrollUp(1))));
-        assert!(!state.update(Event::Mouse(Mouse::ScrollDown(1))));
     }
 
     #[test]

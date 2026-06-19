@@ -34,12 +34,6 @@ pub struct Config {
     pub tab_gap: usize,
     /// Whether to draw a 1px dark separator between adjacent panes.
     pub gutter: bool,
-    /// Whether drag-to-reorder is enabled. Off by default: the plugin then
-    /// requests only the v0.1.0 permission set (`ReadApplicationState` +
-    /// `ChangeApplicationState`), so existing users do not hit a
-    /// `RunActionsAsUser` cache miss on auto-update (zellij#4982). On → the
-    /// third permission is requested and a tab drag reorders.
-    pub reorder: bool,
     /// Gradient sweep applied to each pane block's fill. Defaults to `sheen`
     /// — the polished out-of-the-box look; `off` restores the flat
     /// v0.1.0-style fills. See [`GradientMode`].
@@ -106,7 +100,7 @@ impl Config {
     pub const DEFAULT_ACTIVE_WIDTH: usize = 24;
     /// Default alignment — centered, preserving the v0.1.0 sliding behavior so
     /// existing layouts render identically on auto-update (opt into `left` to
-    /// anchor the row). Same default-preserve rationale as [`Self::DEFAULT_REORDER`].
+    /// anchor the row).
     pub const DEFAULT_ALIGN: Alignment = Alignment::Center;
     /// Default gap between tab blocks — `2` cleared columns, so adjacent
     /// screens read as separate blocks out of the box. Set `0` to pack the
@@ -114,8 +108,6 @@ impl Config {
     pub const DEFAULT_TAB_GAP: usize = 2;
     /// Default gutter state — no separator.
     pub const DEFAULT_GUTTER: bool = false;
-    /// Default reorder state — off, preserving the v0.1.0 permission posture.
-    pub const DEFAULT_REORDER: bool = false;
     /// Default gradient mode — `Sheen`, the polished out-of-the-box look.
     /// Set `off` to restore the flat v0.1.0-style fills.
     pub const DEFAULT_GRADIENT: GradientMode = GradientMode::Sheen;
@@ -173,10 +165,6 @@ impl Config {
                 .get("gutter")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_GUTTER),
-            reorder: configuration
-                .get("reorder")
-                .and_then(|raw| raw.parse().ok())
-                .unwrap_or(Self::DEFAULT_REORDER),
             gradient: configuration
                 .get("gradient")
                 .and_then(|raw| raw.parse().ok())
@@ -322,7 +310,6 @@ mod tests {
         assert_eq!(config.align, Alignment::Center);
         assert_eq!(config.tab_gap, 2);
         assert!(!config.gutter);
-        assert!(!config.reorder);
         assert_eq!(config.gradient, GradientMode::Sheen);
         assert_eq!(config.gradient_shape, GradientShape::Linear);
         assert_eq!(config.gradient_angle, 0);
@@ -341,7 +328,6 @@ mod tests {
             ("align", "left"),
             ("tab_gap", "1"),
             ("gutter", "true"),
-            ("reorder", "true"),
             ("gradient", "sheen"),
         ]);
         assert_eq!(config.shortcut_prefix, "C-");
@@ -349,7 +335,6 @@ mod tests {
         assert_eq!(config.align, Alignment::Left);
         assert_eq!(config.tab_gap, 1);
         assert!(config.gutter);
-        assert!(config.reorder);
         assert_eq!(config.gradient, GradientMode::Sheen);
     }
 
@@ -486,12 +471,6 @@ mod tests {
     #[test]
     fn malformed_gutter_falls_back() {
         assert!(!config_from(&[("gutter", "maybe")]).gutter);
-    }
-
-    #[test]
-    fn malformed_reorder_falls_back() {
-        assert!(!config_from(&[("reorder", "yes")]).reorder);
-        assert!(!config_from(&[("reorder", "")]).reorder);
     }
 
     #[test]
@@ -632,6 +611,5 @@ mod tests {
         assert_eq!(config.align, Alignment::Center);
         assert_eq!(config.tab_gap, 2);
         assert!(!config.gutter);
-        assert!(!config.reorder);
     }
 }

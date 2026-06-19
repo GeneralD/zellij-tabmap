@@ -52,19 +52,26 @@ pub(crate) const CLOSE_FG_ASCII: Rgb = (0, 0, 0);
 
 /// Which close affordance a tab block stamps near its top-right corner, in the form
 /// the terminal can draw (#86, #94). `Off` draws none. Both on-variants sit one
-/// cell in from the right edge and differ only in glyph and color:
-/// - [`NerdFont`](Close::NerdFont): [`CLOSE_GLYPH`] in alert red.
-/// - [`Ascii`](Close::Ascii): [`CLOSE_GLYPH_ASCII`] in black, for a terminal
-///   without a Nerd Font.
+/// cell in from the right edge and differ only in glyph; each carries its already
+/// resolved foreground [`Rgb`]:
+/// - [`NerdFont`](Close::NerdFont): [`CLOSE_GLYPH`] in the carried color.
+/// - [`Ascii`](Close::Ascii): [`CLOSE_GLYPH_ASCII`] in the carried color, for a
+///   terminal without a Nerd Font.
+///
+/// The color is resolved in [`crate::State`] by applying the `close_button_color`
+/// config ([`crate::config::CloseColor`]) against the per-glyph default — the
+/// theme's alert red for the Nerd Font glyph, black for the ASCII `×` — so the
+/// renderer stamps it directly with no theme lookup of its own (#94 follow-up).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Close {
     /// No close affordance.
     #[default]
     Off,
-    /// The Nerd Font glyph — the default when a Nerd Font is available.
-    NerdFont,
-    /// The ASCII `×` fallback — a simplified-UI terminal.
-    Ascii,
+    /// The Nerd Font glyph in the carried foreground — the default when a Nerd
+    /// Font is available.
+    NerdFont(Rgb),
+    /// The ASCII `×` fallback in the carried foreground — a simplified-UI terminal.
+    Ascii(Rgb),
 }
 
 impl Close {
@@ -84,7 +91,7 @@ impl Close {
     pub fn right_offset(self) -> usize {
         match self {
             Close::Off => 0,
-            Close::NerdFont | Close::Ascii => 2,
+            Close::NerdFont(_) | Close::Ascii(_) => 2,
         }
     }
 }
@@ -792,13 +799,14 @@ pub fn render(
     // always rides the top text row, beside the badge. (Inactive perspective
     // tabs inset their top row (#66/#84) and simply carry no close glyph.)
     let close_text_row = 0;
-    // Resolve the glyph and its base color once: the Nerd Font glyph in alert red,
-    // the ASCII `×` in black (#94); `None` when no close is drawn. The inactive
-    // tone is mixed per cell at the paint site from this base.
+    // Pair each glyph with the foreground `close` already carries (#94 follow-up):
+    // the Nerd Font glyph or the ASCII `×`, in the color resolved up in
+    // `State::render`; `None` when no close is drawn. The inactive tone is mixed
+    // per cell at the paint site from this base.
     let close_render: Option<(char, Rgb)> = match close {
         Close::Off => None,
-        Close::NerdFont => Some((CLOSE_GLYPH, palette.alert())),
-        Close::Ascii => Some((CLOSE_GLYPH_ASCII, CLOSE_FG_ASCII)),
+        Close::NerdFont(fg) => Some((CLOSE_GLYPH, fg)),
+        Close::Ascii(fg) => Some((CLOSE_GLYPH_ASCII, fg)),
     };
     // The close cell(s) are off-limits to the badge when close is on, so the two
     // corner overlays never collide on a narrow rung.
@@ -1135,6 +1143,11 @@ mod tests {
     fn fg(c: Rgb) -> String {
         format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
     }
+
+    /// A distinctive resolved close foreground for tests that only care about the
+    /// glyph's placement, not its color — `Close` now carries an already-resolved
+    /// color (#94 follow-up), so geometry tests pass this stand-in.
+    const TEST_CLOSE_FG: Rgb = (200, 30, 40);
 
     fn bg(c: Rgb) -> String {
         format!("\x1b[48;2;{};{};{}m", c.0, c.1, c.2)
@@ -2480,7 +2493,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            Close::NerdFont,
+            Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             true,
         );
@@ -2519,7 +2532,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            Close::NerdFont,
+            Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             false,
         );
@@ -2538,14 +2551,14 @@ mod tests {
     }
 
     #[test]
-    fn close_glyph_renders_in_the_alert_red() {
-        // The close glyph is painted in the theme's alert red (#86) — zellij's
-        // `exit_code_error.base`, carried on the palette as `alert`. A
-        // distinctive value pins that the foreground is the alert color and not
-        // the old white badge shade: full red on the active tab, toned toward
-        // the fill (never the raw red, never white) on an inactive one.
-        let alert = (222, 11, 99);
-        let palette = test_palette().with_alert(alert);
+    fn close_glyph_renders_in_the_carried_foreground() {
+        // `Close` carries an already-resolved foreground (#94 follow-up); the
+        // renderer stamps it at full strength on the active tab and tones it
+        // toward the fill (never the raw color, never the white badge shade) on
+        // an inactive one. A distinctive value pins that the carried color is
+        // what reaches the screen.
+        let carried = (222, 11, 99);
+        let palette = test_palette();
         let active = render(
             &one_plain(),
             &palette,
@@ -2554,7 +2567,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            Close::NerdFont,
+            Close::NerdFont(carried),
             GradientSpec::OFF,
             true,
         );
@@ -2564,8 +2577,8 @@ mod tests {
             "close glyph rides the top row: {active_top:?}"
         );
         assert!(
-            active_top.contains(&fg(alert)),
-            "active close glyph is painted in the full alert red: {active_top:?}"
+            active_top.contains(&fg(carried)),
+            "active close glyph is painted in the full carried color: {active_top:?}"
         );
         assert!(
             !active_top.contains(&fg(ACTIVE_FG)),
@@ -2580,7 +2593,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            Close::NerdFont,
+            Close::NerdFont(carried),
             GradientSpec::OFF,
             false,
         );
@@ -2590,8 +2603,8 @@ mod tests {
             "inactive close glyph still rides the top row: {inactive_top:?}"
         );
         assert!(
-            !inactive_top.contains(&fg(alert)),
-            "inactive close glyph is toned toward the fill, not the raw red: {inactive_top:?}"
+            !inactive_top.contains(&fg(carried)),
+            "inactive close glyph is toned toward the fill, not the raw color: {inactive_top:?}"
         );
         assert!(
             !inactive_top.contains(&fg(ACTIVE_FG)),
@@ -2618,7 +2631,7 @@ mod tests {
             0,
             LabelMode::All,
             None,
-            Close::NerdFont,
+            Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             true,
         );
@@ -2645,7 +2658,7 @@ mod tests {
             0,
             LabelMode::None,
             Some("⌘ 1"),
-            Close::NerdFont,
+            Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             true,
         );
@@ -2671,7 +2684,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            Close::NerdFont,
+            Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             true,
         );
@@ -2698,7 +2711,7 @@ mod tests {
             0,
             LabelMode::None,
             None,
-            Close::Ascii,
+            Close::Ascii(CLOSE_FG_ASCII),
             GradientSpec::OFF,
             true,
         );

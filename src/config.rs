@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::color::Rgb;
 use crate::line::Alignment;
 use crate::minimap::{GradientMode, GradientShape, GradientSpec, RadialDirection};
 use crate::scroll::ScrollMode;
@@ -92,6 +93,15 @@ pub struct Config {
     /// target). The drawn form follows the terminal — the Nerd Font glyph, or the
     /// ASCII `×` under a simplified UI (#94).
     pub close_button: bool,
+    /// Foreground color of the close glyph (#94 follow-up). `Theme` (default)
+    /// preserves the original behavior — the Nerd Font glyph follows the theme's
+    /// alert/error red (`exit_code_error`) and the ASCII `×` stays black. The
+    /// theme tie-in backfires on a theme that defines its `red`/error color as a
+    /// dark shade (e.g. `sobrio`'s `red "#121212"`): the glyph then renders
+    /// near-black. Set `fg` (white, matching the labels/badge), `red` (a fixed
+    /// red independent of the theme), or a `#rrggbb` hex to override it. See
+    /// [`CloseColor`].
+    pub close_button_color: CloseColor,
     /// Cooldown window in **milliseconds** between wheel navigation steps (#83). A
     /// stepless device (Magic Mouse, trackpad) fires a *burst* of scroll events for
     /// one flick, so the pre-#83 "one event = one step" raced through tabs/panes.
@@ -154,6 +164,11 @@ impl Config {
     /// permission (#86), so enabling it by default costs existing users no new
     /// prompt and no auto-update freeze (zellij#4982). Set `false` to hide it.
     pub const DEFAULT_CLOSE_BUTTON: bool = true;
+    /// Default close-glyph color — [`CloseColor::Theme`], preserving the original
+    /// theme-driven behavior so existing users see no change. Override with `fg`,
+    /// `red`, or a `#rrggbb` hex when a theme's dark error color makes the glyph
+    /// hard to read (#94 follow-up).
+    pub const DEFAULT_CLOSE_BUTTON_COLOR: CloseColor = CloseColor::Theme;
     /// Default wheel cooldown — `40` ms between steps, taming a stepless device's
     /// flick burst out of the box while still letting a deliberate notch step at
     /// once. Set `0` to disable the limiter (the pre-#83 one-step-per-event feel) (#83).
@@ -224,6 +239,10 @@ impl Config {
                 .get("close_button")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_CLOSE_BUTTON),
+            close_button_color: configuration
+                .get("close_button_color")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_CLOSE_BUTTON_COLOR),
             scroll_cooldown_ms: configuration
                 .get("scroll_cooldown_ms")
                 .and_then(|raw| raw.parse().ok())
@@ -247,6 +266,71 @@ impl Default for Config {
     /// The defaults are exactly what an empty configuration map parses to.
     fn default() -> Self {
         Self::from_configuration(&BTreeMap::new())
+    }
+}
+
+/// How the close glyph's foreground color is chosen (#94 follow-up). Resolved to
+/// a concrete [`Rgb`] at the render site via [`CloseColor::resolve`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CloseColor {
+    /// Follow the theme: the Nerd Font glyph takes the theme's alert/error red
+    /// (`exit_code_error`), the ASCII `×` stays black. The original behavior, and
+    /// the default — but a theme whose `red`/error color is a dark shade tints
+    /// the glyph toward black.
+    #[default]
+    Theme,
+    /// The labels/badge foreground white ([`crate::minimap::ACTIVE_FG`]) — always
+    /// readable on any pane fill, theme-independent, and sidesteps a red glyph
+    /// reading poorly over a red pane.
+    Fg,
+    /// A fixed red ([`crate::color::DEFAULT_ALERT`]) independent of the theme, so
+    /// the "close = danger" cue survives a theme that defines its red as a dark
+    /// shade.
+    Red,
+    /// An explicit `#rrggbb` color.
+    Custom(Rgb),
+}
+
+impl CloseColor {
+    /// Resolve to the close glyph's foreground. `theme_default` is the per-glyph
+    /// color used when this is [`Theme`](CloseColor::Theme): the Nerd Font glyph
+    /// passes the theme's alert red, the ASCII `×` passes black. The other
+    /// variants ignore it and return a fixed color.
+    pub fn resolve(self, theme_default: Rgb) -> Rgb {
+        match self {
+            CloseColor::Theme => theme_default,
+            CloseColor::Fg => crate::minimap::ACTIVE_FG,
+            CloseColor::Red => crate::color::DEFAULT_ALERT,
+            CloseColor::Custom(rgb) => rgb,
+        }
+    }
+}
+
+/// Parse a `#rrggbb` (or bare `rrggbb`) hex color. Returns `None` on any other
+/// shape so [`Config::from_configuration`] stays total (never panics): the
+/// ASCII-and-length guard keeps the byte slicing in range for every input.
+fn parse_hex_color(raw: &str) -> Option<Rgb> {
+    let hex = raw.strip_prefix('#').unwrap_or(raw);
+    if hex.len() != 6 || !hex.is_ascii() {
+        return None;
+    }
+    let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some((channel(0)?, channel(2)?, channel(4)?))
+}
+
+impl std::str::FromStr for CloseColor {
+    type Err = ();
+
+    /// `"theme"`, `"fg"` (aliases `"white"` / `"foreground"`), `"red"`, or a
+    /// `#rrggbb` hex; any other value errors so the config parser falls back to
+    /// the documented default ([`CloseColor::Theme`]) rather than panicking.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "theme" => Ok(Self::Theme),
+            "fg" | "white" | "foreground" => Ok(Self::Fg),
+            "red" => Ok(Self::Red),
+            other => parse_hex_color(other).map(Self::Custom).ok_or(()),
+        }
     }
 }
 
@@ -501,6 +585,73 @@ mod tests {
         // A malformed or empty value keeps the on-by-default close button (#94).
         assert!(config_from(&[("close_button", "yes")]).close_button);
         assert!(config_from(&[("close_button", "")]).close_button);
+    }
+
+    #[test]
+    fn parses_close_button_color_keywords_and_hex() {
+        // The keyword forms and both hex spellings (`#rrggbb` and bare `rrggbb`)
+        // all parse (#94 follow-up).
+        assert_eq!(
+            config_from(&[("close_button_color", "theme")]).close_button_color,
+            CloseColor::Theme
+        );
+        assert_eq!(
+            config_from(&[("close_button_color", "fg")]).close_button_color,
+            CloseColor::Fg
+        );
+        assert_eq!(
+            config_from(&[("close_button_color", "white")]).close_button_color,
+            CloseColor::Fg
+        );
+        assert_eq!(
+            config_from(&[("close_button_color", "red")]).close_button_color,
+            CloseColor::Red
+        );
+        assert_eq!(
+            config_from(&[("close_button_color", "#d70000")]).close_button_color,
+            CloseColor::Custom((215, 0, 0))
+        );
+        assert_eq!(
+            config_from(&[("close_button_color", "00ff80")]).close_button_color,
+            CloseColor::Custom((0, 255, 128))
+        );
+    }
+
+    #[test]
+    fn malformed_close_button_color_falls_back_to_theme() {
+        // Unset, empty, or any unparseable value keeps the theme-driven default,
+        // and a length-or-charset-wrong hex never panics the total parser.
+        assert_eq!(
+            config_from(&[]).close_button_color,
+            CloseColor::Theme,
+            "default is theme"
+        );
+        for bad in ["bogus", "", "#12", "#12345g", "redd", "#1234567"] {
+            assert_eq!(
+                config_from(&[("close_button_color", bad)]).close_button_color,
+                CloseColor::Theme,
+                "malformed {bad:?} falls back to theme"
+            );
+        }
+    }
+
+    #[test]
+    fn close_color_resolves_overrides_and_theme_passthrough() {
+        // `Theme` returns the per-glyph default it is handed; the others ignore it.
+        let theme_default = (10, 20, 30);
+        assert_eq!(CloseColor::Theme.resolve(theme_default), theme_default);
+        assert_eq!(
+            CloseColor::Custom((1, 2, 3)).resolve(theme_default),
+            (1, 2, 3)
+        );
+        assert_eq!(
+            CloseColor::Fg.resolve(theme_default),
+            crate::minimap::ACTIVE_FG
+        );
+        assert_eq!(
+            CloseColor::Red.resolve(theme_default),
+            crate::color::DEFAULT_ALERT
+        );
     }
 
     #[test]

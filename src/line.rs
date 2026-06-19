@@ -5,9 +5,9 @@
 //! This is layout math only — no `zellij_tile` calls and no rendering — so it
 //! runs and is unit-tested on the native host like the rest of the renderer
 //! (`minimap` / `paint` / `projection`). The [`TabHit`] spans it produces are
-//! the input for click-to-switch (#8) and, later, drag-and-drop reordering
-//! (#10), so each span reflects exactly where a block is drawn, measured in
-//! display columns (see [`display_width`]) rather than `char` count.
+//! the input for click-to-switch (#8), so each span reflects exactly where a
+//! block is drawn, measured in display columns (see [`display_width`]) rather
+//! than `char` count.
 
 use unicode_width::UnicodeWidthStr;
 
@@ -101,16 +101,6 @@ pub struct LineLayout {
     pub button: Option<ButtonHit>,
 }
 
-/// Which way a dragged tab travels, in `zellij`-free terms. Drag-and-drop
-/// reorder (#10) maps this to `Direction::Left` / `Direction::Right` at the
-/// host-calling site, so this layout module stays free of `zellij_tile` types
-/// (like the rest of `line` / `minimap` / `paint`, it is native-testable).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Shift {
-    Left,
-    Right,
-}
-
 /// How the all-fit tab row is anchored horizontally (config key `align`).
 ///
 /// Governs **only** the branch where every tab fits: `Center` re-centers the
@@ -155,9 +145,8 @@ pub fn display_width(text: &str) -> usize {
 /// The 0-based `position` of the visible tab whose drawn span `[start, start +
 /// width)` contains `column`, or `None` when the column misses every block (an
 /// overflow marker, an inter-block gap, or trailing padding). This is the exact
-/// hit-test that both *grabs* a tab for drag-and-drop (#10) and underlies
-/// click-to-switch (#8); keeping it column-precise means a stray click or grab
-/// is a no-op, never a wrong tab.
+/// hit-test underlying click-to-switch (#8) and click-to-focus (#74); keeping it
+/// column-precise means a stray click is a no-op, never a wrong tab.
 pub fn position_at_column(tabs: &[TabHit], column: usize) -> Option<usize> {
     tabs.iter()
         .find(|tab| (tab.start..tab.start + tab.width).contains(&column))
@@ -175,75 +164,6 @@ pub fn position_at_column(tabs: &[TabHit], column: usize) -> Option<usize> {
 /// site where no native test can reach it.
 pub fn switch_target_at_column(tabs: &[TabHit], column: usize) -> Option<u32> {
     position_at_column(tabs, column).map(|position| position as u32 + 1)
-}
-
-/// Resolve a drag that grabbed the tab at 0-based `from` and released at
-/// `release_col`: how many single-position steps, and which way, to move the
-/// grabbed tab so it lands where it was dropped — or `None` when the gesture is
-/// a no-op (released back on its own slot, or nothing is drawn to drop onto).
-///
-/// The drop column is clamped into the drawn strip by [`drop_position_at_column`]
-/// (left of every block → first visible tab, right of every block → last,
-/// otherwise the block under the column), so a drop never silently vanishes off
-/// an edge. `zellij`'s `MoveTabByTabId` shifts a tab one neighbour per call, and
-/// packed positions are contiguous, so the step count is exactly the absolute
-/// distance between `from` and the drop position. Direction is `zellij`-free
-/// (see [`Shift`]); the caller maps it to `Direction` and emits one move per
-/// step.
-///
-/// `from` must be the position of a currently drawn tab. A `from` that is not
-/// among `tabs` — a stale grab whose tab scrolled into the overflow, or the
-/// layout repacked mid-drag — resolves to `None` rather than a delta against a
-/// position no longer on screen, keeping the conservative "uncertain ⇒ no-op"
-/// stance of the click hit-test (a stray gesture never moves the wrong tab).
-pub fn drag_steps(tabs: &[TabHit], from: usize, release_col: usize) -> Option<(Shift, usize)> {
-    tabs.iter().find(|tab| tab.position == from)?;
-    let to = drop_position_at_column(tabs, release_col)?;
-    let steps = to.abs_diff(from);
-    let shift = if to > from { Shift::Right } else { Shift::Left };
-    (steps > 0).then_some((shift, steps))
-}
-
-/// The 0-based `position` a release at `release_col` drops onto. Unlike
-/// [`position_at_column`] (an exact grab hit that may miss), a drop is clamped
-/// into the drawn strip: a column left of the first block targets the first
-/// visible tab, one at or past the last block targets the last, one inside the
-/// run targets the block under it, and one on an inter-block gap column (a
-/// real miss once `tab_gap` > 0, #33) targets the nearest block. `None` only
-/// when nothing is drawn — so an in-strip drop always resolves to a sensible
-/// neighbour rather than discarding the gesture.
-fn drop_position_at_column(tabs: &[TabHit], release_col: usize) -> Option<usize> {
-    let first = tabs.first()?;
-    let last = tabs.last()?;
-    if release_col < first.start {
-        return Some(first.position);
-    }
-    if release_col >= last.start + last.width {
-        return Some(last.position);
-    }
-    // With `tab_gap = 0` blocks pack flush, so the exact hit always lands; a
-    // positive gap opens real miss columns *between* blocks. Falling back to
-    // the last tab there (as this once did) teleported a gap drop to the end
-    // of the strip (#34) — resolve it to the nearest block instead.
-    position_at_column(tabs, release_col).or_else(|| nearest_position_to_column(tabs, release_col))
-}
-
-/// The 0-based `position` of the visible tab whose drawn span lies nearest to
-/// `column` — the gap-column resolver behind [`drop_position_at_column`].
-/// Distance is measured to the nearer span edge (zero inside a span; at most
-/// one of the two saturating terms is non-zero, so their max is the distance).
-/// A column equidistant from both neighbours resolves to the **left** block —
-/// `min_by_key` keeps the first minimum and `tabs` is ordered left → right —
-/// a deterministic tie rule the user can learn. `None` only when nothing is
-/// drawn.
-fn nearest_position_to_column(tabs: &[TabHit], column: usize) -> Option<usize> {
-    tabs.iter()
-        .min_by_key(|tab| {
-            tab.start
-                .saturating_sub(column)
-                .max(column.saturating_sub(tab.start + tab.width - 1))
-        })
-        .map(|tab| tab.position)
 }
 
 fn left_marker(hidden: usize) -> String {
@@ -1454,210 +1374,5 @@ mod tests {
             "one past the last block"
         );
         assert_eq!(position_at_column(&[], 0), None, "empty layout");
-    }
-
-    // ---- drag_steps (drop resolution + delta, #10) -----------------------
-
-    #[test]
-    fn drag_to_a_later_block_steps_right_by_the_position_delta() {
-        // positions 0..5, each width 2, contiguous: p1 spans [2,4), p3 [6,8).
-        let tabs: Vec<TabHit> = (0..5).map(|p| hit(p, p * 2, 2, p == 2)).collect();
-        // grabbed position 1, released inside position 3's span → move right 2.
-        assert_eq!(drag_steps(&tabs, 1, 6), Some((Shift::Right, 2)));
-        assert_eq!(
-            drag_steps(&tabs, 1, 7),
-            Some((Shift::Right, 2)),
-            "either column of p3"
-        );
-    }
-
-    #[test]
-    fn drag_to_an_earlier_block_steps_left_by_the_position_delta() {
-        let tabs: Vec<TabHit> = (0..5).map(|p| hit(p, p * 2, 2, p == 2)).collect();
-        // grabbed position 3, released inside position 1's span → move left 2.
-        assert_eq!(drag_steps(&tabs, 3, 2), Some((Shift::Left, 2)));
-    }
-
-    #[test]
-    fn drag_released_on_its_own_slot_is_a_no_op() {
-        // A click-without-move (grab and release on the same block) must never
-        // emit a move action — both columns of position 2's span resolve to None.
-        let tabs: Vec<TabHit> = (0..5).map(|p| hit(p, p * 2, 2, p == 2)).collect();
-        assert_eq!(
-            drag_steps(&tabs, 2, 4),
-            None,
-            "first column of the grabbed slot"
-        );
-        assert_eq!(
-            drag_steps(&tabs, 2, 5),
-            None,
-            "last column of the grabbed slot"
-        );
-    }
-
-    #[test]
-    fn drop_past_the_last_block_clamps_to_the_last_visible_tab() {
-        // positions 0..5; last block (p4) spans [8,10). A release at or beyond
-        // column 10 (slack / right overflow marker) lands the tab at the end.
-        let tabs: Vec<TabHit> = (0..5).map(|p| hit(p, p * 2, 2, p == 2)).collect();
-        assert_eq!(
-            drag_steps(&tabs, 1, 10),
-            Some((Shift::Right, 3)),
-            "at the end boundary"
-        );
-        assert_eq!(
-            drag_steps(&tabs, 1, 99),
-            Some((Shift::Right, 3)),
-            "far past the end"
-        );
-    }
-
-    #[test]
-    fn drop_before_the_first_block_clamps_to_the_first_visible_tab() {
-        // First block does not start at column 0 (a left overflow marker / row
-        // offset occupies [0,5)); a release in that region targets the first
-        // visible tab, position 2.
-        let tabs = vec![hit(2, 5, 2, true), hit(3, 7, 2, false)];
-        assert_eq!(drag_steps(&tabs, 3, 0), Some((Shift::Left, 1)), "far left");
-        assert_eq!(
-            drag_steps(&tabs, 3, 4),
-            Some((Shift::Left, 1)),
-            "just left of the first block"
-        );
-    }
-
-    #[test]
-    fn drop_in_a_gap_column_lands_on_the_nearest_block_not_the_last_tab() {
-        // A `tab_gap = 3` strip: p0 spans [0,2), p1 [5,7), p2 [10,12), so
-        // columns 2..5 and 7..10 are real hit-test misses. Before #34 every
-        // gap drop fell through to the LAST tab; now it resolves to the block
-        // whose span edge is nearest.
-        let tabs = vec![
-            hit(0, 0, 2, true),
-            hit(1, 5, 2, false),
-            hit(2, 10, 2, false),
-        ];
-        assert_eq!(
-            drag_steps(&tabs, 2, 2),
-            Some((Shift::Left, 2)),
-            "column 2 is 1 from p0, 3 from p1"
-        );
-        assert_eq!(
-            drag_steps(&tabs, 2, 4),
-            Some((Shift::Left, 1)),
-            "column 4 is 1 from p1, 3 from p0"
-        );
-        assert_eq!(
-            drag_steps(&tabs, 0, 9),
-            Some((Shift::Right, 2)),
-            "column 9 is 1 from p2, 3 from p1"
-        );
-    }
-
-    #[test]
-    fn drop_on_the_centre_of_an_odd_gap_ties_to_the_left_block() {
-        // Column 3 sits exactly 2 from p0's right edge (column 1) and 2 from
-        // p1's left edge (column 5); the tie breaks toward the LEFT block so
-        // the rule stays deterministic across symmetric gaps.
-        let tabs = vec![
-            hit(0, 0, 2, true),
-            hit(1, 5, 2, false),
-            hit(2, 10, 2, false),
-        ];
-        assert_eq!(drag_steps(&tabs, 2, 3), Some((Shift::Left, 2)), "tie → p0");
-        assert_eq!(
-            drag_steps(&tabs, 0, 8),
-            Some((Shift::Right, 1)),
-            "tie → p1, not p2"
-        );
-    }
-
-    #[test]
-    fn drag_steps_matches_the_nearest_block_across_every_gapped_release() {
-        // Positions 0..4 separated by 2-column gaps: p spans [4p, 4p + 2),
-        // last block ends at 14. Independently of the implementation, each
-        // block owns its span plus the nearer half of each neighbouring gap,
-        // so the drop position of any release is `(release_col + 1) / 4`,
-        // clamped to the last position past the end — a genuine cross-check,
-        // not a restatement.
-        let spans: Vec<TabHit> = (0..4).map(|p| hit(p, p * 4, 2, p == 1)).collect();
-        for from in 0usize..4 {
-            for release_col in 0usize..20 {
-                let to = ((release_col + 1) / 4).min(3);
-                let expected = (to != from).then(|| {
-                    let shift = if to > from { Shift::Right } else { Shift::Left };
-                    (shift, to.abs_diff(from))
-                });
-                assert_eq!(
-                    drag_steps(&spans, from, release_col),
-                    expected,
-                    "from {from}, release_col {release_col} (drop position {to})"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn drag_on_an_empty_or_single_tab_layout_never_moves() {
-        assert_eq!(drag_steps(&[], 0, 5), None, "nothing drawn");
-        let one = vec![hit(0, 4, 2, true)];
-        // A lone tab has only one slot, so every drop resolves back onto it.
-        assert_eq!(drag_steps(&one, 0, 4), None, "onto itself");
-        assert_eq!(drag_steps(&one, 0, 0), None, "clamped left to itself");
-        assert_eq!(drag_steps(&one, 0, 99), None, "clamped right to itself");
-    }
-
-    #[test]
-    fn drag_with_a_grabbed_position_not_currently_drawn_is_a_no_op() {
-        // Only positions 5,6,7 are visible (the rest collapsed into overflow). A
-        // grab whose recorded position is no longer on screen — a stale drag, or
-        // the grabbed tab scrolled into the overflow before release — resolves to
-        // no move, never a delta against an off-screen position.
-        let tabs = vec![hit(5, 0, 2, false), hit(6, 2, 2, true), hit(7, 4, 2, false)];
-        assert_eq!(
-            drag_steps(&tabs, 2, 4),
-            None,
-            "grabbed position 2 is hidden"
-        );
-        assert_eq!(
-            drag_steps(&tabs, 9, 0),
-            None,
-            "grabbed position 9 is hidden"
-        );
-        // A grab on a position that IS drawn still resolves normally.
-        assert_eq!(
-            drag_steps(&tabs, 5, 4),
-            Some((Shift::Right, 2)),
-            "visible grab works"
-        );
-    }
-
-    #[test]
-    fn drag_steps_matches_the_clamped_drop_across_every_grab_and_release() {
-        // A deterministic sweep over a hand-built contiguous strip: positions
-        // 0..5, each width 3, drawn from column 0 (p spans [3p, 3p+3)), last
-        // block ends at 18. The expected drop position is derived independently
-        // of `drop_position_at_column` — `release_col / 3`, clamped to the last
-        // position past the end — so the assertion genuinely cross-checks the
-        // implementation rather than restating it.
-        let spans: Vec<TabHit> = (0..6).map(|p| hit(p, p * 3, 3, p == 2)).collect();
-        for from in 0usize..6 {
-            for release_col in 0usize..24 {
-                let to = if release_col >= 18 {
-                    5
-                } else {
-                    release_col / 3
-                };
-                let expected = (to != from).then(|| {
-                    let shift = if to > from { Shift::Right } else { Shift::Left };
-                    (shift, to.abs_diff(from))
-                });
-                assert_eq!(
-                    drag_steps(&spans, from, release_col),
-                    expected,
-                    "from {from}, release_col {release_col} (drop position {to})"
-                );
-            }
-        }
     }
 }

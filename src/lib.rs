@@ -76,16 +76,10 @@ pub struct State {
     close_layout: Vec<line::CloseHit>,
     /// Whether the wheel cooldown window is currently open (#83). The first scroll
     /// event navigates and sets this, arming a `config.scroll_cooldown_ms` timer;
-    /// events arriving while it's set are dropped (see [`scroll::gate`]). A `Timer`
-    /// reopens the wheel only after a full window of silence — see [`State::scroll_seen`].
-    /// Starts `false`.
+    /// events arriving while it's set are dropped (see [`scroll::gate`]). The `Timer`
+    /// reopens the wheel, so a continuous scroll paces at one step per window —
+    /// a leading-edge throttle. Starts `false`.
     scroll_cooling: bool,
-    /// Whether a wheel event landed inside the current cooldown window (#83). Every
-    /// dropped event sets it; the `Timer` handler, finding it set, re-arms a fresh
-    /// window (measured from that last event) instead of reopening — so a stepless
-    /// device's momentum tail collapses to the single leading step rather than
-    /// racing through tabs. Cleared when a window opens and each time it re-arms.
-    scroll_seen: bool,
 }
 
 /// One visible tab's drawn pane geometry, captured each render so a later click
@@ -302,16 +296,11 @@ impl ZellijPlugin for State {
                 false
             }
             Event::Timer(_) => {
-                // A wheel cooldown window (#83) elapsed. If a scroll event landed
-                // inside it, a momentum stream is still flowing — re-arm a fresh
-                // window from that last event and stay closed, keeping the whole
-                // gesture collapsed to its single leading step. Only a full silent
-                // window reopens the wheel. No repaint of our own.
-                if self.scroll_seen {
-                    self.scroll_seen = false;
-                    self.arm_scroll_cooldown();
-                    return false;
-                }
+                // The wheel cooldown window (#83) elapsed: reopen the wheel so the
+                // next event navigates. A continuous scroll therefore paces at one
+                // step per window — a leading-edge throttle — rather than racing
+                // through tabs or locking out until the stream goes silent. No
+                // repaint of our own.
                 self.scroll_cooling = false;
                 false
             }
@@ -615,17 +604,10 @@ impl State {
             scroll::ScrollMode::Pane => Self::scroll_panes,
         };
         match scroll::gate(self.scroll_cooling, self.config.scroll_cooldown_ms) {
-            scroll::Gate::Ignore => {
-                // Inside the window: drop the step, but record the activity so the
-                // timer re-arms from this event. The cooldown tracks the last event,
-                // not the first, collapsing a momentum tail to one step (#83).
-                self.scroll_seen = true;
-                return;
-            }
+            scroll::Gate::Ignore => return, // inside the window: drop the step.
             scroll::Gate::NavigateThenCool => {
                 // Leading edge: open a fresh window and arm its timer.
                 self.scroll_cooling = true;
-                self.scroll_seen = false;
                 self.arm_scroll_cooldown();
             }
             scroll::Gate::Navigate => {}
@@ -1621,35 +1603,35 @@ mod tests {
     }
 
     #[test]
-    fn scroll_momentum_keeps_the_window_closed_until_silence() {
-        // A stepless device's flick is one leading step plus a ~1 s momentum tail
-        // (#83). The window is measured from the *last* event, not the first: a
-        // Timer that fires while the stream is still flowing re-arms instead of
-        // reopening, so the whole gesture collapses to the single leading step.
-        // Only a Timer after a full silent window reopens the wheel.
+    fn scroll_paces_continuous_input_one_step_per_window() {
+        // Leading-edge throttle (#100, regression fix for #96): while a continuous
+        // stream flows, each Timer reopens the wheel so the next event steps again —
+        // pacing at one step per window. The wheel must NOT lock out until silence
+        // (the #96 bug, where a mid-stream Timer re-armed and stayed closed forever).
         let mut state = scroll_state(scroll::ScrollMode::Tab, Some(10));
 
         // Leading edge: step now and open the window.
         state.scroll(scroll::ScrollDir::Forward);
         assert!(state.scroll_cooling);
 
-        // Momentum tail: an event lands inside the window — dropped, but it marks
-        // activity so the window restarts from here.
+        // An event lands inside the window — dropped, window stays open.
         state.scroll(scroll::ScrollDir::Forward);
+        assert!(state.scroll_cooling);
 
-        // The armed timer fires while the stream is still going → re-arm, stay
-        // closed (this is the leading-vs-trailing-edge fix: pre-#83 this reopened).
-        assert!(!state.update(Event::Timer(0.04)));
-        assert!(
-            state.scroll_cooling,
-            "a timer firing mid-stream re-arms rather than reopening (window tracks the last event)"
-        );
-
-        // Silence now: the next timer sees no activity → reopen.
+        // The timer fires *while the stream is still flowing*: it reopens the wheel
+        // regardless of that activity (this is the fix — #96 stayed closed here).
         assert!(!state.update(Event::Timer(0.04)));
         assert!(
             !state.scroll_cooling,
-            "a full silent window reopens the wheel"
+            "a timer reopens the wheel even mid-stream — no lock-out"
+        );
+
+        // So the very next event steps again and re-opens: continuous input paces,
+        // it is never rejected until you stop.
+        state.scroll(scroll::ScrollDir::Forward);
+        assert!(
+            state.scroll_cooling,
+            "the next event after a reopen navigates and re-arms (paced stepping)"
         );
     }
 

@@ -228,7 +228,7 @@ pub struct Palette {
 /// zellij's default error red — `EightBit(124)`, the value `exit_code_error`
 /// falls back to when a theme leaves it unset. The close glyph's stand-in red
 /// until [`Palette::with_alert`] supplies the live theme value.
-const DEFAULT_ALERT: Rgb = from_eightbit(124);
+pub(crate) const DEFAULT_ALERT: Rgb = from_eightbit(124);
 
 impl Default for Palette {
     fn default() -> Self {

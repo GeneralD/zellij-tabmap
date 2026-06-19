@@ -399,10 +399,17 @@ impl ZellijPlugin for State {
         // Nerd Font glyph otherwise — chosen here, the one spot that knows the
         // font capability (#94).
         let close = if self.config.close_button && self.tabs.len() > 1 {
+            // Resolve the glyph's foreground here, the one spot with both the
+            // config and the live palette. `close_button_color` is applied
+            // against each glyph's per-terminal default — the theme's alert red
+            // for the Nerd Font glyph, black for the ASCII `×` — so `theme`
+            // keeps the original look while `fg` / `red` / a hex override it,
+            // immune to a theme whose red is a dark shade (#94 follow-up).
+            let close_color = self.config.close_button_color;
             if self.simplified_ui {
-                minimap::Close::Ascii
+                minimap::Close::Ascii(close_color.resolve(minimap::CLOSE_FG_ASCII))
             } else {
-                minimap::Close::NerdFont
+                minimap::Close::NerdFont(close_color.resolve(self.palette.alert()))
             }
         } else {
             minimap::Close::Off

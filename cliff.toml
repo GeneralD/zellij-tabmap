@@ -24,8 +24,6 @@ If you pin to a version URL, paste this block into your zellij `permissions.kdl`
 }
 ```
 
-If `reorder "true"` is set, also add `RunActionsAsUser` to that block.
-
 > Using `releases/latest/download/` in your layout? The permission is keyed to that URL and was granted once — no action needed.
 """
 trim = true

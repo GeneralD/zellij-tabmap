@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 use crate::color::Rgb;
 use crate::line::Alignment;
 use crate::minimap::{GradientMode, GradientShape, GradientSpec, RadialDirection};
-use crate::scroll::ScrollMode;
 
 /// Parsed plugin configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,12 +34,6 @@ pub struct Config {
     pub tab_gap: usize,
     /// Whether to draw a 1px dark separator between adjacent panes.
     pub gutter: bool,
-    /// Whether drag-to-reorder is enabled. Off by default: the plugin then
-    /// requests only the v0.1.0 permission set (`ReadApplicationState` +
-    /// `ChangeApplicationState`), so existing users do not hit a
-    /// `RunActionsAsUser` cache miss on auto-update (zellij#4982). On → the
-    /// third permission is requested and a tab drag reorders.
-    pub reorder: bool,
     /// Gradient sweep applied to each pane block's fill. Defaults to `sheen`
     /// — the polished out-of-the-box look; `off` restores the flat
     /// v0.1.0-style fills. See [`GradientMode`].
@@ -75,12 +68,6 @@ pub struct Config {
     /// new permission prompt appears on auto-update. `false` hides the button and
     /// reclaims its columns for the tab strip.
     pub new_tab_button: bool,
-    /// How the mouse wheel navigates over the bar (#80). `tab` (default) switches
-    /// tabs, `pane` walks the focused pane across tab boundaries, `off` makes the
-    /// wheel inert. zellij delivers scroll events without a position, so the
-    /// gesture acts on the whole bar. Needs no permission beyond the default set
-    /// (`ChangeApplicationState`). See [`ScrollMode`].
-    pub scroll: ScrollMode,
     /// Whether each tab block draws a clickable close button near its top-right
     /// corner, closing that tab on click (#86). On by default (#94): the close
     /// glyph rides on the already-granted `ChangeApplicationState` permission
@@ -102,17 +89,6 @@ pub struct Config {
     /// red independent of the theme), or a `#rrggbb` hex to override it. See
     /// [`CloseColor`].
     pub close_button_color: CloseColor,
-    /// Cooldown window in **milliseconds** between wheel navigation steps (#83). A
-    /// stepless device (Magic Mouse, trackpad) fires a *burst* of scroll events for
-    /// one flick, so the pre-#83 "one event = one step" raced through tabs/panes.
-    /// This is a leading-edge rate limiter: the first event navigates at once and
-    /// opens the window, and events arriving within `scroll_cooldown_ms` of it are
-    /// dropped — so a flick advances about one step per window while a deliberate,
-    /// well-spaced notch always steps immediately. `40` (default) suits both a
-    /// notched wheel and a trackpad; raise it to damp the wheel further. `0`
-    /// disables the limiter (every event steps, the pre-#83 feel). Ignored when
-    /// `scroll` is `off`. See [`crate::scroll::gate`].
-    pub scroll_cooldown_ms: usize,
 }
 
 impl Config {
@@ -124,7 +100,7 @@ impl Config {
     pub const DEFAULT_ACTIVE_WIDTH: usize = 24;
     /// Default alignment — centered, preserving the v0.1.0 sliding behavior so
     /// existing layouts render identically on auto-update (opt into `left` to
-    /// anchor the row). Same default-preserve rationale as [`Self::DEFAULT_REORDER`].
+    /// anchor the row).
     pub const DEFAULT_ALIGN: Alignment = Alignment::Center;
     /// Default gap between tab blocks — `2` cleared columns, so adjacent
     /// screens read as separate blocks out of the box. Set `0` to pack the
@@ -132,8 +108,6 @@ impl Config {
     pub const DEFAULT_TAB_GAP: usize = 2;
     /// Default gutter state — no separator.
     pub const DEFAULT_GUTTER: bool = false;
-    /// Default reorder state — off, preserving the v0.1.0 permission posture.
-    pub const DEFAULT_REORDER: bool = false;
     /// Default gradient mode — `Sheen`, the polished out-of-the-box look.
     /// Set `off` to restore the flat v0.1.0-style fills.
     pub const DEFAULT_GRADIENT: GradientMode = GradientMode::Sheen;
@@ -156,9 +130,6 @@ impl Config {
     /// box (#76). It rides on the already-granted `ChangeApplicationState`
     /// permission, so enabling it by default costs existing users no new prompt.
     pub const DEFAULT_NEW_TAB_BUTTON: bool = true;
-    /// Default wheel behaviour — `Tab`, matching zellij's stock tab-bar (scroll
-    /// switches tabs). Set `pane` to walk panes, `off` to disable (#80).
-    pub const DEFAULT_SCROLL: ScrollMode = ScrollMode::Tab;
     /// Default close-button state — on (#94), so the close affordance is present
     /// out of the box. It rides on the already-granted `ChangeApplicationState`
     /// permission (#86), so enabling it by default costs existing users no new
@@ -169,10 +140,6 @@ impl Config {
     /// `red`, or a `#rrggbb` hex when a theme's dark error color makes the glyph
     /// hard to read (#94 follow-up).
     pub const DEFAULT_CLOSE_BUTTON_COLOR: CloseColor = CloseColor::Theme;
-    /// Default wheel cooldown — `40` ms between steps, taming a stepless device's
-    /// flick burst out of the box while still letting a deliberate notch step at
-    /// once. Set `0` to disable the limiter (the pre-#83 one-step-per-event feel) (#83).
-    pub const DEFAULT_SCROLL_COOLDOWN_MS: usize = 40;
 
     /// Parse the configuration map, falling back to a default for any missing or
     /// malformed value. Total: never panics on bad input.
@@ -198,10 +165,6 @@ impl Config {
                 .get("gutter")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_GUTTER),
-            reorder: configuration
-                .get("reorder")
-                .and_then(|raw| raw.parse().ok())
-                .unwrap_or(Self::DEFAULT_REORDER),
             gradient: configuration
                 .get("gradient")
                 .and_then(|raw| raw.parse().ok())
@@ -231,10 +194,6 @@ impl Config {
                 .get("new_tab_button")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_NEW_TAB_BUTTON),
-            scroll: configuration
-                .get("scroll")
-                .and_then(|raw| raw.parse().ok())
-                .unwrap_or(Self::DEFAULT_SCROLL),
             close_button: configuration
                 .get("close_button")
                 .and_then(|raw| raw.parse().ok())
@@ -243,10 +202,6 @@ impl Config {
                 .get("close_button_color")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_CLOSE_BUTTON_COLOR),
-            scroll_cooldown_ms: configuration
-                .get("scroll_cooldown_ms")
-                .and_then(|raw| raw.parse().ok())
-                .unwrap_or(Self::DEFAULT_SCROLL_COOLDOWN_MS),
         }
     }
 
@@ -355,7 +310,6 @@ mod tests {
         assert_eq!(config.align, Alignment::Center);
         assert_eq!(config.tab_gap, 2);
         assert!(!config.gutter);
-        assert!(!config.reorder);
         assert_eq!(config.gradient, GradientMode::Sheen);
         assert_eq!(config.gradient_shape, GradientShape::Linear);
         assert_eq!(config.gradient_angle, 0);
@@ -363,9 +317,7 @@ mod tests {
         assert!(config.inactive_dim);
         assert!(config.perspective);
         assert!(config.new_tab_button);
-        assert_eq!(config.scroll, ScrollMode::Tab);
         assert!(config.close_button);
-        assert_eq!(config.scroll_cooldown_ms, 40);
     }
 
     #[test]
@@ -376,7 +328,6 @@ mod tests {
             ("align", "left"),
             ("tab_gap", "1"),
             ("gutter", "true"),
-            ("reorder", "true"),
             ("gradient", "sheen"),
         ]);
         assert_eq!(config.shortcut_prefix, "C-");
@@ -384,7 +335,6 @@ mod tests {
         assert_eq!(config.align, Alignment::Left);
         assert_eq!(config.tab_gap, 1);
         assert!(config.gutter);
-        assert!(config.reorder);
         assert_eq!(config.gradient, GradientMode::Sheen);
     }
 
@@ -524,12 +474,6 @@ mod tests {
     }
 
     #[test]
-    fn malformed_reorder_falls_back() {
-        assert!(!config_from(&[("reorder", "yes")]).reorder);
-        assert!(!config_from(&[("reorder", "")]).reorder);
-    }
-
-    #[test]
     fn malformed_tab_gap_falls_back() {
         assert_eq!(config_from(&[("tab_gap", "wide")]).tab_gap, 2);
         assert_eq!(config_from(&[("tab_gap", "")]).tab_gap, 2);
@@ -557,21 +501,6 @@ mod tests {
     fn parses_explicit_perspective_off() {
         // The depth cue is on by default; an explicit `false` opts out.
         assert!(!config_from(&[("perspective", "false")]).perspective);
-    }
-
-    #[test]
-    fn parses_scroll_modes() {
-        assert_eq!(config_from(&[("scroll", "tab")]).scroll, ScrollMode::Tab);
-        assert_eq!(config_from(&[("scroll", "pane")]).scroll, ScrollMode::Pane);
-        assert_eq!(config_from(&[("scroll", "off")]).scroll, ScrollMode::Off);
-    }
-
-    #[test]
-    fn malformed_scroll_falls_back_to_tab() {
-        // Unknown / wrong-case / empty values keep the zellij-stock default.
-        assert_eq!(config_from(&[("scroll", "wheel")]).scroll, ScrollMode::Tab);
-        assert_eq!(config_from(&[("scroll", "Tab")]).scroll, ScrollMode::Tab);
-        assert_eq!(config_from(&[("scroll", "")]).scroll, ScrollMode::Tab);
     }
 
     #[test]
@@ -655,39 +584,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_scroll_cooldown_ms() {
-        // A valid millisecond window is preserved verbatim; `0` is the documented
-        // value for disabling the limiter (the pre-#83 one-step-per-event feel).
-        assert_eq!(
-            config_from(&[("scroll_cooldown_ms", "80")]).scroll_cooldown_ms,
-            80
-        );
-        assert_eq!(
-            config_from(&[("scroll_cooldown_ms", "0")]).scroll_cooldown_ms,
-            0
-        );
-    }
-
-    #[test]
-    fn malformed_scroll_cooldown_ms_falls_back() {
-        // Non-numeric / negative / empty values keep the taming default. An
-        // explicit `0` parses fine here (it disables the limiter at the use site,
-        // where `gate` short-circuits to `Navigate`).
-        assert_eq!(
-            config_from(&[("scroll_cooldown_ms", "fast")]).scroll_cooldown_ms,
-            40
-        );
-        assert_eq!(
-            config_from(&[("scroll_cooldown_ms", "-1")]).scroll_cooldown_ms,
-            40
-        );
-        assert_eq!(
-            config_from(&[("scroll_cooldown_ms", "")]).scroll_cooldown_ms,
-            40
-        );
-    }
-
-    #[test]
     fn malformed_perspective_falls_back() {
         // A malformed or empty value keeps the on-by-default cue.
         assert!(config_from(&[("perspective", "sometimes")]).perspective);
@@ -715,6 +611,5 @@ mod tests {
         assert_eq!(config.align, Alignment::Center);
         assert_eq!(config.tab_gap, 2);
         assert!(!config.gutter);
-        assert!(!config.reorder);
     }
 }

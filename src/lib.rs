@@ -12,6 +12,7 @@ pub mod minimap;
 pub mod paint;
 pub mod projection;
 pub(crate) mod router;
+pub mod scroll;
 pub mod tab_block;
 pub(crate) mod theme;
 pub mod title;
@@ -178,6 +179,21 @@ impl ZellijPlugin for State {
                     router::ClickIntent::SwitchTab(target) => switch_tab_to(target),
                     router::ClickIntent::NoOp => {}
                 }
+                false
+            }
+            // The wheel carries no position, so it acts on the live tab/pane set
+            // rather than a clicked spot (#80, restored #108). One event = one
+            // step: the rate-limiter #104 deleted is gone for good — `off` mode
+            // is the opt-out for stepless devices whose flick bursts step several
+            // at once. Stock tab-bar direction: up = forward (next). The host
+            // effect lands back as a Tab/Pane update that drives the repaint, so
+            // the scroll itself requests none.
+            Event::Mouse(Mouse::ScrollUp(_)) => {
+                self.scroll(scroll::ScrollDir::Forward);
+                false
+            }
+            Event::Mouse(Mouse::ScrollDown(_)) => {
+                self.scroll(scroll::ScrollDir::Backward);
                 false
             }
             // Remaining events need no repaint.
@@ -382,6 +398,81 @@ impl State {
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
         ]
+    }
+
+    /// Dispatch a wheel event to the configured navigation: switch tabs, walk
+    /// panes, or do nothing (#80, restored #108). zellij scroll events carry no
+    /// position, so the gesture is bar-wide — it acts on the live tab/pane set,
+    /// not a clicked spot. One event = one step: the rate-limiter #104 removed
+    /// (#83/#96/#100) is gone for good (#108), so a stepless device's flick burst
+    /// steps several at once — `off` mode is the opt-out. The pure `next_*`
+    /// resolvers decide the target; this thin arm turns it into the host call.
+    fn scroll(&self, dir: scroll::ScrollDir) {
+        match self.config.scroll {
+            scroll::ScrollMode::Off => {}
+            scroll::ScrollMode::Tab => self.scroll_tabs(dir),
+            scroll::ScrollMode::Pane => self.scroll_panes(dir),
+        }
+    }
+
+    /// Switch one tab in `dir` from the active tab, wrapping at the ends. No-op
+    /// when there is no active tab (a mid-transition snapshot).
+    fn scroll_tabs(&self, dir: scroll::ScrollDir) {
+        let Some(active) = projection::active_tab(&self.tabs).map(|tab| tab.position) else {
+            return;
+        };
+        let Some(target) = scroll::next_tab(active, self.tabs.len(), dir) else {
+            return;
+        };
+        // `next_tab` works in 0-based positions; `switch_tab_to` is 1-based.
+        switch_tab_to((target + 1) as u32);
+    }
+
+    /// Move the focused pane one step in `dir` along the reading-order traversal
+    /// of every tab's panes, crossing tab boundaries and wrapping globally (#80).
+    /// Focusing is absolute (`focus_terminal_pane`), which both switches to the
+    /// pane's tab and emits a session-state report — so the highlight follows.
+    /// No-op when nothing tiled is focused.
+    fn scroll_panes(&self, dir: scroll::ScrollDir) {
+        let Some(current) = self.focused_pane_id() else {
+            return;
+        };
+        let Some(target) = scroll::next_pane(&self.pane_focus_order(), current, dir) else {
+            return;
+        };
+        // A visible tiled terminal pane is never hidden, so both float/in-place
+        // flags are moot — pass `false`, exactly as the click-to-focus path (#74).
+        focus_terminal_pane(target, false, false);
+    }
+
+    /// The id of the focused tiled terminal pane in the active tab, if any — the
+    /// anchor the wheel steps from in `pane` mode.
+    fn focused_pane_id(&self) -> Option<u32> {
+        let active = projection::active_tab(&self.tabs)?;
+        self.panes
+            .panes
+            .get(&active.position)?
+            .iter()
+            .filter(|pane| projection::is_tiled_terminal(pane))
+            .find(|pane| pane.is_focused)
+            .map(|pane| pane.id)
+    }
+
+    /// Every tab's tiled terminal panes flattened into one wheel-traversal order:
+    /// tabs in ascending position, panes in reading order within each tab (#80).
+    ///
+    /// Tab order comes from the authoritative `self.tabs`, not the `PaneManifest`
+    /// keys: `TabUpdate` and `PaneUpdate` arrive as separate events, so a just-
+    /// closed tab can still linger as a stale position in the manifest. Walking
+    /// `self.tabs` drops those, so the wheel never steps into a pane of a tab that
+    /// no longer exists.
+    fn pane_focus_order(&self) -> Vec<u32> {
+        let mut tabs: Vec<&TabInfo> = self.tabs.iter().collect();
+        tabs.sort_by_key(|tab| tab.position);
+        tabs.into_iter()
+            .filter_map(|tab| self.panes.panes.get(&tab.position))
+            .flat_map(|panes| projection::pane_ids_in_reading_order(panes))
+            .collect()
     }
 }
 
@@ -1103,5 +1194,131 @@ mod tests {
         state.render(MIN_ROWS, 80);
 
         assert!(state.button_layout.is_none());
+    }
+
+    fn focusable_pane(id: u32, x: usize, focused: bool) -> PaneInfo {
+        PaneInfo {
+            id,
+            pane_x: x,
+            pane_y: 1,
+            pane_columns: 40,
+            pane_rows: 24,
+            is_focused: focused,
+            title: "sh".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Two tabs (positions 0 active, 1 inactive) whose tiled panes flatten to the
+    /// reading-order traversal `[10, 20, 30]` — 10 (x=0) and 20 (x=40) in tab 0,
+    /// then 30 in tab 1. `focused` marks which pane (if any) carries focus.
+    fn scroll_state(mode: scroll::ScrollMode, focused: Option<u32>) -> State {
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(
+            0,
+            vec![
+                focusable_pane(10, 0, focused == Some(10)),
+                focusable_pane(20, 40, focused == Some(20)),
+            ],
+        );
+        manifest
+            .panes
+            .insert(1, vec![focusable_pane(30, 0, focused == Some(30))]);
+
+        let mut state = State::default();
+        state.config = Config {
+            scroll: mode,
+            ..Default::default()
+        };
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                ..tab(0, 1)
+            },
+            TabInfo {
+                active: false,
+                ..tab(1, 2)
+            },
+        ];
+        state.panes = manifest;
+        state
+    }
+
+    #[test]
+    fn focused_pane_id_resolves_the_active_tabs_focused_pane() {
+        // The anchor is the focused pane of the *active* tab only — tab 1's pane
+        // is never the answer even though it sits earlier in the manifest map.
+        let state = scroll_state(scroll::ScrollMode::Pane, Some(20));
+        assert_eq!(state.focused_pane_id(), Some(20));
+    }
+
+    #[test]
+    fn focused_pane_id_is_none_without_a_focus() {
+        // No focused pane in the active tab → no anchor, so `pane` mode leaves
+        // focus untouched rather than guessing a target.
+        let state = scroll_state(scroll::ScrollMode::Pane, None);
+        assert_eq!(state.focused_pane_id(), None);
+    }
+
+    #[test]
+    fn pane_focus_order_flattens_tabs_then_reading_order() {
+        // Tabs in ascending position, panes in reading order within each: tab 0's
+        // 10 (x=0) then 20 (x=40), then tab 1's 30 — the global wheel traversal.
+        let state = scroll_state(scroll::ScrollMode::Pane, Some(10));
+        assert_eq!(state.pane_focus_order(), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn pane_focus_order_ignores_manifest_positions_not_in_the_tabs() {
+        // `TabUpdate` and `PaneUpdate` arrive separately, so a just-closed tab can
+        // linger as a stale position in the manifest. The traversal walks the
+        // authoritative `self.tabs`, so that stale pane (99 at position 5) is
+        // never visited — the wheel can't step into a tab that no longer exists.
+        let mut state = scroll_state(scroll::ScrollMode::Pane, Some(10));
+        state
+            .panes
+            .panes
+            .insert(5, vec![focusable_pane(99, 0, false)]);
+        assert_eq!(state.pane_focus_order(), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn scroll_dispatches_each_mode_without_panicking() {
+        // Host effects (`switch_tab_to` / `focus_terminal_pane`) are no-op stubs
+        // off-wasm, so the contract is that every mode dispatches both directions
+        // over the live tab/pane set without panicking. One event = one step;
+        // there is no cooldown to disable (#108).
+        for mode in [
+            scroll::ScrollMode::Tab,
+            scroll::ScrollMode::Pane,
+            scroll::ScrollMode::Off,
+        ] {
+            let state = scroll_state(mode, Some(20));
+            state.scroll(scroll::ScrollDir::Forward);
+            state.scroll(scroll::ScrollDir::Backward);
+        }
+    }
+
+    #[test]
+    fn scroll_guards_no_op_without_an_anchor() {
+        // `tab` mode with no active tab, and `pane` mode with no focused pane,
+        // both hit their guard returns and leave the session untouched (no host
+        // effect) rather than guessing a target.
+        let mut tabless = scroll_state(scroll::ScrollMode::Tab, None);
+        tabless.tabs.iter_mut().for_each(|tab| tab.active = false);
+        tabless.scroll(scroll::ScrollDir::Forward);
+
+        let paneless = scroll_state(scroll::ScrollMode::Pane, None);
+        paneless.scroll(scroll::ScrollDir::Backward);
+    }
+
+    #[test]
+    fn scroll_up_and_down_dispatch_through_update() {
+        // The wheel arms in `update()` route to `self.scroll`; host effects are
+        // stubs off-wasm, so both directions dispatch without panicking and the
+        // arm requests no repaint (the host effect's Tab/Pane update does).
+        let mut state = scroll_state(scroll::ScrollMode::Tab, Some(10));
+        assert!(!state.update(Event::Mouse(Mouse::ScrollUp(0))));
+        assert!(!state.update(Event::Mouse(Mouse::ScrollDown(0))));
     }
 }

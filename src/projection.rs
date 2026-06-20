@@ -31,6 +31,20 @@ pub fn is_tiled_terminal(pane: &PaneInfo) -> bool {
     !(pane.is_plugin || pane.is_floating || pane.is_suppressed)
 }
 
+/// The ids of a tab's tiled terminal panes in **reading order** — top to bottom,
+/// then left to right — the per-tab order the wheel walks in `pane` mode (#80,
+/// restored #108). Chrome / floating / suppressed panes are dropped via the same
+/// [`is_tiled_terminal`] filter the minimap uses, so the wheel and the minimap
+/// can never disagree on which panes exist.
+pub fn pane_ids_in_reading_order(panes: &[PaneInfo]) -> Vec<u32> {
+    let mut tiled: Vec<&PaneInfo> = panes
+        .iter()
+        .filter(|pane| is_tiled_terminal(pane))
+        .collect();
+    tiled.sort_by_key(|pane| (pane.pane_y, pane.pane_x));
+    tiled.into_iter().map(|pane| pane.id).collect()
+}
+
 /// Project a tab's panes into renderer rectangles, dropping everything that is
 /// not part of the user's tiled layout.
 ///
@@ -183,5 +197,45 @@ mod tests {
         }];
         assert!(project(&panes).is_empty());
         assert!(project(&[]).is_empty());
+    }
+
+    #[test]
+    fn pane_ids_in_reading_order_sorts_top_to_bottom_then_left_to_right() {
+        let pane = |id: u32, x: usize, y: usize| PaneInfo {
+            id,
+            pane_x: x,
+            pane_y: y,
+            ..Default::default()
+        };
+        // Declared out of order; reading order is (pane_y, then pane_x): the
+        // top row left→right (10 at x=0, 20 at x=40) then the lower pane (30).
+        let panes = [pane(20, 40, 0), pane(30, 0, 12), pane(10, 0, 0)];
+        assert_eq!(pane_ids_in_reading_order(&panes), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn pane_ids_in_reading_order_drops_chrome_and_overlays() {
+        // The same tiled filter as the minimap: plugin / floating / suppressed
+        // panes never enter the wheel traversal.
+        let panes = [
+            PaneInfo {
+                id: 1,
+                is_plugin: true,
+                ..Default::default()
+            },
+            PaneInfo {
+                id: 2,
+                is_floating: true,
+                ..Default::default()
+            },
+            PaneInfo {
+                id: 3,
+                is_suppressed: true,
+                ..Default::default()
+            },
+            content_pane_with_id(7, 0, true),
+        ];
+        assert_eq!(pane_ids_in_reading_order(&panes), vec![7]);
+        assert!(pane_ids_in_reading_order(&[]).is_empty());
     }
 }

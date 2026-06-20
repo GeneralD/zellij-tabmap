@@ -135,43 +135,49 @@ impl ZellijPlugin for State {
                 true
             }
             Event::Mouse(Mouse::LeftClick(row, column)) => {
-                // A click in the "+" button's span opens (and focuses) a new tab
-                // and consumes the gesture — it never falls through to a pane
-                // focus or tab switch. zellij focuses the new tab; the resulting
-                // TabUpdate drives the repaint, so this requests none. The button
-                // span is only ever recorded when `config.new_tab_button` is on
-                // (see `render`), so a disabled button leaves this guard inert (#76).
-                //
-                // Otherwise the click resolves as finely as the drawn frame
-                // allows: when it lands on a pane cell of a tab's minimap, focus
-                // that exact pane (#74); otherwise fall back to switching to the
-                // clicked tab (#8). Focusing a pane also switches to its tab, so a
-                // click on a non-active tab's pane both switches and focuses in one
-                // step. The change arrives back as a Tab/Pane update that drives
-                // the repaint, so this arm requests none.
-                if router::clicked_new_tab_button(self.button_layout, column) {
-                    let _opened = new_tab::<&str>(None, None);
-                    return false;
+                // The pure router resolves the click against the live frame's
+                // recorded geometry, in the priority the bar paints its
+                // affordances: the "+" button (#76) > a tab's close "×" (#86) >
+                // the finer click-to-focus minimap pane (#74) > a plain tab-switch
+                // (#8) > nothing. This arm is the sole host-effect dispatcher —
+                // it turns the one resolved intent into the one matching host
+                // call. Every effect arrives back as a Tab/Pane update that drives
+                // the repaint, so the click itself requests none.
+                match router::route_click(
+                    self.button_layout,
+                    &self.close_layout,
+                    &self.tab_layout,
+                    &self.tab_panes,
+                    row,
+                    column,
+                ) {
+                    // zellij focuses the new tab; its TabUpdate drives the redraw.
+                    router::ClickIntent::NewTab => {
+                        let _opened = new_tab::<&str>(None, None);
+                    }
+                    // `close_tab_with_index` closes by position without focusing
+                    // first, riding the already-granted `ChangeApplicationState`
+                    // (#86). Consume the close target first so a duplicate click on
+                    // the same cell can't re-dispatch off stale geometry before the
+                    // next render rebuilds `close_layout` (the close shifts panes).
+                    router::ClickIntent::CloseTab(position) => {
+                        self.close_layout.clear();
+                        close_tab_with_index(position);
+                    }
+                    // The pane survived projection's `is_plugin/is_floating/
+                    // is_suppressed` filter, so it is a visible tiled terminal
+                    // pane: never hidden, making both `should_float_if_hidden` and
+                    // `should_be_in_place_if_hidden` moot — pass `false`. Focusing
+                    // also switches to the pane's tab, so a click on a non-active
+                    // tab's pane both switches and focuses in one step. Needs
+                    // `ChangeApplicationState`, already granted for `switch_tab_to`
+                    // (#8), so no new permission (#74).
+                    router::ClickIntent::FocusPane(id) => {
+                        focus_terminal_pane(id as u32, false, false);
+                    }
+                    router::ClickIntent::SwitchTab(target) => switch_tab_to(target),
+                    router::ClickIntent::NoOp => {}
                 }
-                // A click on a tab's top-right "×" cell closes that tab and
-                // consumes the gesture — checked before the focus/switch fallback
-                // so the corner cell closes rather than switches.
-                // `close_tab_with_index` closes by position without focusing
-                // first, and rides the already-granted `ChangeApplicationState`
-                // (#86). The span is recorded only when the feature is on and >1
-                // tab is open, so this guard is inert otherwise — and the last tab
-                // is never closeable.
-                if let Some(position) =
-                    router::clicked_close_button(&self.close_layout, row, column)
-                {
-                    // Consume the close target so a duplicate click on the same
-                    // cell can't re-dispatch off stale geometry before the next
-                    // render rebuilds `close_layout` (the close shifts positions).
-                    self.close_layout.clear();
-                    close_tab_with_index(position);
-                    return false;
-                }
-                self.focus_or_switch_at(row, column);
                 false
             }
             // Remaining events need no repaint.
@@ -376,37 +382,6 @@ impl State {
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
         ]
-    }
-
-    /// Resolve a left click at (`row`, `column`) as finely as the drawn frame
-    /// allows (#74): focus the exact minimap pane under the cursor when the click
-    /// lands on one, else fall back to switching to the clicked tab (#8). Focusing
-    /// a pane also switches to its tab (zellij's `focus_terminal_pane` does), so a
-    /// click on a non-active tab's pane both switches and focuses in one step.
-    /// Both effects return as a Tab/Pane update that drives the repaint.
-    fn focus_or_switch_at(&self, row: isize, column: usize) {
-        if let Some(id) = router::pane_at(&self.tab_layout, &self.tab_panes, row, column) {
-            // The pane survived projection's `is_plugin/is_floating/is_suppressed`
-            // filter, so it is a visible tiled terminal pane: it is never hidden,
-            // making both `should_float_if_hidden` and `should_be_in_place_if_hidden`
-            // moot — pass `false`. Needs `ChangeApplicationState`, already granted
-            // for `switch_tab_to` (#8), so no new permission (#74).
-            focus_terminal_pane(id as u32, false, false);
-            return;
-        }
-        self.switch_to_tab_at(column);
-    }
-
-    /// Focus the tab whose drawn block contains `column`; a click that landed on
-    /// no block (overflow marker, gap, trailing padding) is a no-op. `column` is
-    /// the 0-based click column zellij delivers, and
-    /// [`line::switch_target_at_column`] resolves it to the 1-based index
-    /// `switch_tab_to` expects.
-    fn switch_to_tab_at(&self, column: usize) {
-        let Some(target) = line::switch_target_at_column(&self.tab_layout, column) else {
-            return;
-        };
-        switch_tab_to(target);
     }
 }
 
@@ -769,25 +744,28 @@ mod tests {
     }
 
     #[test]
-    fn focus_or_switch_at_dispatches_the_focus_and_the_switch_arms() {
-        // A click that resolves to a minimap pane drives the focus arm
-        // (`focus_terminal_pane`, a no-op host stub off-wasm); a click that
-        // resolves to no pane falls back to #8's tab-switch. Host effects are
-        // unobservable natively, so the contract is that both arms dispatch
-        // without panicking, over the same geometry `router::pane_at` reads.
+    fn left_click_dispatches_the_focus_pane_and_no_op_arms() {
+        // Driving `update` over a frame with one grid-rung tab (block at cols
+        // 10..30, pane 7): a click on the minimap dispatches the FocusPane arm
+        // (`focus_terminal_pane`, a no-op host stub off-wasm), and a click off
+        // every block resolves to NoOp — both request no repaint, the change (if
+        // any) arriving back as a Tab/Pane update. Host effects are unobservable
+        // natively, so the contract is that both arms dispatch without panicking,
+        // complementing the tab-switch fallback covered above.
         let mut state = State::default();
         state.tab_layout = vec![hit_active(0, 10, 20)];
         state.tab_panes = [(0usize, geom(10, 20, &[(7, 0, 0, 80, 24)]))]
             .into_iter()
             .collect();
 
-        assert_eq!(
-            router::pane_at(&state.tab_layout, &state.tab_panes, 1, 12),
-            Some(7),
-            "precondition: click hits pane 7"
+        assert!(
+            !state.update(Event::Mouse(Mouse::LeftClick(1, 12))),
+            "a click on pane 7 focuses it and defers the repaint"
         );
-        state.focus_or_switch_at(1, 12); // resolves to a pane → focus arm
-        state.focus_or_switch_at(1, 5); // off every block → switch fallback
+        assert!(
+            !state.update(Event::Mouse(Mouse::LeftClick(1, 5))),
+            "a click off every block is a no-op and defers the repaint"
+        );
     }
 
     #[test]

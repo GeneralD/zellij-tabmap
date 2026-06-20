@@ -75,6 +75,58 @@ pub(crate) fn clicked_close_button(
         .map(|hit| hit.position)
 }
 
+/// The single action a left click resolves to, against the geometry the last
+/// `render` recorded. Carries everything the matching host effect needs: the
+/// tab index to close, the pane id to focus, or the 1-based tab target to
+/// switch to. [`route_click`] returns exactly one of these; `lib.rs` turns it
+/// into the one host call, so this module never reaches a zellij host.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ClickIntent {
+    /// Open a new tab (#76) — the "+" button was clicked.
+    NewTab,
+    /// Close the tab at this 0-based position (#86) — its "×" cell was clicked.
+    CloseTab(usize),
+    /// Focus this pane id (#74) — a click landed on its drawn minimap cell.
+    FocusPane(usize),
+    /// Switch to this 1-based tab target (#8) — a click landed on a tab block
+    /// that draws no minimap (or on its background, off any pane). Carries the
+    /// `u32` [`line::switch_target_at_column`] yields, ready for `switch_tab_to`.
+    SwitchTab(u32),
+    /// The click matched no affordance (a gap, the overflow marker, trailing
+    /// padding) — the handler does nothing.
+    NoOp,
+}
+
+/// Resolve a left click at (`row`, `column`) to the single [`ClickIntent`] it
+/// triggers, trying the affordances in the priority the bar paints them: the
+/// "+" button sits on top (#76), then each tab's close "×" cell (#86), then the
+/// finer click-to-focus minimap pane (#74), then a plain click-to-switch on the
+/// tab's block (#8); a click matching none is [`ClickIntent::NoOp`]. Pure — the
+/// caller dispatches the one matching host effect — so the whole routing
+/// decision is unit-tested without a zellij host.
+pub(crate) fn route_click(
+    button_layout: Option<line::ButtonHit>,
+    close_layout: &[line::CloseHit],
+    tab_layout: &[line::TabHit],
+    tab_panes: &BTreeMap<usize, TabPaneGeom>,
+    row: isize,
+    column: usize,
+) -> ClickIntent {
+    if clicked_new_tab_button(button_layout, column) {
+        return ClickIntent::NewTab;
+    }
+    if let Some(position) = clicked_close_button(close_layout, row, column) {
+        return ClickIntent::CloseTab(position);
+    }
+    if let Some(id) = pane_at(tab_layout, tab_panes, row, column) {
+        return ClickIntent::FocusPane(id);
+    }
+    if let Some(target) = line::switch_target_at_column(tab_layout, column) {
+        return ClickIntent::SwitchTab(target);
+    }
+    ClickIntent::NoOp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +314,57 @@ mod tests {
             clicked_close_button(&close_layout, -1, 9),
             None,
             "a negative click row (above the bar) matches no cell"
+        );
+    }
+
+    #[test]
+    fn route_click_resolves_to_the_topmost_matching_affordance() {
+        // One frame carrying every affordance: a "+" button at cols 20..23, a
+        // close "×" at (row 0, col 15), and a grid-rung tab block at cols 10..20
+        // holding pane 7. route_click resolves a click to exactly one intent, in
+        // the bar's paint priority — button > close > pane > tab block > nothing.
+        let button = Some(line::ButtonHit {
+            start: 20,
+            width: 3,
+        });
+        let close_layout = vec![line::CloseHit {
+            position: 0,
+            row: 0,
+            column: 15,
+        }];
+        let tab_layout = vec![hit_active(0, 10, 20)];
+        let tab_panes: BTreeMap<usize, TabPaneGeom> =
+            [(0usize, geom(10, 20, &[(7, 0, 0, 80, 24)]))]
+                .into_iter()
+                .collect();
+
+        // "+" button sits on top: a press in its span opens a tab even though it
+        // overlaps the tab block's columns.
+        assert_eq!(
+            route_click(button, &close_layout, &tab_layout, &tab_panes, 0, 21),
+            ClickIntent::NewTab,
+        );
+        // The close "×" cell beats the pane/switch fallbacks under it.
+        assert_eq!(
+            route_click(button, &close_layout, &tab_layout, &tab_panes, 0, 15),
+            ClickIntent::CloseTab(0),
+        );
+        // Off the button and close cell, a click on the minimap focuses its pane.
+        assert_eq!(
+            route_click(button, &close_layout, &tab_layout, &tab_panes, 1, 12),
+            ClickIntent::FocusPane(7),
+        );
+        // A tab block that draws no minimap (no `tab_panes` entry) falls back to
+        // a plain tab-switch, resolved to the 1-based `switch_tab_to` target.
+        let narrow = vec![hit(0, 10, 3)];
+        assert_eq!(
+            route_click(None, &[], &narrow, &BTreeMap::new(), 1, 11),
+            ClickIntent::SwitchTab(1),
+        );
+        // A click off every affordance is a no-op.
+        assert_eq!(
+            route_click(button, &close_layout, &tab_layout, &tab_panes, 1, 5),
+            ClickIntent::NoOp,
         );
     }
 }

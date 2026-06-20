@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use crate::color::Rgb;
 use crate::line::Alignment;
 use crate::minimap::{GradientMode, GradientShape, GradientSpec, RadialDirection};
+use crate::scroll::ScrollMode;
 
 /// Parsed plugin configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +90,15 @@ pub struct Config {
     /// red independent of the theme), or a `#rrggbb` hex to override it. See
     /// [`CloseColor`].
     pub close_button_color: CloseColor,
+    /// How the mouse wheel navigates over the tab bar (#80, restored #108):
+    /// `tab` (default) switches tabs, `pane` walks the focused pane in reading
+    /// order, `off` disables it. One wheel event = one step — the rate-limiter
+    /// #104 removed (#83/#96/#100) is gone for good (#108), so a stepless device
+    /// (trackpad, Magic Mouse) whose flick bursts events steps several at once;
+    /// `off` is the opt-out. Rides the already-granted `ChangeApplicationState`
+    /// (same family as click-to-switch #8 / click-to-focus #74), so it triggers
+    /// no new permission prompt on auto-update (zellij#4982). See [`ScrollMode`].
+    pub scroll: ScrollMode,
 }
 
 impl Config {
@@ -140,6 +150,10 @@ impl Config {
     /// `red`, or a `#rrggbb` hex when a theme's dark error color makes the glyph
     /// hard to read (#94 follow-up).
     pub const DEFAULT_CLOSE_BUTTON_COLOR: CloseColor = CloseColor::Theme;
+    /// Default wheel behaviour — `Tab`, matching zellij's stock tab-bar (scroll
+    /// over the bar switches tabs). Set `pane` to walk panes in reading order, or
+    /// `off` to disable wheel navigation entirely (#108).
+    pub const DEFAULT_SCROLL: ScrollMode = ScrollMode::Tab;
 
     /// Parse the configuration map, falling back to a default for any missing or
     /// malformed value. Total: never panics on bad input.
@@ -202,6 +216,10 @@ impl Config {
                 .get("close_button_color")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_CLOSE_BUTTON_COLOR),
+            scroll: configuration
+                .get("scroll")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_SCROLL),
         }
     }
 
@@ -318,6 +336,7 @@ mod tests {
         assert!(config.perspective);
         assert!(config.new_tab_button);
         assert!(config.close_button);
+        assert_eq!(config.scroll, ScrollMode::Tab);
     }
 
     #[test]
@@ -611,5 +630,20 @@ mod tests {
         assert_eq!(config.align, Alignment::Center);
         assert_eq!(config.tab_gap, 2);
         assert!(!config.gutter);
+    }
+
+    #[test]
+    fn parses_scroll_modes() {
+        assert_eq!(config_from(&[("scroll", "tab")]).scroll, ScrollMode::Tab);
+        assert_eq!(config_from(&[("scroll", "pane")]).scroll, ScrollMode::Pane);
+        assert_eq!(config_from(&[("scroll", "off")]).scroll, ScrollMode::Off);
+    }
+
+    #[test]
+    fn malformed_scroll_falls_back_to_tab() {
+        // Unknown, wrong-case, and empty values keep the documented default (tab).
+        assert_eq!(config_from(&[("scroll", "wheel")]).scroll, ScrollMode::Tab);
+        assert_eq!(config_from(&[("scroll", "Tab")]).scroll, ScrollMode::Tab);
+        assert_eq!(config_from(&[("scroll", "")]).scroll, ScrollMode::Tab);
     }
 }

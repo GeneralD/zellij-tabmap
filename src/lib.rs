@@ -11,7 +11,9 @@ pub mod line;
 pub mod minimap;
 pub mod paint;
 pub mod projection;
+pub(crate) mod router;
 pub mod tab_block;
+pub(crate) mod theme;
 pub mod title;
 
 use std::collections::BTreeMap;
@@ -62,74 +64,13 @@ pub struct State {
     /// (the L0–L2 grid rungs) get an entry — narrow tabs (L3 glyph / L4 hint)
     /// draw no per-pane regions, so a click there has no pane to resolve. Cleared
     /// on every render bail-out, so a click never hit-tests a stale frame.
-    tab_panes: BTreeMap<usize, TabPaneGeom>,
+    tab_panes: BTreeMap<usize, router::TabPaneGeom>,
     /// The most recent render's per-tab close-button cells (#86) — one entry per
     /// grid-rung tab that drew an "×". Re-recorded every `render()` alongside
     /// `tab_layout` and cleared on the same bail-outs, so a `LeftClick` resolves
     /// "close tab N" against the live frame. Empty whenever the close button is
     /// disabled, only one tab is open, or no frame has drawn yet.
     close_layout: Vec<line::CloseHit>,
-}
-
-/// One visible tab's drawn pane geometry, captured each render so a later click
-/// can map (row, column) back to the pane the frame actually drew (#74). Holds
-/// exactly what [`minimap::pane_at_cell`] needs that the column-only
-/// [`line::TabHit`] does not: the block's start column, drawn width and height,
-/// the perspective `vinset`, and the tab's projected panes.
-struct TabPaneGeom {
-    start: usize,
-    width: usize,
-    rows: usize,
-    vinset: usize,
-    panes: Vec<minimap::PaneRect>,
-}
-
-/// Convert a zellij theme color to the renderer's [`color::Rgb`].
-fn rgb(c: PaletteColor) -> color::Rgb {
-    match c {
-        PaletteColor::Rgb(v) => v,
-        PaletteColor::EightBit(n) => color::from_eightbit(n),
-    }
-}
-
-/// Build the pane palette from the active theme style.
-///
-/// Slots come from the theme's `multiplayer_user_colors` — the set a theme
-/// author designs to tell *different session users apart*, which is exactly
-/// this bar's job: telling *different panes apart*. Being categorical
-/// distinguishing colors, they read as coherent adjacent fills on the bar
-/// background by construction — unlike the `emphasis` foreground-accent colors
-/// an earlier version scraped, which are tuned to sit *on top of* a fill, not
-/// beside one, and so never cohered as a minimap ramp. A theme defines only as
-/// many player slots as it cares to; the rest stay unset and collapse to the
-/// black sentinel that [`color::Palette::new`] drops — so a theme defining five
-/// players yields five hues. The focused pane keeps its slot fill, and its
-/// focus ring is derived from that fill as a luminance-shifted shade — the
-/// outline stays in the pane's own hue family (issue #47).
-/// `frame_highlight.base` is the accent that seeds the degraded-rung hint
-/// text shade ([`color::Palette::hint`], issue #32). `exit_code_error.base` —
-/// zellij's own semantic red — colors the close glyph ([`color::Palette::alert`],
-/// issue #86).
-fn palette_from_style(style: &Style) -> color::Palette {
-    let colors = &style.colors;
-    let players = colors.multiplayer_user_colors;
-    let slots = [
-        players.player_1,
-        players.player_2,
-        players.player_3,
-        players.player_4,
-        players.player_5,
-        players.player_6,
-        players.player_7,
-        players.player_8,
-        players.player_9,
-        players.player_10,
-    ]
-    .into_iter()
-    .map(rgb)
-    .collect();
-    color::Palette::new(slots, rgb(colors.frame_highlight.base))
-        .with_alert(rgb(colors.exit_code_error.base))
 }
 
 impl ZellijPlugin for State {
@@ -189,46 +130,54 @@ impl ZellijPlugin for State {
                 // the palette and repaint so pane colors track theme changes.
                 // The same event carries the terminal's font capability, which
                 // selects the close-glyph (Nerd Font vs ASCII fallback, #86).
-                self.palette = palette_from_style(&mode_info.style);
+                self.palette = theme::palette_from_style(&mode_info.style);
                 self.simplified_ui = mode_info.capabilities.arrow_fonts;
                 true
             }
             Event::Mouse(Mouse::LeftClick(row, column)) => {
-                // A click in the "+" button's span opens (and focuses) a new tab
-                // and consumes the gesture — it never falls through to a pane
-                // focus or tab switch. zellij focuses the new tab; the resulting
-                // TabUpdate drives the repaint, so this requests none. The button
-                // span is only ever recorded when `config.new_tab_button` is on
-                // (see `render`), so a disabled button leaves this guard inert (#76).
-                //
-                // Otherwise the click resolves as finely as the drawn frame
-                // allows: when it lands on a pane cell of a tab's minimap, focus
-                // that exact pane (#74); otherwise fall back to switching to the
-                // clicked tab (#8). Focusing a pane also switches to its tab, so a
-                // click on a non-active tab's pane both switches and focuses in one
-                // step. The change arrives back as a Tab/Pane update that drives
-                // the repaint, so this arm requests none.
-                if self.clicked_new_tab_button(column) {
-                    let _opened = new_tab::<&str>(None, None);
-                    return false;
+                // The pure router resolves the click against the live frame's
+                // recorded geometry, in the priority the bar paints its
+                // affordances: the "+" button (#76) > a tab's close "×" (#86) >
+                // the finer click-to-focus minimap pane (#74) > a plain tab-switch
+                // (#8) > nothing. This arm is the sole host-effect dispatcher —
+                // it turns the one resolved intent into the one matching host
+                // call. Every effect arrives back as a Tab/Pane update that drives
+                // the repaint, so the click itself requests none.
+                match router::route_click(
+                    self.button_layout,
+                    &self.close_layout,
+                    &self.tab_layout,
+                    &self.tab_panes,
+                    row,
+                    column,
+                ) {
+                    // zellij focuses the new tab; its TabUpdate drives the redraw.
+                    router::ClickIntent::NewTab => {
+                        let _opened = new_tab::<&str>(None, None);
+                    }
+                    // `close_tab_with_index` closes by position without focusing
+                    // first, riding the already-granted `ChangeApplicationState`
+                    // (#86). Consume the close target first so a duplicate click on
+                    // the same cell can't re-dispatch off stale geometry before the
+                    // next render rebuilds `close_layout` (the close shifts panes).
+                    router::ClickIntent::CloseTab(position) => {
+                        self.close_layout.clear();
+                        close_tab_with_index(position);
+                    }
+                    // The pane survived projection's `is_plugin/is_floating/
+                    // is_suppressed` filter, so it is a visible tiled terminal
+                    // pane: never hidden, making both `should_float_if_hidden` and
+                    // `should_be_in_place_if_hidden` moot — pass `false`. Focusing
+                    // also switches to the pane's tab, so a click on a non-active
+                    // tab's pane both switches and focuses in one step. Needs
+                    // `ChangeApplicationState`, already granted for `switch_tab_to`
+                    // (#8), so no new permission (#74).
+                    router::ClickIntent::FocusPane(id) => {
+                        focus_terminal_pane(id as u32, false, false);
+                    }
+                    router::ClickIntent::SwitchTab(target) => switch_tab_to(target),
+                    router::ClickIntent::NoOp => {}
                 }
-                // A click on a tab's top-right "×" cell closes that tab and
-                // consumes the gesture — checked before the focus/switch fallback
-                // so the corner cell closes rather than switches.
-                // `close_tab_with_index` closes by position without focusing
-                // first, and rides the already-granted `ChangeApplicationState`
-                // (#86). The span is recorded only when the feature is on and >1
-                // tab is open, so this guard is inert otherwise — and the last tab
-                // is never closeable.
-                if let Some(position) = self.clicked_close_button(row, column) {
-                    // Consume the close target so a duplicate click on the same
-                    // cell can't re-dispatch off stale geometry before the next
-                    // render rebuilds `close_layout` (the close shifts positions).
-                    self.close_layout.clear();
-                    close_tab_with_index(position);
-                    return false;
-                }
-                self.focus_or_switch_at(row, column);
                 false
             }
             // Remaining events need no repaint.
@@ -375,7 +324,7 @@ impl ZellijPlugin for State {
             .map(|hit| {
                 (
                     hit.position,
-                    TabPaneGeom {
+                    router::TabPaneGeom {
                         start: hit.start,
                         width: hit.width,
                         rows,
@@ -433,78 +382,6 @@ impl State {
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
         ]
-    }
-
-    /// Resolve a left click at (`row`, `column`) as finely as the drawn frame
-    /// allows (#74): focus the exact minimap pane under the cursor when the click
-    /// lands on one, else fall back to switching to the clicked tab (#8). Focusing
-    /// a pane also switches to its tab (zellij's `focus_terminal_pane` does), so a
-    /// click on a non-active tab's pane both switches and focuses in one step.
-    /// Both effects return as a Tab/Pane update that drives the repaint.
-    fn focus_or_switch_at(&self, row: isize, column: usize) {
-        if let Some(id) = self.pane_at(row, column) {
-            // The pane survived projection's `is_plugin/is_floating/is_suppressed`
-            // filter, so it is a visible tiled terminal pane: it is never hidden,
-            // making both `should_float_if_hidden` and `should_be_in_place_if_hidden`
-            // moot — pass `false`. Needs `ChangeApplicationState`, already granted
-            // for `switch_tab_to` (#8), so no new permission (#74).
-            focus_terminal_pane(id as u32, false, false);
-            return;
-        }
-        self.switch_to_tab_at(column);
-    }
-
-    /// The stable id of the minimap pane drawn at click (`row`, `column`), or
-    /// `None` when the click missed a pane — outside every tab, on a tab too
-    /// narrow to draw a minimap (an L3/L4 rung carries no `tab_panes` entry), or
-    /// on a block's background/inset cell. `row` is zellij's click line (`isize`,
-    /// negative when the pointer is above the pane); a negative or out-of-range
-    /// row resolves to `None`, so the caller falls back to a plain tab-switch.
-    /// Hit-tests against the exact geometry the last `render` recorded, so it can
-    /// never focus a pane other than the one drawn under the cursor.
-    fn pane_at(&self, row: isize, column: usize) -> Option<usize> {
-        let row = usize::try_from(row).ok()?;
-        let position = line::position_at_column(&self.tab_layout, column)?;
-        let geom = self.tab_panes.get(&position)?;
-        let col = column.checked_sub(geom.start)?;
-        minimap::pane_at_cell(&geom.panes, geom.width, geom.rows, geom.vinset, col, row)
-    }
-
-    /// Focus the tab whose drawn block contains `column`; a click that landed on
-    /// no block (overflow marker, gap, trailing padding) is a no-op. `column` is
-    /// the 0-based click column zellij delivers, and
-    /// [`line::switch_target_at_column`] resolves it to the 1-based index
-    /// `switch_tab_to` expects.
-    fn switch_to_tab_at(&self, column: usize) {
-        let Some(target) = line::switch_target_at_column(&self.tab_layout, column) else {
-            return;
-        };
-        switch_tab_to(target);
-    }
-
-    /// Whether `column` falls in the "+" button's drawn span — the pure routing
-    /// decision behind a new-tab click (#76). Tests the last frame's recorded
-    /// button geometry: `None` (button disabled, didn't fit, or no frame yet) is
-    /// always a miss. Split from the `new_tab` host effect so the decision is
-    /// unit-tested without a zellij host.
-    fn clicked_new_tab_button(&self, column: usize) -> bool {
-        self.button_layout.is_some_and(|hit| hit.contains(column))
-    }
-
-    /// The position of the tab whose close "×" cell is at (`row`, `column`), or
-    /// `None` when the click missed every close cell (#86). `row` is zellij's
-    /// click line (`isize`, negative above the pane); a negative row matches no
-    /// cell. Tests the last frame's recorded `close_layout`, which is empty
-    /// whenever the close button is disabled or only one tab is open — so this is
-    /// always a miss then, and the last tab is never closeable. Split from the
-    /// `close_tab_with_index` host effect so the routing is unit-tested without a
-    /// zellij host, mirroring [`Self::clicked_new_tab_button`].
-    fn clicked_close_button(&self, row: isize, column: usize) -> Option<usize> {
-        let row = usize::try_from(row).ok()?;
-        self.close_layout
-            .iter()
-            .find(|hit| hit.contains(row, column))
-            .map(|hit| hit.position)
     }
 }
 
@@ -849,8 +726,12 @@ mod tests {
     /// A `TabPaneGeom` for a block at `start` of `width` columns, holding panes
     /// `(id, x, y, w, h)`, at the minimum bar height with no perspective inset —
     /// the shape `render` records for a grid-rung tab (#74).
-    fn geom(start: usize, width: usize, panes: &[(usize, u32, u32, u32, u32)]) -> TabPaneGeom {
-        TabPaneGeom {
+    fn geom(
+        start: usize,
+        width: usize,
+        panes: &[(usize, u32, u32, u32, u32)],
+    ) -> router::TabPaneGeom {
+        router::TabPaneGeom {
             start,
             width,
             rows: MIN_ROWS,
@@ -863,87 +744,28 @@ mod tests {
     }
 
     #[test]
-    fn pane_at_resolves_a_click_to_the_pane_under_the_cursor() {
-        // A tab block drawn at columns 10..30 holding two side-by-side panes (id
-        // 7 left, id 3 right). A click in the block's left half resolves to pane
-        // 7, the right half to pane 3 — the finer hit-test the column-only switch
-        // (#8) could not make.
-        let mut state = State::default();
-        state.tab_layout = vec![hit_active(0, 10, 20)];
-        state.tab_panes = [(
-            0usize,
-            geom(10, 20, &[(7, 0, 0, 40, 24), (3, 40, 0, 40, 24)]),
-        )]
-        .into_iter()
-        .collect();
-
-        assert_eq!(state.pane_at(1, 12), Some(7), "left half → pane 7");
-        assert_eq!(state.pane_at(1, 27), Some(3), "right half → pane 3");
-    }
-
-    #[test]
-    fn pane_at_is_none_off_the_block_and_above_the_bar() {
-        // A column outside every recorded span, and a negative click line (the
-        // pointer above the pane), both resolve to no pane — so the caller falls
-        // back to a plain tab-switch / no-op rather than focusing a wrong pane.
+    fn left_click_dispatches_the_focus_pane_and_no_op_arms() {
+        // Driving `update` over a frame with one grid-rung tab (block at cols
+        // 10..30, pane 7): a click on the minimap dispatches the FocusPane arm
+        // (`focus_terminal_pane`, a no-op host stub off-wasm), and a click off
+        // every block resolves to NoOp — both request no repaint, the change (if
+        // any) arriving back as a Tab/Pane update. Host effects are unobservable
+        // natively, so the contract is that both arms dispatch without panicking,
+        // complementing the tab-switch fallback covered above.
         let mut state = State::default();
         state.tab_layout = vec![hit_active(0, 10, 20)];
         state.tab_panes = [(0usize, geom(10, 20, &[(7, 0, 0, 80, 24)]))]
             .into_iter()
             .collect();
 
-        assert_eq!(state.pane_at(1, 5), None, "column left of the block");
-        assert_eq!(state.pane_at(-1, 12), None, "line above the bar");
-    }
-
-    #[test]
-    fn pane_at_resolves_inside_an_inactive_tabs_minimap() {
-        // A non-active grid-rung tab still records its pane geometry, so a click
-        // on its minimap resolves to a pane — the handler then focuses it, which
-        // also switches to that tab (zellij's `focus_terminal_pane`): a click on
-        // a non-active tab's pane both switches and focuses in one step (#74).
-        let mut state = State::default();
-        state.tab_layout = vec![hit(1, 0, 12)];
-        state.tab_panes = [(1usize, geom(0, 12, &[(4, 0, 0, 80, 24)]))]
-            .into_iter()
-            .collect();
-
-        assert_eq!(state.pane_at(1, 6), Some(4));
-    }
-
-    #[test]
-    fn pane_at_falls_back_when_the_tab_draws_no_minimap() {
-        // A narrow tab (an L3 glyph / L4 hint rung) records a column span but no
-        // pane geometry — the grid-rung filter dropped it — so a click resolves
-        // to no pane and the caller falls back to #8's tab-switch, never a
-        // wrong-pane focus.
-        let mut state = State::default();
-        state.tab_layout = vec![hit(0, 10, 3)];
-        // tab_panes deliberately left empty for this tab.
-
-        assert_eq!(state.pane_at(1, 11), None);
-    }
-
-    #[test]
-    fn focus_or_switch_at_dispatches_the_focus_and_the_switch_arms() {
-        // A click that resolves to a minimap pane drives the focus arm
-        // (`focus_terminal_pane`, a no-op host stub off-wasm); a click that
-        // resolves to no pane falls back to #8's tab-switch. Host effects are
-        // unobservable natively, so the contract is that both arms dispatch
-        // without panicking, over the same geometry `pane_at` reads.
-        let mut state = State::default();
-        state.tab_layout = vec![hit_active(0, 10, 20)];
-        state.tab_panes = [(0usize, geom(10, 20, &[(7, 0, 0, 80, 24)]))]
-            .into_iter()
-            .collect();
-
-        assert_eq!(
-            state.pane_at(1, 12),
-            Some(7),
-            "precondition: click hits pane 7"
+        assert!(
+            !state.update(Event::Mouse(Mouse::LeftClick(1, 12))),
+            "a click on pane 7 focuses it and defers the repaint"
         );
-        state.focus_or_switch_at(1, 12); // resolves to a pane → focus arm
-        state.focus_or_switch_at(1, 5); // off every block → switch fallback
+        assert!(
+            !state.update(Event::Mouse(Mouse::LeftClick(1, 5))),
+            "a click off every block is a no-op and defers the repaint"
+        );
     }
 
     #[test]
@@ -1024,41 +846,6 @@ mod tests {
     }
 
     #[test]
-    fn clicked_new_tab_button_hit_tests_the_recorded_button_span() {
-        // The pure routing predicate behind a new-tab click: a column inside the
-        // recorded "+" span is a hit, one outside misses, and no recorded button
-        // (disabled or no frame yet) always misses. Keeping the decision pure is
-        // what lets it be tested without a zellij host — the `new_tab` host
-        // effect (which reads stdin) is reached only past a true hit.
-        let mut state = State::default();
-        assert!(
-            !state.clicked_new_tab_button(10),
-            "no recorded button → every click misses"
-        );
-
-        state.button_layout = Some(line::ButtonHit {
-            start: 20,
-            width: 3,
-        });
-        assert!(
-            state.clicked_new_tab_button(20),
-            "left edge of the span hits"
-        );
-        assert!(
-            state.clicked_new_tab_button(22),
-            "right edge of the span hits"
-        );
-        assert!(
-            !state.clicked_new_tab_button(19),
-            "just before the span misses"
-        );
-        assert!(
-            !state.clicked_new_tab_button(23),
-            "just past the span misses"
-        );
-    }
-
-    #[test]
     fn render_records_the_button_span_only_when_enabled() {
         // With the button enabled (the default) a wide-enough frame reserves and
         // records its span, so a later click can route to "open a new tab".
@@ -1092,48 +879,6 @@ mod tests {
         assert!(
             state.button_layout.is_none(),
             "the disabled button records no span"
-        );
-    }
-
-    #[test]
-    fn clicked_close_button_hit_tests_the_recorded_close_cell() {
-        // The pure routing predicate behind a close click: only the exact
-        // (row, column) cell recorded for a tab resolves to its position. A
-        // click one row down (still in the block, but a pane/switch target) or
-        // one column off misses, and an empty `close_layout` (disabled or a lone
-        // tab) always misses — so the `close_tab_with_index` host effect is
-        // reached only past a true hit, and the last tab is never closeable.
-        let mut state = State::default();
-        assert_eq!(
-            state.clicked_close_button(0, 9),
-            None,
-            "no recorded close cell → every click misses"
-        );
-
-        state.close_layout = vec![line::CloseHit {
-            position: 2,
-            row: 0,
-            column: 9,
-        }];
-        assert_eq!(
-            state.clicked_close_button(0, 9),
-            Some(2),
-            "the exact close cell resolves to its tab position"
-        );
-        assert_eq!(
-            state.clicked_close_button(1, 9),
-            None,
-            "one row below the close cell misses (still a switch/focus target)"
-        );
-        assert_eq!(
-            state.clicked_close_button(0, 8),
-            None,
-            "one column left of the close cell misses"
-        );
-        assert_eq!(
-            state.clicked_close_button(-1, 9),
-            None,
-            "a negative click row (above the bar) matches no cell"
         );
     }
 
@@ -1358,38 +1103,5 @@ mod tests {
         state.render(MIN_ROWS, 80);
 
         assert!(state.button_layout.is_none());
-    }
-
-    #[test]
-    fn palette_slots_come_from_multiplayer_user_colors() {
-        // The follow palette draws pane fills from the theme's categorical
-        // "distinguish session users" colors. A theme that defines three
-        // players and leaves the rest unset must yield exactly those three
-        // hues, in declaration order, with the unset (black-sentinel) slots
-        // dropped — so pane identity cycles over a coherent theme-authored ramp
-        // rather than the foreground emphasis colors an earlier version scraped.
-        let mut style = Style::default();
-        style.colors.multiplayer_user_colors = MultiplayerColors {
-            player_1: PaletteColor::Rgb((10, 20, 30)),
-            player_2: PaletteColor::Rgb((40, 50, 60)),
-            player_4: PaletteColor::Rgb((70, 80, 90)),
-            // player_3 and player_5..=player_10 stay EightBit(0) → dropped.
-            ..Default::default()
-        };
-        style.colors.frame_highlight.base = PaletteColor::Rgb((200, 100, 50));
-
-        let p = palette_from_style(&style);
-
-        // Exactly the three defined hues, cycled by identity in declaration
-        // order (player_3 dropped between player_2 and player_4).
-        assert_eq!(p.color_for(0), (10, 20, 30));
-        assert_eq!(p.color_for(1), (40, 50, 60));
-        assert_eq!(p.color_for(2), (70, 80, 90));
-        assert_eq!(p.color_for(3), (10, 20, 30));
-
-        // The ring is derived from the pane's own fill as a luminance-shifted
-        // shade (issue #47), so the outline stays in the pane's hue family
-        // rather than tracking the theme accent.
-        assert_ne!(p.ring_for(0), p.color_for(0));
     }
 }

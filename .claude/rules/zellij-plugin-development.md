@@ -402,3 +402,36 @@ The `position` argument is the **0-based tab index** matching
 `TabInfo::position` — already carried on the `TabHit` geometry struct as
 `TabHit.position` (`src/line.rs`), so the `LeftClick` close-button handler
 passes it straight through.
+
+---
+
+## 17. `new_tab` reads a value back from stdin — it **panics** in native tests, so it is wasm-only coverage
+
+Most zellij-tile host calls are fire-and-forget: `focus_terminal_pane`,
+`switch_tab_to`, `close_tab_with_index`, `set_selectable`,
+`request_permission`, `subscribe` all push a command to the host and return
+`()`. The native test stub (see #8 — `#[cfg(test)] #[no_mangle] extern "C" fn
+host_run_plugin_command() {}`) absorbs them, so each can be driven through
+`update()` and asserted on in `cargo test --lib`.
+
+`new_tab::<&str>(None, None)` is different: its shim **reads a return value
+back from the plugin's stdin** (`zellij_tile`'s `shim.rs` does a
+`Result::unwrap()` on a deserialize-from-stdin). On wasm the host supplies
+those bytes; in a native test there is nothing on stdin, so the deserialize
+fails and the `unwrap()` **panics** ("failed to deserialize bytes from stdin
+/ EOF"). The empty stub cannot help — the panic is on the *return* path,
+inside the shim, not in `host_run_plugin_command`.
+
+Consequence: the `Event::Mouse(LeftClick)` arm that dispatches
+`ClickIntent::NewTab => { new_tab::<&str>(None, None); }` (`src/lib.rs`)
+**cannot** be exercised off-wasm — that one host-effect line is inherently
+wasm-only coverage, and llvm-cov will always report it as missed. Don't try
+to "fix" the gap with a native test; it can only panic.
+
+**Way out (keep coverage honest):** push the *decision* out of the host-effect
+arm and into a pure, fully-covered function. The routing that resolves a
+click to `ClickIntent::NewTab` lives in `src/router.rs::route_click` and **is**
+unit-tested; only the final `new_tab(...)` call stays uncovered. So the
+projection/decision is verified natively and just the irreducible host call is
+left to wasm — the same split as #7 (data via the eprintln oracle, paint via
+renderer unit tests).

@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn palette_slots_come_from_multiplayer_user_colors() {
-        // The follow palette draws pane fills from the theme's categorical
+        // The following palette draws pane fills from the theme's categorical
         // "distinguish session users" colors. A theme that defines three
         // players and leaves the rest unset must yield exactly those three
         // hues, in declaration order, with the unset (black-sentinel) slots

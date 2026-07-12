@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 
 use crate::color::Rgb;
+use crate::floating::FloatingMode;
 use crate::line::Alignment;
 use crate::minimap::{GradientMode, GradientShape, GradientSpec, RadialDirection};
 use crate::scroll::ScrollMode;
@@ -99,6 +100,13 @@ pub struct Config {
     /// (same family as click-to-switch #8 / click-to-focus #74), so it triggers
     /// no new permission prompt on auto-update (zellij#4982). See [`ScrollMode`].
     pub scroll: ScrollMode,
+    /// How the bar depicts floating panes (#110). `hybrid` (default) overlays a
+    /// tab's visible floats on its minimap and chips its hidden ones in the
+    /// bottom-right corner; `off` draws no floating panes (the pre-#110 look).
+    /// Rides the already-granted `ChangeApplicationState` (a hidden-float chip
+    /// reveals+focuses via `focus_terminal_pane`), so it triggers no new
+    /// permission prompt on auto-update. See [`FloatingMode`].
+    pub floating: FloatingMode,
 }
 
 impl Config {
@@ -154,6 +162,9 @@ impl Config {
     /// over the bar switches tabs). Set `pane` to walk panes in reading order, or
     /// `off` to disable wheel navigation entirely (#108).
     pub const DEFAULT_SCROLL: ScrollMode = ScrollMode::Tab;
+    /// Default floating depiction — `Hybrid`, so floating panes show out of the
+    /// box (#110). A tab with no floating panes renders identically to before.
+    pub const DEFAULT_FLOATING: FloatingMode = FloatingMode::Hybrid;
 
     /// Parse the configuration map, falling back to a default for any missing or
     /// malformed value. Total: never panics on bad input.
@@ -220,6 +231,10 @@ impl Config {
                 .get("scroll")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_SCROLL),
+            floating: configuration
+                .get("floating")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_FLOATING),
         }
     }
 
@@ -337,6 +352,7 @@ mod tests {
         assert!(config.new_tab_button);
         assert!(config.close_button);
         assert_eq!(config.scroll, ScrollMode::Tab);
+        assert_eq!(config.floating, FloatingMode::Hybrid);
     }
 
     #[test]
@@ -645,5 +661,39 @@ mod tests {
         assert_eq!(config_from(&[("scroll", "wheel")]).scroll, ScrollMode::Tab);
         assert_eq!(config_from(&[("scroll", "Tab")]).scroll, ScrollMode::Tab);
         assert_eq!(config_from(&[("scroll", "")]).scroll, ScrollMode::Tab);
+    }
+
+    #[test]
+    fn parses_floating_modes() {
+        assert_eq!(
+            config_from(&[("floating", "hybrid")]).floating,
+            FloatingMode::Hybrid
+        );
+        assert_eq!(
+            config_from(&[("floating", "off")]).floating,
+            FloatingMode::Off
+        );
+    }
+
+    #[test]
+    fn floating_defaults_to_hybrid() {
+        assert_eq!(config_from(&[]).floating, FloatingMode::Hybrid);
+    }
+
+    #[test]
+    fn malformed_floating_falls_back_to_hybrid() {
+        // Unknown / wrong-case / empty values keep the on-by-default hybrid look.
+        assert_eq!(
+            config_from(&[("floating", "strip")]).floating,
+            FloatingMode::Hybrid
+        );
+        assert_eq!(
+            config_from(&[("floating", "Off")]).floating,
+            FloatingMode::Hybrid
+        );
+        assert_eq!(
+            config_from(&[("floating", "")]).floating,
+            FloatingMode::Hybrid
+        );
     }
 }

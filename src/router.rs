@@ -24,6 +24,9 @@ pub(crate) struct TabPaneGeom {
     /// same order [`crate::floating::chip_cells`] lays them out. Empty when the
     /// tab has no hidden floats (its layer is visible / off / it has none).
     pub(crate) hidden_floats: Vec<usize>,
+    /// Visible floating panes overlaid this frame (#110), for the visible-layer
+    /// hit-test. Empty when the tab's layer is hidden / off / has no floats.
+    pub(crate) visible_floats: Vec<minimap::PaneRect>,
 }
 
 /// The stable id of the minimap pane drawn at click (`row`, `column`), or
@@ -74,6 +77,36 @@ pub(crate) fn float_chip_at(
         row,
     )?;
     geom.hidden_floats.get(index).copied()
+}
+
+/// The visible floating pane id drawn at click (`row`, `column`) — the overlay
+/// counterpart of [`float_chip_at`] (#110). `None` when the tab has no visible
+/// floats or the cell is off every float box. Resolves against the same
+/// [`minimap::float_pane_at_cell`] mapping `render` painted, so draw and
+/// hit-test never disagree. Tried alongside [`float_chip_at`] before the tiled
+/// [`pane_at`] (float priority, spec §7.1).
+pub(crate) fn float_overlay_at(
+    tab_layout: &[line::TabHit],
+    tab_panes: &BTreeMap<usize, TabPaneGeom>,
+    row: isize,
+    column: usize,
+) -> Option<usize> {
+    let row = usize::try_from(row).ok()?;
+    let position = line::position_at_column(tab_layout, column)?;
+    let geom = tab_panes.get(&position)?;
+    if geom.visible_floats.is_empty() {
+        return None;
+    }
+    let col = column.checked_sub(geom.start)?;
+    minimap::float_pane_at_cell(
+        &geom.panes,
+        &geom.visible_floats,
+        geom.width,
+        geom.rows,
+        geom.vinset,
+        col,
+        row,
+    )
 }
 
 /// Whether `column` falls in the "+" button's drawn span — the pure routing
@@ -155,9 +188,12 @@ pub(crate) fn route_click(
     if let Some(position) = clicked_close_button(close_layout, row, column) {
         return ClickIntent::CloseTab(position);
     }
-    // Floating panes sit on top of the tiled minimap, so a hidden-float chip
-    // wins over the tiled pane in the same cell (float priority, spec §7.1).
-    if let Some(id) = float_chip_at(tab_layout, tab_panes, row, column) {
+    // Floating panes sit on top of the tiled minimap, so a float — a hidden-layer
+    // corner chip or a visible-layer overlay — wins over the tiled pane in the
+    // same cell (float priority, spec §7.1).
+    if let Some(id) = float_chip_at(tab_layout, tab_panes, row, column)
+        .or_else(|| float_overlay_at(tab_layout, tab_panes, row, column))
+    {
         return ClickIntent::FocusFloatingPane(id);
     }
     if let Some(id) = pane_at(tab_layout, tab_panes, row, column) {
@@ -188,6 +224,7 @@ mod tests {
                 .map(|&(id, x, y, w, h)| minimap::PaneRect::new(id, x, y, w, h, "sh", false))
                 .collect(),
             hidden_floats: Vec::new(),
+            visible_floats: Vec::new(),
         }
     }
 
@@ -452,6 +489,22 @@ mod tests {
         assert_eq!(
             route_click(None, &[], &tab_layout, &tab_panes, 0, 12),
             ClickIntent::FocusPane(5),
+        );
+    }
+
+    #[test]
+    fn route_click_prefers_a_visible_float_overlay_over_the_tiled_pane() {
+        // A tab whose visible float overlay covers part of the block. A click on
+        // the float resolves to FocusFloatingPane; elsewhere falls to the tiled
+        // pane.
+        let tab_layout = vec![hit_active(0, 10, 20)];
+        let mut g = geom(10, 20, &[(0, 0, 0, 100, 40)]); // tiled fills block
+        g.visible_floats = vec![minimap::PaneRect::new(7, 30, 12, 40, 16, "f", false)];
+        let tab_panes: BTreeMap<usize, TabPaneGeom> = [(0usize, g)].into_iter().collect();
+        // A click at the float's center (block-local ~col 8, row 1 → absolute col 18).
+        assert_eq!(
+            route_click(None, &[], &tab_layout, &tab_panes, 1, 18),
+            ClickIntent::FocusFloatingPane(7),
         );
     }
 }

@@ -406,6 +406,14 @@ impl ZellijPlugin for State {
                             Some(floating::FloatSpec::Hidden(ids)) => ids.clone(),
                             _ => Vec::new(),
                         },
+                        // Visible-float overlay rects for this tab (#110), from the
+                        // same spec. Only a *visible* layer overlays, so a
+                        // hidden/absent layer leaves this empty and the click routes
+                        // to a chip or the tiled pane instead.
+                        visible_floats: match floats_by_position.get(&hit.position) {
+                            Some(floating::FloatSpec::Visible(rects)) => rects.clone(),
+                            _ => Vec::new(),
+                        },
                     },
                 )
             })
@@ -889,6 +897,7 @@ mod tests {
                 .map(|&(id, x, y, w, h)| minimap::PaneRect::new(id, x, y, w, h, "sh", false))
                 .collect(),
             hidden_floats: Vec::new(),
+            visible_floats: Vec::new(),
         }
     }
 

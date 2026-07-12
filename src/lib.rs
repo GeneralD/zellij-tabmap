@@ -312,6 +312,9 @@ impl ZellijPlugin for State {
                 self.config.inactive_dim,
                 self.config.perspective,
                 close,
+                // Per-tab floating layer (#110) — built and passed in a later step;
+                // empty here means the bar draws no floats yet.
+                &BTreeMap::new(),
             )
         );
 

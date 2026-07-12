@@ -16,6 +16,28 @@ pub enum FloatLayer<'a> {
     Visible(&'a [PaneRect]),
 }
 
+/// Per-tab floating data captured at the render site (#110), turned into a
+/// borrowed [`FloatLayer`] inside `paint::bar`. Owns the float ids (hidden) or
+/// rects (visible) so `lib.rs` can build it once per frame from the manifest,
+/// then hand each tab's block a borrowed layer via [`FloatSpec::layer`].
+#[derive(Clone, Debug)]
+pub enum FloatSpec {
+    None,
+    Hidden(Vec<usize>),
+    Visible(Vec<PaneRect>),
+}
+
+impl FloatSpec {
+    /// Borrow this spec as the layer [`crate::minimap::render`] consumes.
+    pub fn layer(&self) -> FloatLayer<'_> {
+        match self {
+            FloatSpec::None => FloatLayer::None,
+            FloatSpec::Hidden(ids) => FloatLayer::Hidden(ids),
+            FloatSpec::Visible(rects) => FloatLayer::Visible(rects),
+        }
+    }
+}
+
 /// How the bar depicts a tab's floating-pane layer (config key `floating`, #110).
 ///
 /// `Hybrid` is the B/A behaviour from the design: a tab whose floating layer is

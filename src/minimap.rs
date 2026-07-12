@@ -1164,6 +1164,25 @@ pub fn render(
         crate::floating::chip_cells(pw, chip_ids.len());
     let chip_row = text_rows - 1;
 
+    // Per text-cell float coverage (#110): a cell is "under the float" if either
+    // of its two half-block pixels is covered. `float_grid` is length-0 without a
+    // visible layer, so every cell is uncovered and the no-float path is
+    // unaffected. `resolve_label_plan` then decides, per cell, whether each tiled
+    // label draws its glyph, a `…` truncation cue, nothing (a wide glyph's
+    // continuation), or falls through to the float / tiled fill.
+    let cell_covered: Vec<bool> = (0..text_rows * pw)
+        .map(|idx| {
+            let (tr, c) = (idx / pw, idx % pw);
+            float_grid.get(2 * tr * pw + c).copied().flatten().is_some()
+                || float_grid
+                    .get((2 * tr + 1) * pw + c)
+                    .copied()
+                    .flatten()
+                    .is_some()
+        })
+        .collect();
+    let label_plan = resolve_label_plan(&overlay, &cell_covered, pw, text_rows);
+
     let mut out = String::with_capacity(text_rows * pw * 24);
     for tr in 0..text_rows {
         for c in 0..pw {
@@ -1276,38 +1295,67 @@ pub fn render(
                     continue;
                 }
             }
-            // A continuation cell is already covered on screen by its wide
-            // glyph's advance — emit nothing so cells stay in lockstep.
-            if let Some(OverlayCell::Continuation) = overlay[tr * pw + c] {
-                continue;
-            }
-            if let Some(OverlayCell::Glyph(ch, i)) = overlay[tr * pw + c] {
-                // Active tab: white label on vivid fill — prominent. Focused pane
-                // also bold for maximum emphasis. Inactive tab: text muted toward
-                // the pane fill so it recedes without becoming unreadable (#59).
-                let highlighted = active && panes[i].focused;
-                // A label paints one background sample for its whole cell; take it
-                // at the text row's vertical center (`2*tr + 0.5`) so a vertical,
-                // diagonal, or radial sweep reads correctly through the text
-                // (at angle 0 the row is irrelevant — byte-identical to the
-                // pre-#71 top-pixel sample).
-                let label_fill =
-                    fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
-                put_bg(&mut out, label_fill);
-                let label_fg = if active {
-                    ACTIVE_FG
-                } else {
-                    crate::color::mixed(ACTIVE_FG, label_fill, INACTIVE_LABEL_BLEND)
-                };
-                put_fg(&mut out, label_fg);
-                if highlighted {
-                    out.push_str("\x1b[1m");
-                    out.push(ch);
-                    out.push_str("\x1b[22m");
-                    continue;
+            // Tiled-pane label vs. the visible float (#110). The pre-resolved
+            // plan says whether this cell draws its glyph, a `…` truncation cue
+            // over a shadow, nothing (a wide glyph's continuation already covered
+            // by its advance), or falls through to the float / tiled fill. With no
+            // visible layer every cell resolves to `Char`/`Skip`/`Fill` exactly as
+            // the pre-#110 branch did, so that path stays byte-identical.
+            match label_plan[tr * pw + c] {
+                LabelDraw::Skip => continue,
+                LabelDraw::Char => {
+                    if let Some(OverlayCell::Glyph(ch, i)) = overlay[tr * pw + c] {
+                        // Active tab: white label on vivid fill — prominent.
+                        // Focused pane also bold for maximum emphasis. Inactive
+                        // tab: text muted toward the pane fill so it recedes
+                        // without becoming unreadable (#59).
+                        let highlighted = active && panes[i].focused;
+                        // A label paints one background sample for its whole cell;
+                        // take it at the text row's vertical center (`2*tr + 0.5`)
+                        // so a vertical, diagonal, or radial sweep reads correctly
+                        // through the text (at angle 0 the row is irrelevant —
+                        // byte-identical to the pre-#71 top-pixel sample).
+                        let label_fill =
+                            fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
+                        put_bg(&mut out, label_fill);
+                        let label_fg = if active {
+                            ACTIVE_FG
+                        } else {
+                            crate::color::mixed(ACTIVE_FG, label_fill, INACTIVE_LABEL_BLEND)
+                        };
+                        put_fg(&mut out, label_fg);
+                        if highlighted {
+                            out.push_str("\x1b[1m");
+                            out.push(ch);
+                            out.push_str("\x1b[22m");
+                        } else {
+                            out.push(ch);
+                        }
+                        continue;
+                    }
                 }
-                out.push(ch);
-                continue;
+                LabelDraw::Ellipsis => {
+                    if let Some(OverlayCell::Glyph(_, i)) = overlay[tr * pw + c] {
+                        // The label continues under the float — mark the cut with
+                        // `…` over the fill darkened toward black, so the float's
+                        // edge reads as a shadow the label slides beneath (#110).
+                        // Same fg/dim as a normal label, but never bold: `…` is a
+                        // marker, not the pane's own glyph.
+                        let label_fill =
+                            fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
+                        let shadow = crate::color::mixed(label_fill, (0, 0, 0), LABEL_SHADOW_BLEND);
+                        put_bg(&mut out, shadow);
+                        let label_fg = if active {
+                            ACTIVE_FG
+                        } else {
+                            crate::color::mixed(ACTIVE_FG, label_fill, INACTIVE_LABEL_BLEND)
+                        };
+                        put_fg(&mut out, label_fg);
+                        out.push('…');
+                        continue;
+                    }
+                }
+                LabelDraw::Fill => {}
             }
             // A visible float, when present at this pixel, paints on top of the
             // tiled fill (float priority, spec §7.1): its border pixels take the
@@ -1883,6 +1931,72 @@ mod tests {
         let plan = resolve_label_plan(&overlay, &cover, 4, 1);
         assert_eq!(plan[0], LabelDraw::Fill);
         assert_eq!(plan[1], LabelDraw::Fill);
+    }
+
+    #[test]
+    fn render_occludes_a_tiled_label_under_a_visible_float() {
+        // A tiled pane titled "cargo" fills the block (label centers on cells
+        // 5..9 of text row 2); a visible float whose left edge lands at cell 7
+        // cuts it mid-word. The whole run "cargo" no longer appears verbatim, the
+        // cut is marked with `…`, and the row width contract still holds.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "cargo", false)];
+        let floats = [PaneRect::new(7, 44, 16, 56, 24, "f", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            16,
+            4,
+            0,
+            LabelMode::All,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+        );
+        let stripped = visible_lines(&out).join("\n");
+        assert!(
+            !stripped.contains("cargo"),
+            "the label is cut by the float, not shown whole: {stripped:?}"
+        );
+        assert!(
+            stripped.contains('…'),
+            "the cut is marked with an ellipsis: {stripped:?}"
+        );
+        for line in visible_lines(&out) {
+            assert_eq!(unicode_width::UnicodeWidthStr::width(line.as_str()), 16);
+        }
+    }
+
+    #[test]
+    fn render_ellipsis_cue_darkens_its_cell() {
+        // The `…` cell's background is the shadow blend of the pane fill, not the
+        // plain fill — proof the drop-shadow is applied. A single flat-filled
+        // tiled pane (GradientSpec::OFF) makes the fill a known color.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "cargo", false)];
+        let floats = [PaneRect::new(7, 44, 16, 56, 24, "f", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            16,
+            4,
+            0,
+            LabelMode::All,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+        );
+        let fill = palette.color_for(0);
+        let shadow = crate::color::mixed(fill, (0, 0, 0), LABEL_SHADOW_BLEND);
+        let shadow_bg = format!("\x1b[48;2;{};{};{}m", shadow.0, shadow.1, shadow.2);
+        assert!(
+            out.contains(&shadow_bg),
+            "the ellipsis cell carries the shadow background"
+        );
     }
 
     #[test]

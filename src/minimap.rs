@@ -588,6 +588,24 @@ fn pixel_color(
     }
 }
 
+/// The tiled group's bounding box as `(minx, miny, bw, bh)` — origins and
+/// clamped span. The single source both the tiled projection ([`project_panes`])
+/// and the floating overlay ([`project_floats_into`]) map through, so a float is
+/// placed relative to exactly the same box the tiles were, never expanding it
+/// (#110).
+pub(crate) fn bbox_of(panes: &[PaneRect]) -> (u32, u32, f64, f64) {
+    let minx = panes.iter().map(|p| p.x).min().unwrap_or(0);
+    let miny = panes.iter().map(|p| p.y).min().unwrap_or(0);
+    let maxx = panes.iter().map(|p| p.x + p.w).max().unwrap_or(1);
+    let maxy = panes.iter().map(|p| p.y + p.h).max().unwrap_or(1);
+    (
+        minx,
+        miny,
+        (maxx - minx).max(1) as f64,
+        (maxy - miny).max(1) as f64,
+    )
+}
+
 /// Project `panes` into their block-local pixel boxes and the pixel-ownership
 /// grid for a `pw`-column, `ph`-pixel-row canvas (`ph == 2 * text_rows`), with
 /// `vinset` background pixel rows reserved top and bottom (#66).
@@ -614,12 +632,7 @@ fn project_panes(
     let content_ph = ph.saturating_sub(2 * vinset).max(1);
     let vinset = (ph - content_ph) / 2;
 
-    let minx = panes.iter().map(|p| p.x).min().unwrap_or(0);
-    let miny = panes.iter().map(|p| p.y).min().unwrap_or(0);
-    let maxx = panes.iter().map(|p| p.x + p.w).max().unwrap_or(1);
-    let maxy = panes.iter().map(|p| p.y + p.h).max().unwrap_or(1);
-    let bw = (maxx - minx).max(1) as f64;
-    let bh = (maxy - miny).max(1) as f64;
+    let (minx, miny, bw, bh) = bbox_of(panes);
     let map = |v: u32, lo: u32, span: f64, out: usize| -> usize {
         (((v - lo) as f64) / span * out as f64).round() as usize
     };
@@ -659,6 +672,59 @@ fn project_panes(
         }
     }
 
+    (grid, boxes)
+}
+
+/// Map floating panes into their block-local pixel boxes and ownership grid
+/// through a **given** bounding box (the tiled group's), never recomputing it —
+/// so floats overlay the tiled minimap without shifting it (#110). Same rounding
+/// and edge-clamp as [`project_panes`]; a float outside the tiled bbox clamps to
+/// the block edge and never changes `pw`/`ph`. `grid[i]` is the float slice
+/// index (not id), mirroring [`project_panes`].
+pub(crate) fn project_floats_into(
+    floats: &[PaneRect],
+    bbox: (u32, u32, f64, f64),
+    pw: usize,
+    ph: usize,
+    vinset: usize,
+) -> (Vec<Option<usize>>, Vec<PaneBox>) {
+    let mut grid = vec![None::<usize>; ph * pw];
+    if pw == 0 || ph == 0 || floats.is_empty() {
+        return (grid, Vec::new());
+    }
+    let content_ph = ph.saturating_sub(2 * vinset).max(1);
+    let vinset = (ph - content_ph) / 2;
+    let (minx, miny, bw, bh) = bbox;
+    // `saturating_sub`: a float can sit outside the tiled bbox's top-left, where
+    // `v < lo` — unlike a tiled pane, which always satisfies `v >= lo` — so guard
+    // the subtraction instead of underflowing.
+    let map = |v: u32, lo: u32, span: f64, out: usize| -> usize {
+        (((v.saturating_sub(lo)) as f64) / span * out as f64).round() as usize
+    };
+    let boxes: Vec<PaneBox> = floats
+        .iter()
+        .map(|p| {
+            let px0 = map(p.x, minx, bw, pw).min(pw);
+            let px1 = match map(p.x + p.w, minx, bw, pw).min(pw) {
+                hi if hi <= px0 => (px0 + 1).min(pw),
+                hi => hi,
+            };
+            let py0 = (vinset + map(p.y, miny, bh, content_ph).min(content_ph - 1)).min(ph);
+            let py1 = match (vinset + map(p.y + p.h, miny, bh, content_ph).min(content_ph)).min(ph)
+            {
+                hi if hi <= py0 => (py0 + 1).min(ph),
+                hi => hi,
+            };
+            PaneBox { px0, px1, py0, py1 }
+        })
+        .collect();
+    for (i, b) in boxes.iter().enumerate() {
+        for py in b.py0..b.py1 {
+            for px in b.px0..b.px1 {
+                grid[py * pw + px] = Some(i);
+            }
+        }
+    }
     (grid, boxes)
 }
 
@@ -1651,6 +1717,37 @@ mod tests {
         let (grid, boxes) = project_panes(&panes, 8, 0, 0);
         assert!(grid.is_empty(), "zero height → empty grid");
         assert!(boxes.is_empty(), "zero height → no pane boxes");
+    }
+
+    #[test]
+    fn project_floats_into_maps_through_the_tiled_bbox_without_expanding_it() {
+        // A tiled pane spans (0,0,100,40); a float sits at (50,20,20,10) inside it.
+        // Mapped through the tiled bbox into an 8x8-pixel canvas, the float lands in
+        // the lower-right quadrant — and the tiled bbox is unchanged by the float.
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "t", false)];
+        let (_, tiled_boxes) = project_panes(&tiled, 8, 8, 0);
+        let bbox = bbox_of(&tiled);
+        let floats = [PaneRect::new(7, 50, 20, 20, 10, "f", false)];
+        let (fgrid, fboxes) = project_floats_into(&floats, bbox, 8, 8, 0);
+        // The tiled pane still fills the whole canvas (float did not expand its bbox).
+        assert_eq!(
+            tiled_boxes[0],
+            PaneBox {
+                px0: 0,
+                px1: 8,
+                py0: 0,
+                py1: 8
+            }
+        );
+        // The float occupies a sub-rectangle in the lower-right, not the whole canvas.
+        let fb = fboxes[0];
+        assert!(
+            fb.px0 >= 4 && fb.py0 >= 4,
+            "float maps to the lower-right quadrant: {fb:?}"
+        );
+        assert!(fb.px1 <= 8 && fb.py1 <= 8);
+        // Its grid cells point back to float index 0.
+        assert_eq!(fgrid[fb.py0 * 8 + fb.px0], Some(0));
     }
 
     #[test]

@@ -279,6 +279,42 @@ impl ZellijPlugin for State {
             })
             .collect();
 
+        // Build each visible tab's floating layer spec from its live pane set and
+        // the tab's `are_floating_panes_visible` flag (#110). `floating = off`
+        // yields an empty map, so every tab renders exactly as before. A hidden
+        // layer becomes chips (ids); a visible layer becomes an overlay (rects,
+        // painted in a later step). Keyed by position like `panes_by_position`.
+        let floats_by_position: BTreeMap<usize, floating::FloatSpec> = match self.config.floating {
+            floating::FloatingMode::Off => BTreeMap::new(),
+            floating::FloatingMode::Hybrid => layout
+                .tabs
+                .iter()
+                .map(|hit| {
+                    let panes = self
+                        .panes
+                        .panes
+                        .get(&hit.position)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    let floats = projection::project_floating(panes);
+                    let visible = self
+                        .tabs
+                        .iter()
+                        .find(|t| t.position == hit.position)
+                        .map(|t| t.are_floating_panes_visible)
+                        .unwrap_or(false);
+                    let spec = if floats.is_empty() {
+                        floating::FloatSpec::None
+                    } else if visible {
+                        floating::FloatSpec::Visible(floats)
+                    } else {
+                        floating::FloatSpec::Hidden(floats.iter().map(|f| f.id).collect())
+                    };
+                    (hit.position, spec)
+                })
+                .collect(),
+        };
+
         // Offer the close glyph only when enabled *and* more than one tab is open,
         // so the last tab keeps no close target and can't be shut from under the
         // session (#86). Per tab it lands on the active tab — and, with perspective
@@ -320,9 +356,10 @@ impl ZellijPlugin for State {
                 self.config.inactive_dim,
                 self.config.perspective,
                 close,
-                // Per-tab floating layer (#110) — built and passed in a later step;
-                // empty here means the bar draws no floats yet.
-                &BTreeMap::new(),
+                // Per-tab floating layer (#110): visible layers overlay, hidden
+                // layers chip, keyed by tab position (built above from the live
+                // manifest + each tab's `are_floating_panes_visible`).
+                &floats_by_position,
             )
         );
 
@@ -361,9 +398,14 @@ impl ZellijPlugin for State {
                             .get(&hit.position)
                             .cloned()
                             .unwrap_or_default(),
-                        // Hidden-float chip ids for this tab (#110) — populated in
-                        // a later step; empty until the float spec is built.
-                        hidden_floats: Vec::new(),
+                        // Hidden-float chip ids for this tab (#110), taken from the
+                        // float spec built above. Only a *hidden* layer draws chips,
+                        // so a visible/absent layer leaves this empty and the click
+                        // falls back to the tiled pane under it.
+                        hidden_floats: match floats_by_position.get(&hit.position) {
+                            Some(floating::FloatSpec::Hidden(ids)) => ids.clone(),
+                            _ => Vec::new(),
+                        },
                     },
                 )
             })
@@ -950,6 +992,90 @@ mod tests {
             "the active tab's panes are recorded for click-to-focus"
         );
         assert_eq!(state.tab_panes.get(&0).map(|g| g.rows), Some(MIN_ROWS));
+    }
+
+    #[test]
+    fn render_records_hidden_float_chips_for_a_tab_with_a_hidden_layer() {
+        // A tab whose floating layer is hidden and holds two floats records their
+        // ids as chips in the tab's geometry, so a later click can reveal+focus one.
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![TabInfo {
+            active: true,
+            are_floating_panes_visible: false,
+            ..tab(0, 1)
+        }];
+        state.panes.panes.insert(
+            0,
+            vec![
+                content_pane(0, 1, 80, 24), // tiled
+                PaneInfo {
+                    id: 7,
+                    is_floating: true,
+                    ..Default::default()
+                }, // hidden float
+                PaneInfo {
+                    id: 9,
+                    is_floating: true,
+                    ..Default::default()
+                }, // hidden float
+            ],
+        );
+
+        state.render(MIN_ROWS, 80);
+
+        assert_eq!(
+            state.tab_panes.get(&0).map(|g| g.hidden_floats.clone()),
+            Some(vec![7, 9]),
+            "hidden floats are recorded as chips for click-to-reveal",
+        );
+    }
+
+    #[test]
+    fn floating_off_records_no_chips() {
+        // With `floating = off` the bar ignores floats entirely (pre-#110 look).
+        let mut state = State::default();
+        state.permitted = true;
+        state.config = Config {
+            floating: crate::floating::FloatingMode::Off,
+            ..Default::default()
+        };
+        state.tabs = vec![TabInfo {
+            active: true,
+            are_floating_panes_visible: false,
+            ..tab(0, 1)
+        }];
+        state.panes.panes.insert(
+            0,
+            vec![
+                content_pane(0, 1, 80, 24),
+                PaneInfo {
+                    id: 7,
+                    is_floating: true,
+                    ..Default::default()
+                },
+            ],
+        );
+
+        state.render(MIN_ROWS, 80);
+        assert_eq!(
+            state.tab_panes.get(&0).map(|g| g.hidden_floats.len()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn left_click_on_a_chip_dispatches_a_floating_focus() {
+        // A recorded chip click resolves to FocusFloatingPane and dispatches the
+        // host effect (a no-op stub off-wasm) without panicking, deferring the
+        // repaint. Bottom row = MIN_ROWS - 1 = 2; rightmost chip cell = col
+        // 10 + 20 - 1 = 29.
+        let mut state = State::default();
+        state.tab_layout = vec![hit_active(0, 10, 20)];
+        let mut g = geom(10, 20, &[]);
+        g.hidden_floats = vec![7];
+        state.tab_panes = [(0usize, g)].into_iter().collect();
+        assert!(!state.update(Event::Mouse(Mouse::LeftClick(2, 29))));
     }
 
     #[test]

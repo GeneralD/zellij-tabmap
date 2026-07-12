@@ -31,6 +31,75 @@ impl std::str::FromStr for FloatingMode {
     }
 }
 
+/// One drawn chip cell's content (#110). `Float(i)` is a selectable chip for the
+/// `i`-th hidden float (its glyph is colored by that float's id); `PlusK(k)` is
+/// the non-selectable overflow marker standing in for `k` floats that did not
+/// fit. Returned by [`chip_cells`] paired with the block-local column it sits in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chip {
+    Float(usize),
+    PlusK(usize),
+}
+
+/// The chip glyph — a small quadrant marker that reads as "a floating pane
+/// docked in the corner". Single display column.
+pub const CHIP_GLYPH: char = '◲';
+
+/// The overflow marker glyph — stands in for the floats that did not fit as
+/// chips. Single display column (a real "+k" needs several cells).
+pub const CHIP_MORE_GLYPH: char = '⋯';
+
+/// Lay out `count` hidden-float chips into the bottom-right corner of a
+/// `cols`-wide block (#110): one selectable [`Chip::Float`] per float, packed
+/// right-to-left in id order, capped so a `+k` overflow marker fits when there
+/// are more floats than columns. Returns `(block_local_column, chip)` pairs in
+/// ascending column order, or empty when there is nothing to draw / no width.
+///
+/// Budget: chips never use more than `cols` columns. When `count` fits, all
+/// `count` cells are `Float`; otherwise the leftmost shown cell becomes a
+/// `PlusK` marker so the total never exceeds the budget and the overflow is
+/// *visible*, never silently dropped.
+pub fn chip_cells(cols: usize, count: usize) -> Vec<(usize, Chip)> {
+    if cols == 0 || count == 0 {
+        return Vec::new();
+    }
+    // Everything fits: all cells are float chips, right-aligned.
+    if count <= cols {
+        let start = cols - count;
+        return (0..count).map(|i| (start + i, Chip::Float(i))).collect();
+    }
+    // Overflow: show `cols - 1` float chips and a single `+k` marker cell at the
+    // left of the reserved run. `k` counts every float the marker stands in for.
+    let shown = cols - 1;
+    let hidden = count - shown;
+    std::iter::once((0usize, Chip::PlusK(hidden)))
+        .chain((0..shown).map(|i| (1 + i, Chip::Float(i))))
+        .collect()
+}
+
+/// The hidden-float index at block-local cell (`col`, `row`) in a
+/// `cols`-by-`text_rows` block with `count` floats, or `None` when the cell is
+/// not a selectable float chip (#110). Chips ride only the bottom text row
+/// (`text_rows - 1`); a `+k` marker cell and every other cell resolve to `None`.
+/// Mirrors [`chip_cells`] exactly, so draw and hit-test never disagree.
+pub fn chip_index_at_cell(
+    cols: usize,
+    text_rows: usize,
+    count: usize,
+    col: usize,
+    row: usize,
+) -> Option<usize> {
+    if text_rows == 0 || row != text_rows - 1 {
+        return None;
+    }
+    chip_cells(cols, count)
+        .into_iter()
+        .find_map(|(c, chip)| match chip {
+            Chip::Float(i) if c == col => Some(i),
+            _ => None,
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,5 +122,77 @@ mod tests {
     #[test]
     fn default_is_hybrid() {
         assert_eq!(FloatingMode::default(), FloatingMode::Hybrid);
+    }
+
+    #[test]
+    fn chip_cells_pack_from_the_right_edge() {
+        // 3 floats in a 12-wide block: chips occupy the 3 rightmost cells, one per
+        // float, left-to-right in id order (columns 9,10,11 → float indices 0,1,2).
+        let cells = chip_cells(12, 3);
+        assert_eq!(
+            cells,
+            vec![
+                (9, Chip::Float(0)),
+                (10, Chip::Float(1)),
+                (11, Chip::Float(2))
+            ]
+        );
+    }
+
+    #[test]
+    fn chip_cells_collapse_overflow_to_a_plus_k_marker() {
+        // Budget is at most `cols` cells but we cap chips so a `+k` marker fits:
+        // with a 4-cell budget and 10 floats, show 3 float chips then a "+7"
+        // marker (the marker is NOT individually selectable).
+        let cells = chip_cells(4, 10);
+        assert_eq!(
+            cells
+                .iter()
+                .filter(|(_, c)| matches!(c, Chip::Float(_)))
+                .count(),
+            3
+        );
+        assert!(cells.iter().any(|(_, c)| *c == Chip::PlusK(7)));
+        // Never exceeds the block width.
+        assert!(cells.iter().all(|(col, _)| *col < 4));
+    }
+
+    #[test]
+    fn chip_cells_empty_without_floats() {
+        assert!(chip_cells(12, 0).is_empty());
+        assert!(chip_cells(0, 3).is_empty());
+    }
+
+    #[test]
+    fn chip_index_at_cell_resolves_only_the_last_row() {
+        // A click on a float chip's cell in the LAST text row resolves to that
+        // float's index; the same column on another row misses (chips ride only
+        // the bottom row). bottom row = text_rows - 1 = 2; chips at cols 9,10,11.
+        let (cols, text_rows, count) = (12, 3, 3);
+        assert_eq!(chip_index_at_cell(cols, text_rows, count, 10, 2), Some(1));
+        assert_eq!(
+            chip_index_at_cell(cols, text_rows, count, 10, 1),
+            None,
+            "not the bottom row"
+        );
+        assert_eq!(
+            chip_index_at_cell(cols, text_rows, count, 3, 2),
+            None,
+            "left of the chips"
+        );
+    }
+
+    #[test]
+    fn chip_index_at_cell_ignores_the_plus_k_marker() {
+        // With overflow, the +k marker cells are not individually selectable.
+        let (cols, text_rows, count) = (4, 3, 10);
+        let hits: Vec<_> = (0..cols)
+            .filter_map(|c| chip_index_at_cell(cols, text_rows, count, c, text_rows - 1))
+            .collect();
+        assert_eq!(
+            hits,
+            vec![0, 1, 2],
+            "only the 3 shown float chips are selectable"
+        );
     }
 }

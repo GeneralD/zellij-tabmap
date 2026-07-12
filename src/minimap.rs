@@ -31,6 +31,11 @@ pub(crate) const ACTIVE_FG: Rgb = (255, 255, 255);
 /// enough to visually recede while remaining readable. A visual parameter —
 /// retune freely; not a correctness constant.
 pub(crate) const INACTIVE_LABEL_BLEND: u8 = 30;
+/// A `…` truncation cue's cell background is darkened this many percent toward
+/// black (#110) — a subtle drop-shadow that reads as the visible float sitting
+/// on top of the cut label. Deliberately low so the cue stays understated. A
+/// visual parameter — retune freely; not a correctness constant.
+const LABEL_SHADOW_BLEND: u8 = 25;
 /// The Nerd Font glyph stamped as a tab block's close affordance (#86). The
 /// Material Design `md-close_circle` (U+F0159) reads as a close control. It is
 /// drawn in alert red, one cell in from the block's right edge (#94) so a fill
@@ -365,6 +370,83 @@ enum OverlayCell {
     Glyph(char, usize),
     /// A cell covered by the trailing column(s) of a preceding wide glyph.
     Continuation,
+}
+
+/// Per-cell drawing decision for the tiled-pane labels once a visible float may
+/// overlap them (#110). Resolved as a unit per glyph by [`resolve_label_plan`]
+/// so a wide (CJK) glyph is never split — the row's display width is preserved.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LabelDraw {
+    /// Draw the overlay glyph normally (the leading cell of a clear glyph).
+    Char,
+    /// Draw `…` over a shadow-darkened fill — a single-column boundary glyph the
+    /// float cuts off.
+    Ellipsis,
+    /// Emit nothing — a continuation column of a drawn wide glyph.
+    Skip,
+    /// Fall through to the float overlay / tiled fill — a cell the float covers,
+    /// or a covered wide glyph's column.
+    Fill,
+}
+
+/// Resolve every cell's [`LabelDraw`] from the placed label `overlay` and the
+/// float's per-cell coverage `cover` (both `text_rows * pw` long). Pure, so it
+/// is unit-tested off-wasm. Scanning left-to-right, each glyph is classified as
+/// a unit: a clear glyph draws (leading `Char`, trailing `Skip`); a glyph any of
+/// whose columns the float covers drops to `Fill` on every column; a clear
+/// **single-column** glyph whose left/right neighbour still carries the label
+/// under the float becomes `Ellipsis`. A wide glyph never becomes `Ellipsis` (a
+/// `…` is one column and would shorten the row), so its cue degrades to plain
+/// occlusion — a rare corner (pane titles are overwhelmingly single-column).
+fn resolve_label_plan(
+    overlay: &[Option<OverlayCell>],
+    cover: &[bool],
+    pw: usize,
+    text_rows: usize,
+) -> Vec<LabelDraw> {
+    let mut plan = vec![LabelDraw::Fill; text_rows * pw];
+    for tr in 0..text_rows {
+        let row = tr * pw;
+        let mut c = 0;
+        while c < pw {
+            let width = match overlay[row + c] {
+                Some(OverlayCell::Glyph(ch, _)) => UnicodeWidthChar::width(ch).unwrap_or(1).max(1),
+                // A `None` cell, or an orphan `Continuation`, stays `Fill`.
+                _ => {
+                    c += 1;
+                    continue;
+                }
+            };
+            let covered = |x: usize| x < pw && cover[row + x];
+            let has_label = |x: usize| {
+                x < pw
+                    && matches!(
+                        overlay[row + x],
+                        Some(OverlayCell::Glyph(..)) | Some(OverlayCell::Continuation)
+                    )
+            };
+            if (0..width).any(|k| covered(c + k)) {
+                for k in 0..width.min(pw - c) {
+                    plan[row + c + k] = LabelDraw::Fill;
+                }
+            } else if width == 1 {
+                let boundary = (has_label(c + 1) && covered(c + 1))
+                    || (c > 0 && has_label(c - 1) && covered(c - 1));
+                plan[row + c] = if boundary {
+                    LabelDraw::Ellipsis
+                } else {
+                    LabelDraw::Char
+                };
+            } else {
+                plan[row + c] = LabelDraw::Char;
+                for k in 1..width.min(pw - c) {
+                    plan[row + c + k] = LabelDraw::Skip;
+                }
+            }
+            c += width.max(1);
+        }
+    }
+    plan
 }
 
 // ---- core renderer ------------------------------------------------------
@@ -1719,6 +1801,88 @@ mod tests {
         for line in visible_lines(&out) {
             assert_eq!(unicode_width::UnicodeWidthStr::width(line.as_str()), 16);
         }
+    }
+
+    #[test]
+    fn label_plan_draws_clear_labels_and_skips_wide_continuations() {
+        // Row of 6 cells: "ab" (two 1-col glyphs) at 0,1; a 2-col glyph at 2,3
+        // (Glyph + Continuation); 4,5 empty. No float cover → every glyph draws.
+        let o = |c| Some(OverlayCell::Glyph(c, 0));
+        let overlay = vec![
+            o('a'),
+            o('b'),
+            o('実'),
+            Some(OverlayCell::Continuation),
+            None,
+            None,
+        ];
+        let cover = vec![false; 6];
+        let plan = resolve_label_plan(&overlay, &cover, 6, 1);
+        assert_eq!(
+            plan,
+            vec![
+                LabelDraw::Char, // a
+                LabelDraw::Char, // b
+                LabelDraw::Char, // 実 (leading)
+                LabelDraw::Skip, // 実 continuation
+                LabelDraw::Fill, // empty
+                LabelDraw::Fill,
+            ]
+        );
+    }
+
+    #[test]
+    fn label_plan_occludes_a_covered_glyph_and_cues_its_neighbour() {
+        // "ab": the float covers cell 1 ("b") → that cell falls to Fill; "a" is a
+        // right boundary (its neighbour is covered AND carries a label) → Ellipsis.
+        let o = |c| Some(OverlayCell::Glyph(c, 0));
+        let overlay = vec![o('a'), o('b'), None, None];
+        let cover = vec![false, true, false, false];
+        let plan = resolve_label_plan(&overlay, &cover, 4, 1);
+        assert_eq!(plan[0], LabelDraw::Ellipsis, "a is cut by the float → …");
+        assert_eq!(plan[1], LabelDraw::Fill, "b is under the float");
+    }
+
+    #[test]
+    fn label_plan_left_boundary_is_an_ellipsis() {
+        // The float covers cell 0 (carrying a label glyph); cell 1 ("b") is the
+        // left boundary → Ellipsis.
+        let o = |c| Some(OverlayCell::Glyph(c, 0));
+        let overlay = vec![o('a'), o('b'), None, None];
+        let cover = vec![true, false, false, false];
+        let plan = resolve_label_plan(&overlay, &cover, 4, 1);
+        assert_eq!(plan[0], LabelDraw::Fill);
+        assert_eq!(plan[1], LabelDraw::Ellipsis);
+    }
+
+    #[test]
+    fn label_plan_does_not_cue_a_label_that_merely_abuts_the_float() {
+        // "a" at 0; the float covers cell 1 but there is NO label there → "a" ends
+        // naturally at the float, so no cue.
+        let overlay = vec![Some(OverlayCell::Glyph('a', 0)), None, None, None];
+        let cover = vec![false, true, false, false];
+        let plan = resolve_label_plan(&overlay, &cover, 4, 1);
+        assert_eq!(
+            plan[0],
+            LabelDraw::Char,
+            "no label continues under the float"
+        );
+    }
+
+    #[test]
+    fn label_plan_never_ellipsizes_a_wide_glyph_and_keeps_width() {
+        // A 2-col glyph at 0,1 whose trailing column the float covers → the whole
+        // glyph drops to Fill on BOTH columns (never a 1-col `…`, so width holds).
+        let overlay = vec![
+            Some(OverlayCell::Glyph('実', 0)),
+            Some(OverlayCell::Continuation),
+            None,
+            None,
+        ];
+        let cover = vec![false, true, false, false];
+        let plan = resolve_label_plan(&overlay, &cover, 4, 1);
+        assert_eq!(plan[0], LabelDraw::Fill);
+        assert_eq!(plan[1], LabelDraw::Fill);
     }
 
     #[test]

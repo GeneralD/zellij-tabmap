@@ -177,6 +177,14 @@ impl ZellijPlugin for State {
                     router::ClickIntent::FocusPane(id) => {
                         focus_terminal_pane(id as u32, false, false);
                     }
+                    // A floating chip (hidden layer) or overlay (visible) — reveal
+                    // and focus it. Unlike the tiled `FocusPane` arm, a hidden float
+                    // has no on-screen footprint, so `should_float_if_hidden = true`
+                    // both reveals its layer and focuses it in one step (#110). Rides
+                    // the already-granted `ChangeApplicationState`.
+                    router::ClickIntent::FocusFloatingPane(id) => {
+                        focus_terminal_pane(id as u32, true, false);
+                    }
                     router::ClickIntent::SwitchTab(target) => switch_tab_to(target),
                     router::ClickIntent::NoOp => {}
                 }
@@ -353,6 +361,9 @@ impl ZellijPlugin for State {
                             .get(&hit.position)
                             .cloned()
                             .unwrap_or_default(),
+                        // Hidden-float chip ids for this tab (#110) — populated in
+                        // a later step; empty until the float spec is built.
+                        hidden_floats: Vec::new(),
                     },
                 )
             })
@@ -835,6 +846,7 @@ mod tests {
                 .iter()
                 .map(|&(id, x, y, w, h)| minimap::PaneRect::new(id, x, y, w, h, "sh", false))
                 .collect(),
+            hidden_floats: Vec::new(),
         }
     }
 

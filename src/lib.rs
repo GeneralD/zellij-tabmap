@@ -7,6 +7,7 @@
 
 pub mod color;
 pub mod config;
+pub mod floating;
 pub mod line;
 pub mod minimap;
 pub mod paint;

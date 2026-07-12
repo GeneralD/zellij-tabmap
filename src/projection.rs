@@ -31,6 +31,15 @@ pub fn is_tiled_terminal(pane: &PaneInfo) -> bool {
     !(pane.is_plugin || pane.is_floating || pane.is_suppressed)
 }
 
+/// Whether a pane is a floating **terminal** pane — the set the bar overlays or
+/// chips (#110). The floating sibling of [`is_tiled_terminal`]: it keeps
+/// `is_floating` panes but still drops plugin and suppressed ones, so the
+/// floating layer never picks up chrome or background panes. `is_suppressed` is
+/// excluded on purpose — suppressed panes stay out of scope for #110.
+pub fn is_floating_terminal(pane: &PaneInfo) -> bool {
+    pane.is_floating && !(pane.is_plugin || pane.is_suppressed)
+}
+
 /// The ids of a tab's tiled terminal panes in **reading order** — top to bottom,
 /// then left to right — the per-tab order the wheel walks in `pane` mode (#80,
 /// restored #108). Chrome / floating / suppressed panes are dropped via the same
@@ -57,6 +66,29 @@ pub fn project(panes: &[PaneInfo]) -> Vec<PaneRect> {
     panes
         .iter()
         .filter(|pane| is_tiled_terminal(pane))
+        .map(|pane| {
+            PaneRect::new(
+                pane.id as usize,
+                pane.pane_x as u32,
+                pane.pane_y as u32,
+                pane.pane_columns as u32,
+                pane.pane_rows as u32,
+                pane.title.clone(),
+                pane.is_focused,
+            )
+        })
+        .collect()
+}
+
+/// Project a tab's **floating** panes into renderer rectangles — the parallel of
+/// [`project`] for the floating layer (#110). Carries id, geometry, title, and
+/// focus so a visible-layer overlay can place each float; a hidden layer uses
+/// only the ids (for corner chips). Order follows the manifest, which is stable
+/// per frame.
+pub fn project_floating(panes: &[PaneInfo]) -> Vec<PaneRect> {
+    panes
+        .iter()
+        .filter(|pane| is_floating_terminal(pane))
         .map(|pane| {
             PaneRect::new(
                 pane.id as usize,
@@ -197,6 +229,71 @@ mod tests {
         }];
         assert!(project(&panes).is_empty());
         assert!(project(&[]).is_empty());
+    }
+
+    #[test]
+    fn is_floating_terminal_selects_only_floats() {
+        // A floating terminal pane passes; tiled, plugin, and suppressed panes do not.
+        assert!(is_floating_terminal(&PaneInfo {
+            is_floating: true,
+            ..Default::default()
+        }));
+        assert!(!is_floating_terminal(&PaneInfo::default())); // tiled
+        assert!(!is_floating_terminal(&PaneInfo {
+            is_floating: true,
+            is_plugin: true,
+            ..Default::default()
+        }));
+        assert!(!is_floating_terminal(&PaneInfo {
+            is_floating: true,
+            is_suppressed: true,
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn project_floating_keeps_only_floats_with_geometry() {
+        // Two floats and one tiled pane: only the floats survive, carrying id and
+        // geometry (so a visible-layer overlay can place them). The tiled pane is
+        // dropped — `project` (not this) handles the tiled layer.
+        let panes = [
+            content_pane(0, 1, 80, 24, true), // tiled
+            PaneInfo {
+                id: 7,
+                is_floating: true,
+                pane_x: 10,
+                pane_y: 5,
+                pane_columns: 30,
+                pane_rows: 10,
+                is_focused: true,
+                title: "top".to_string(),
+                ..Default::default()
+            },
+            PaneInfo {
+                id: 9,
+                is_floating: true,
+                pane_x: 40,
+                pane_y: 8,
+                pane_columns: 20,
+                pane_rows: 6,
+                title: "bot".to_string(),
+                ..Default::default()
+            },
+        ];
+        let floats = project_floating(&panes);
+        assert_eq!(floats.len(), 2);
+        assert_eq!((floats[0].id, floats[1].id), (7, 9));
+        assert_eq!(
+            (floats[0].x, floats[0].y, floats[0].w, floats[0].h),
+            (10, 5, 30, 10)
+        );
+        assert!(floats[0].focused);
+    }
+
+    #[test]
+    fn project_floating_is_empty_without_floats() {
+        assert!(project_floating(&[content_pane(0, 1, 80, 24, true)]).is_empty());
+        assert!(project_floating(&[]).is_empty());
     }
 
     #[test]

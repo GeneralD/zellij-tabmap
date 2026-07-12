@@ -31,11 +31,12 @@ pub(crate) const ACTIVE_FG: Rgb = (255, 255, 255);
 /// enough to visually recede while remaining readable. A visual parameter —
 /// retune freely; not a correctness constant.
 pub(crate) const INACTIVE_LABEL_BLEND: u8 = 30;
-/// A `…` truncation cue's cell background is darkened this many percent toward
-/// black (#110) — a subtle drop-shadow that reads as the visible float sitting
-/// on top of the cut label. Deliberately low so the cue stays understated. A
-/// visual parameter — retune freely; not a correctness constant.
-const LABEL_SHADOW_BLEND: u8 = 25;
+/// A visible float casts a drop-shadow onto the tiled cells to its right and
+/// below (#110): their fill is darkened this many percent toward black, so the
+/// float reads as sitting on top. Deliberately low so the shadow stays
+/// understated. A `…` truncation cue drawn inside that band inherits the same
+/// darkening. A visual parameter — retune freely; not a correctness constant.
+const FLOAT_SHADOW_BLEND: u8 = 25;
 /// The Nerd Font glyph stamped as a tab block's close affordance (#86). The
 /// Material Design `md-close_circle` (U+F0159) reads as a close control. It is
 /// drawn in alert red, one cell in from the block's right edge (#94) so a fill
@@ -393,11 +394,14 @@ enum LabelDraw {
 /// float's per-cell coverage `cover` (both `text_rows * pw` long). Pure, so it
 /// is unit-tested off-wasm. Scanning left-to-right, each glyph is classified as
 /// a unit: a clear glyph draws (leading `Char`, trailing `Skip`); a glyph any of
-/// whose columns the float covers drops to `Fill` on every column; a clear
-/// **single-column** glyph whose left/right neighbour still carries the label
-/// under the float becomes `Ellipsis`. A wide glyph never becomes `Ellipsis` (a
-/// `…` is one column and would shorten the row), so its cue degrades to plain
-/// occlusion — a rare corner (pane titles are overwhelmingly single-column).
+/// whose columns the float covers — or a wide glyph with no room for its
+/// continuation before the block's right edge — drops to `Fill` on every column;
+/// a clear **single-column** glyph whose left/right neighbour still carries the
+/// **same pane's** label under the float becomes `Ellipsis`. A wide glyph never
+/// becomes `Ellipsis` (a `…` is one column and would shorten the row), so its cue
+/// degrades to plain occlusion — a rare corner (pane titles are overwhelmingly
+/// single-column). The width invariant (each row's display width stays `pw`) is
+/// enforced here, not assumed of the caller.
 fn resolve_label_plan(
     overlay: &[Option<OverlayCell>],
     cover: &[bool],
@@ -409,8 +413,10 @@ fn resolve_label_plan(
         let row = tr * pw;
         let mut c = 0;
         while c < pw {
-            let width = match overlay[row + c] {
-                Some(OverlayCell::Glyph(ch, _)) => UnicodeWidthChar::width(ch).unwrap_or(1).max(1),
+            let (width, pane) = match overlay[row + c] {
+                Some(OverlayCell::Glyph(ch, i)) => {
+                    (UnicodeWidthChar::width(ch).unwrap_or(1).max(1), i)
+                }
                 // A `None` cell, or an orphan `Continuation`, stays `Fill`.
                 _ => {
                     c += 1;
@@ -418,20 +424,30 @@ fn resolve_label_plan(
                 }
             };
             let covered = |x: usize| x < pw && cover[row + x];
-            let has_label = |x: usize| {
+            // A neighbour continues *this* glyph's label only if it is the same
+            // pane's glyph, or a wide-glyph continuation (which belongs to the
+            // glyph before it). A different pane's adjacent label must not trip
+            // the cue — otherwise an untruncated label next to a covered
+            // neighbour would wrongly show `…`.
+            let same_label = |x: usize| {
                 x < pw
-                    && matches!(
-                        overlay[row + x],
-                        Some(OverlayCell::Glyph(..)) | Some(OverlayCell::Continuation)
-                    )
+                    && match overlay[row + x] {
+                        Some(OverlayCell::Glyph(_, j)) => j == pane,
+                        Some(OverlayCell::Continuation) => true,
+                        None => false,
+                    }
             };
-            if (0..width).any(|k| covered(c + k)) {
+            // A covered glyph, or a wide glyph that would spill past the right
+            // edge (no room for its continuation), drops to `Fill` on every
+            // column it would occupy — never a bare `Char` without its `Skip`,
+            // which would let the wide glyph advance past `pw`.
+            if c + width > pw || (0..width).any(|k| covered(c + k)) {
                 for k in 0..width.min(pw - c) {
                     plan[row + c + k] = LabelDraw::Fill;
                 }
             } else if width == 1 {
-                let boundary = (has_label(c + 1) && covered(c + 1))
-                    || (c > 0 && has_label(c - 1) && covered(c - 1));
+                let boundary = (same_label(c + 1) && covered(c + 1))
+                    || (c > 0 && same_label(c - 1) && covered(c - 1));
                 plan[row + c] = if boundary {
                     LabelDraw::Ellipsis
                 } else {
@@ -439,7 +455,7 @@ fn resolve_label_plan(
                 };
             } else {
                 plan[row + c] = LabelDraw::Char;
-                for k in 1..width.min(pw - c) {
+                for k in 1..width {
                     plan[row + c + k] = LabelDraw::Skip;
                 }
             }
@@ -447,6 +463,29 @@ fn resolve_label_plan(
         }
     }
     plan
+}
+
+/// A visible float's drop-shadow band (#110): every non-covered tiled cell that
+/// lies to the **right, below, or below-right** of a covered cell — i.e. the
+/// float is up-and-to-the-left of it, as if lit from the top-left. Pure, so it
+/// is unit-tested off-wasm. `cover` and the result are `text_rows * pw` long.
+/// With no visible float `cover` is all-false, so the band is empty and the
+/// no-float render stays byte-identical.
+fn shadow_cells(cover: &[bool], pw: usize, text_rows: usize) -> Vec<bool> {
+    (0..text_rows * pw)
+        .map(|idx| {
+            if cover[idx] {
+                return false;
+            }
+            let (tr, c) = (idx / pw, idx % pw);
+            let covered = |t: usize, cc: usize| t < text_rows && cc < pw && cover[t * pw + cc];
+            let up = tr.checked_sub(1);
+            let left = c.checked_sub(1);
+            left.map(|l| covered(tr, l)).unwrap_or(false)
+                || up.map(|u| covered(u, c)).unwrap_or(false)
+                || up.zip(left).map(|(u, l)| covered(u, l)).unwrap_or(false)
+        })
+        .collect()
 }
 
 // ---- core renderer ------------------------------------------------------
@@ -1182,6 +1221,10 @@ pub fn render(
         })
         .collect();
     let label_plan = resolve_label_plan(&overlay, &cell_covered, pw, text_rows);
+    // The float's drop-shadow band: tiled cells to its right/below whose fill is
+    // darkened so the float reads as floating on top (#110). Empty without a
+    // visible float, so the no-float render stays byte-identical.
+    let shadow_cell = shadow_cells(&cell_covered, pw, text_rows);
 
     let mut out = String::with_capacity(text_rows * pw * 24);
     for tr in 0..text_rows {
@@ -1317,7 +1360,12 @@ pub fn render(
                         // byte-identical to the pre-#71 top-pixel sample).
                         let label_fill =
                             fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
-                        put_bg(&mut out, label_fill);
+                        let bg = if shadow_cell[tr * pw + c] {
+                            crate::color::mixed(label_fill, (0, 0, 0), FLOAT_SHADOW_BLEND)
+                        } else {
+                            label_fill
+                        };
+                        put_bg(&mut out, bg);
                         let label_fg = if active {
                             ACTIVE_FG
                         } else {
@@ -1337,14 +1385,20 @@ pub fn render(
                 LabelDraw::Ellipsis => {
                     if let Some(OverlayCell::Glyph(_, i)) = overlay[tr * pw + c] {
                         // The label continues under the float — mark the cut with
-                        // `…` over the fill darkened toward black, so the float's
-                        // edge reads as a shadow the label slides beneath (#110).
-                        // Same fg/dim as a normal label, but never bold: `…` is a
-                        // marker, not the pane's own glyph.
+                        // `…`. The shadow is the float's, not the cue's: this cell
+                        // is darkened only when it falls in the drop-shadow band
+                        // (a left-cut `…` sits in the float's shadow; a right-cut
+                        // one faces the light and stays bright). Same fg/dim as a
+                        // normal label, but never bold: `…` is a marker, not the
+                        // pane's own glyph.
                         let label_fill =
                             fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
-                        let shadow = crate::color::mixed(label_fill, (0, 0, 0), LABEL_SHADOW_BLEND);
-                        put_bg(&mut out, shadow);
+                        let bg = if shadow_cell[tr * pw + c] {
+                            crate::color::mixed(label_fill, (0, 0, 0), FLOAT_SHADOW_BLEND)
+                        } else {
+                            label_fill
+                        };
+                        put_bg(&mut out, bg);
                         let label_fg = if active {
                             ACTIVE_FG
                         } else {
@@ -1371,10 +1425,41 @@ pub fn render(
                     palette.color_for(float_rects[i].id)
                 })
             };
-            let top = float_px(2 * tr)
-                .or_else(|| pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr));
-            let bottom = float_px(2 * tr + 1)
-                .or_else(|| pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr + 1));
+            // Tiled pixels in the float's drop-shadow band are darkened so the
+            // float reads as floating above them (#110). Float pixels (resolved
+            // first, above) are never shaded — only the tiled fill that shows
+            // through beside/below the float.
+            let shade = |px: Option<Rgb>| {
+                if shadow_cell[tr * pw + c] {
+                    px.map(|col| crate::color::mixed(col, (0, 0, 0), FLOAT_SHADOW_BLEND))
+                } else {
+                    px
+                }
+            };
+            let top = float_px(2 * tr).or_else(|| {
+                shade(pixel_color(
+                    &grid,
+                    &ring,
+                    panes,
+                    palette,
+                    &sweeps,
+                    pw,
+                    c,
+                    2 * tr,
+                ))
+            });
+            let bottom = float_px(2 * tr + 1).or_else(|| {
+                shade(pixel_color(
+                    &grid,
+                    &ring,
+                    panes,
+                    palette,
+                    &sweeps,
+                    pw,
+                    c,
+                    2 * tr + 1,
+                ))
+            });
             put_halfblock(&mut out, top, bottom);
         }
         out.push_str(RESET);
@@ -1934,6 +2019,61 @@ mod tests {
     }
 
     #[test]
+    fn label_plan_drops_a_wide_glyph_with_no_room_to_fill() {
+        // A 2-col glyph in the LAST column has no room for its continuation, so it
+        // must drop to Fill — never a bare Char that would advance past the row
+        // width (the function enforces the width invariant itself, #110 review).
+        let overlay = vec![None, None, None, Some(OverlayCell::Glyph('実', 0))];
+        let cover = vec![false; 4];
+        let plan = resolve_label_plan(&overlay, &cover, 4, 1);
+        assert_eq!(plan[3], LabelDraw::Fill);
+    }
+
+    #[test]
+    fn label_plan_does_not_cue_across_a_pane_boundary() {
+        // Two adjacent single-column labels from DIFFERENT panes; only pane 1's is
+        // covered. Pane 0's 'a' is untruncated, so it must NOT become `…` just
+        // because a different pane's neighbour is under the float (#110 review).
+        let overlay = vec![
+            Some(OverlayCell::Glyph('a', 0)),
+            Some(OverlayCell::Glyph('X', 1)),
+            None,
+            None,
+        ];
+        let cover = vec![false, true, false, false];
+        let plan = resolve_label_plan(&overlay, &cover, 4, 1);
+        assert_eq!(
+            plan[0],
+            LabelDraw::Char,
+            "a different-pane neighbour is not this label"
+        );
+        assert_eq!(plan[1], LabelDraw::Fill);
+    }
+
+    #[test]
+    fn shadow_cells_falls_down_and_right_of_a_covered_cell() {
+        // 3x3 with only (0,0) covered. A drop-shadow (light from top-left) darkens
+        // the cell to its right (0,1), below (1,0), and below-right (1,1) — and
+        // nothing up or left of it.
+        let mut cover = vec![false; 9];
+        cover[0] = true; // (0,0)
+        let sh = shadow_cells(&cover, 3, 3);
+        assert!(!sh[0], "the covered cell itself is not shadowed");
+        assert!(sh[1], "right of the float");
+        assert!(sh[3], "below the float");
+        assert!(sh[4], "below-right of the float");
+        assert!(!sh[2], "(0,2) has no covered left/up neighbour");
+        assert!(!sh[6], "(2,0) is two rows below — not adjacent");
+        assert!(!sh[8], "(2,2) is not adjacent to the float");
+    }
+
+    #[test]
+    fn shadow_cells_is_empty_without_coverage() {
+        let sh = shadow_cells(&[false; 6], 3, 2);
+        assert!(sh.iter().all(|&s| !s), "no float → no shadow band");
+    }
+
+    #[test]
     fn render_occludes_a_tiled_label_under_a_visible_float() {
         // A tiled pane titled "cargo" fills the block (label centers on cells
         // 5..9 of text row 2); a visible float whose left edge lands at cell 7
@@ -1970,13 +2110,14 @@ mod tests {
     }
 
     #[test]
-    fn render_ellipsis_cue_darkens_its_cell() {
-        // The `…` cell's background is the shadow blend of the pane fill, not the
-        // plain fill — proof the drop-shadow is applied. A single flat-filled
-        // tiled pane (GradientSpec::OFF) makes the fill a known color.
+    fn render_float_casts_a_drop_shadow_on_the_tiled_cells_below_and_right() {
+        // A visible float sitting mid-block casts a drop-shadow onto the tiled
+        // cells to its right and below (light from top-left): their fill is
+        // darkened by FLOAT_SHADOW_BLEND. A single flat-filled pane (GradientSpec
+        // OFF) makes the fill a known color, so the darkened shade must appear.
         let palette = test_palette();
         let tiled = [PaneRect::new(0, 0, 0, 100, 40, "cargo", false)];
-        let floats = [PaneRect::new(7, 44, 16, 56, 24, "f", false)];
+        let floats = [PaneRect::new(7, 44, 12, 32, 16, "f", false)];
         let out = render(
             &tiled,
             &palette,
@@ -1991,11 +2132,45 @@ mod tests {
             crate::floating::FloatLayer::Visible(&floats),
         );
         let fill = palette.color_for(0);
-        let shadow = crate::color::mixed(fill, (0, 0, 0), LABEL_SHADOW_BLEND);
-        let shadow_bg = format!("\x1b[48;2;{};{};{}m", shadow.0, shadow.1, shadow.2);
+        let shaded = crate::color::mixed(fill, (0, 0, 0), FLOAT_SHADOW_BLEND);
+        let shaded_fg = format!("\x1b[38;2;{};{};{}m", shaded.0, shaded.1, shaded.2);
+        let shaded_bg = format!("\x1b[48;2;{};{};{}m", shaded.0, shaded.1, shaded.2);
         assert!(
-            out.contains(&shadow_bg),
-            "the ellipsis cell carries the shadow background"
+            out.contains(&shaded_fg) || out.contains(&shaded_bg),
+            "a drop-shadow cell carries the darkened fill"
+        );
+    }
+
+    #[test]
+    fn render_without_a_float_leaves_the_label_unshadowed() {
+        // No visible float → no coverage → no drop-shadow band, so a labeled pane
+        // renders its label verbatim over the plain fill and with no `…`. This
+        // locks the byte-identical no-float label path (`Char` arm) the occlusion
+        // change must preserve (#110 review).
+        let palette = test_palette();
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "cargo", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            16,
+            4,
+            0,
+            LabelMode::All,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::None,
+        );
+        let stripped = visible_lines(&out).join("\n");
+        assert!(stripped.contains("cargo"), "the whole label shows");
+        assert!(!stripped.contains('…'), "no truncation cue without a float");
+        let fill = palette.color_for(0);
+        let shaded = crate::color::mixed(fill, (0, 0, 0), FLOAT_SHADOW_BLEND);
+        let shaded_bg = format!("\x1b[48;2;{};{};{}m", shaded.0, shaded.1, shaded.2);
+        assert!(
+            !out.contains(&shaded_bg),
+            "no shadow background without a float"
         );
     }
 

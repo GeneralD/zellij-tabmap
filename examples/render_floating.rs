@@ -61,11 +61,14 @@ fn main() {
             PaneRect::new(1, 60, 0, 60, 40, "zsh", false),
         ],
     );
-    // ⌘2 (active) — a 2×2-ish grid, with a visible float overlaid (below).
+    // ⌘2 (active) — a 2×2-ish grid, with a visible float overlaid (below). No
+    // tiled pane is focused here: focus is on the float (below), and zellij
+    // focuses one pane at a time, so the tiled panes carry no focus ring — only
+    // the float stands out.
     panes.insert(
         1,
         vec![
-            PaneRect::new(2, 0, 0, 60, 20, "cargo", true),
+            PaneRect::new(2, 0, 0, 60, 20, "cargo", false),
             PaneRect::new(3, 60, 0, 60, 20, "test", false),
             PaneRect::new(4, 0, 20, 120, 20, "git", false),
         ],

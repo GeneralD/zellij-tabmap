@@ -465,24 +465,25 @@ fn resolve_label_plan(
     plan
 }
 
-/// A visible float's drop-shadow band (#110): every non-covered tiled cell that
-/// lies to the **right, below, or below-right** of a covered cell — i.e. the
-/// float is up-and-to-the-left of it, as if lit from the top-left. Pure, so it
-/// is unit-tested off-wasm. `cover` and the result are `text_rows * pw` long.
-/// With no visible float `cover` is all-false, so the band is empty and the
-/// no-float render stays byte-identical.
-fn shadow_cells(cover: &[bool], pw: usize, text_rows: usize) -> Vec<bool> {
-    (0..text_rows * pw)
+/// A visible float's one-cell-wide drop-shadow over a `w`-by-`h` grid (#110):
+/// every non-covered cell that lies to the **right, below, or below-right** of a
+/// covered cell — i.e. the float is up-and-to-the-left of it, as if lit from the
+/// top-left. Pure, so it is unit-tested off-wasm. Applied at **half-block pixel**
+/// resolution (`w = pw`, `h = ph`), so a shadow below the float darkens only the
+/// one adjacent pixel, not the whole cell. With no visible float `cover` is
+/// all-false, so the band is empty and the no-float render stays byte-identical.
+fn drop_shadow(cover: &[bool], w: usize, h: usize) -> Vec<bool> {
+    (0..w * h)
         .map(|idx| {
             if cover[idx] {
                 return false;
             }
-            let (tr, c) = (idx / pw, idx % pw);
-            let covered = |t: usize, cc: usize| t < text_rows && cc < pw && cover[t * pw + cc];
-            let up = tr.checked_sub(1);
-            let left = c.checked_sub(1);
-            left.map(|l| covered(tr, l)).unwrap_or(false)
-                || up.map(|u| covered(u, c)).unwrap_or(false)
+            let (row, col) = (idx / w, idx % w);
+            let covered = |r: usize, c: usize| r < h && c < w && cover[r * w + c];
+            let up = row.checked_sub(1);
+            let left = col.checked_sub(1);
+            left.map(|l| covered(row, l)).unwrap_or(false)
+                || up.map(|u| covered(u, col)).unwrap_or(false)
                 || up.zip(left).map(|(u, l)| covered(u, l)).unwrap_or(false)
         })
         .collect()
@@ -1203,28 +1204,26 @@ pub fn render(
         crate::floating::chip_cells(pw, chip_ids.len());
     let chip_row = text_rows - 1;
 
-    // Per text-cell float coverage (#110): a cell is "under the float" if either
-    // of its two half-block pixels is covered. `float_grid` is length-0 without a
-    // visible layer, so every cell is uncovered and the no-float path is
-    // unaffected. `resolve_label_plan` then decides, per cell, whether each tiled
-    // label draws its glyph, a `…` truncation cue, nothing (a wide glyph's
-    // continuation), or falls through to the float / tiled fill.
+    // Pixel-level float coverage (#110): a half-block pixel is "under the float"
+    // when `float_grid` owns it. Length-0 without a visible layer, so `.get`
+    // returns `None` → all-false, and the no-float path is unaffected.
+    let float_covered_px: Vec<bool> = (0..ph * pw)
+        .map(|idx| float_grid.get(idx).copied().flatten().is_some())
+        .collect();
+    // A text cell is occluded when EITHER of its two pixels is covered — labels
+    // draw a whole cell, so `resolve_label_plan` decides at cell resolution.
     let cell_covered: Vec<bool> = (0..text_rows * pw)
         .map(|idx| {
             let (tr, c) = (idx / pw, idx % pw);
-            float_grid.get(2 * tr * pw + c).copied().flatten().is_some()
-                || float_grid
-                    .get((2 * tr + 1) * pw + c)
-                    .copied()
-                    .flatten()
-                    .is_some()
+            float_covered_px[2 * tr * pw + c] || float_covered_px[(2 * tr + 1) * pw + c]
         })
         .collect();
     let label_plan = resolve_label_plan(&overlay, &cell_covered, pw, text_rows);
-    // The float's drop-shadow band: tiled cells to its right/below whose fill is
-    // darkened so the float reads as floating on top (#110). Empty without a
-    // visible float, so the no-float render stays byte-identical.
-    let shadow_cell = shadow_cells(&cell_covered, pw, text_rows);
+    // The float's one-pixel drop-shadow, on the half-block pixels to its right
+    // and below, so the float reads as floating on top (#110). Pixel resolution:
+    // a half-block below the float darkens only its adjacent half. Empty without
+    // a visible float, so the no-float render stays byte-identical.
+    let shadow_px = drop_shadow(&float_covered_px, pw, ph);
 
     let mut out = String::with_capacity(text_rows * pw * 24);
     for tr in 0..text_rows {
@@ -1360,7 +1359,10 @@ pub fn render(
                         // byte-identical to the pre-#71 top-pixel sample).
                         let label_fill =
                             fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
-                        let bg = if shadow_cell[tr * pw + c] {
+                        // A label paints one uniform background, so it can't shade
+                        // just its top or bottom half; darken the whole cell when
+                        // EITHER of its two pixels falls in the drop-shadow (#110).
+                        let bg = if shadow_px[2 * tr * pw + c] || shadow_px[(2 * tr + 1) * pw + c] {
                             crate::color::mixed(label_fill, (0, 0, 0), FLOAT_SHADOW_BLEND)
                         } else {
                             label_fill
@@ -1393,7 +1395,10 @@ pub fn render(
                         // pane's own glyph.
                         let label_fill =
                             fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
-                        let bg = if shadow_cell[tr * pw + c] {
+                        // A label paints one uniform background, so it can't shade
+                        // just its top or bottom half; darken the whole cell when
+                        // EITHER of its two pixels falls in the drop-shadow (#110).
+                        let bg = if shadow_px[2 * tr * pw + c] || shadow_px[(2 * tr + 1) * pw + c] {
                             crate::color::mixed(label_fill, (0, 0, 0), FLOAT_SHADOW_BLEND)
                         } else {
                             label_fill
@@ -1425,40 +1430,29 @@ pub fn render(
                     palette.color_for(float_rects[i].id)
                 })
             };
-            // Tiled pixels in the float's drop-shadow band are darkened so the
-            // float reads as floating above them (#110). Float pixels (resolved
-            // first, above) are never shaded — only the tiled fill that shows
-            // through beside/below the float.
-            let shade = |px: Option<Rgb>| {
-                if shadow_cell[tr * pw + c] {
+            // A tiled pixel in the float's drop-shadow is darkened per pixel, so a
+            // half-block just below the float shades only its adjacent half — the
+            // shadow is one pixel wide, not a whole cell (#110). Float pixels
+            // (resolved first, above) are never shaded; only the tiled fill that
+            // shows through beside/below the float.
+            let shade = |py: usize, px: Option<Rgb>| {
+                if shadow_px[py * pw + c] {
                     px.map(|col| crate::color::mixed(col, (0, 0, 0), FLOAT_SHADOW_BLEND))
                 } else {
                     px
                 }
             };
             let top = float_px(2 * tr).or_else(|| {
-                shade(pixel_color(
-                    &grid,
-                    &ring,
-                    panes,
-                    palette,
-                    &sweeps,
-                    pw,
-                    c,
+                shade(
                     2 * tr,
-                ))
+                    pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr),
+                )
             });
             let bottom = float_px(2 * tr + 1).or_else(|| {
-                shade(pixel_color(
-                    &grid,
-                    &ring,
-                    panes,
-                    palette,
-                    &sweeps,
-                    pw,
-                    c,
+                shade(
                     2 * tr + 1,
-                ))
+                    pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr + 1),
+                )
             });
             put_halfblock(&mut out, top, bottom);
         }
@@ -2051,25 +2045,25 @@ mod tests {
     }
 
     #[test]
-    fn shadow_cells_falls_down_and_right_of_a_covered_cell() {
+    fn drop_shadow_falls_one_cell_down_and_right_of_a_covered_cell() {
         // 3x3 with only (0,0) covered. A drop-shadow (light from top-left) darkens
-        // the cell to its right (0,1), below (1,0), and below-right (1,1) — and
-        // nothing up or left of it.
+        // exactly the cell to its right (0,1), below (1,0), and below-right (1,1)
+        // — one cell wide, nothing up or left of it.
         let mut cover = vec![false; 9];
         cover[0] = true; // (0,0)
-        let sh = shadow_cells(&cover, 3, 3);
+        let sh = drop_shadow(&cover, 3, 3);
         assert!(!sh[0], "the covered cell itself is not shadowed");
         assert!(sh[1], "right of the float");
         assert!(sh[3], "below the float");
         assert!(sh[4], "below-right of the float");
-        assert!(!sh[2], "(0,2) has no covered left/up neighbour");
+        assert!(!sh[2], "(0,2) is two columns right — not adjacent");
         assert!(!sh[6], "(2,0) is two rows below — not adjacent");
         assert!(!sh[8], "(2,2) is not adjacent to the float");
     }
 
     #[test]
-    fn shadow_cells_is_empty_without_coverage() {
-        let sh = shadow_cells(&[false; 6], 3, 2);
+    fn drop_shadow_is_empty_without_coverage() {
+        let sh = drop_shadow(&[false; 6], 3, 2);
         assert!(sh.iter().all(|&s| !s), "no float → no shadow band");
     }
 

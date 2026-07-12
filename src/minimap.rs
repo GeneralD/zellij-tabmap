@@ -759,6 +759,32 @@ pub fn pane_at_cell(
     at(2 * row).or_else(|| at(2 * row + 1)).map(|i| panes[i].id)
 }
 
+/// The visible floating pane id drawn at block-local cell (`col`, `row`) over a
+/// tiled minimap of `tiled` with `floats` overlaid, or `None` when the cell is
+/// not on any float (#110). Uses the same [`project_floats_into`] mapping
+/// [`render`] paints with, so draw and hit-test never disagree. The caller tries
+/// this before the tiled [`pane_at_cell`] (float priority, spec §7.1).
+pub fn float_pane_at_cell(
+    tiled: &[PaneRect],
+    floats: &[PaneRect],
+    cols: usize,
+    text_rows: usize,
+    vinset: usize,
+    col: usize,
+    row: usize,
+) -> Option<usize> {
+    let pw = cols;
+    let ph = text_rows * 2;
+    if pw == 0 || text_rows == 0 || col >= pw || row >= text_rows || floats.is_empty() {
+        return None;
+    }
+    let (grid, _) = project_floats_into(floats, bbox_of(tiled), pw, ph, vinset);
+    let at = |py: usize| grid[py * pw + col];
+    at(2 * row)
+        .or_else(|| at(2 * row + 1))
+        .map(|i| floats[i].id)
+}
+
 /// Render `panes` into a `cols` × `text_rows` block (pixel rows = `2*text_rows`).
 ///
 /// `vinset` reserves that many background pixel rows at **both** the top and the
@@ -819,6 +845,31 @@ pub fn render(
     // [`pane_at_cell`] hit-tests against the same `project_panes` output, so a
     // click can never resolve to a pane other than the one drawn.
     let (grid, bounds) = project_panes(panes, pw, ph, vinset);
+    // The visible floating layer overlays the tiled grid, mapped through the same
+    // bbox so it sits in place without shifting the tiles (#110). Kept in its own
+    // grid/boxes so the tiled `grid[i]`/`panes[i]` index space is never mixed.
+    let float_rects: &[PaneRect] = match floats {
+        crate::floating::FloatLayer::Visible(f) => f,
+        _ => &[],
+    };
+    let (float_grid, float_bounds) = if float_rects.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        project_floats_into(float_rects, bbox_of(panes), pw, ph, vinset)
+    };
+    // Float border pixels: the outline of each float box, drawn in the float's
+    // `ring_for` shade so it reads as a distinct pane floating above the tiles.
+    let mut float_ring = vec![false; float_grid.len()];
+    for b in &float_bounds {
+        for py in b.py0..b.py1 {
+            for px in b.px0..b.px1 {
+                let edge = px == b.px0 || px == b.px1 - 1 || py == b.py0 || py == b.py1 - 1;
+                if edge {
+                    float_ring[py * pw + px] = true;
+                }
+            }
+        }
+    }
     let mut ring = vec![false; ph * pw]; // focus-ring pixels
     let mut overlay = vec![None::<OverlayCell>; text_rows * pw]; // label cells
 
@@ -1176,8 +1227,24 @@ pub fn render(
                 out.push(ch);
                 continue;
             }
-            let top = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr);
-            let bottom = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr + 1);
+            // A visible float, when present at this pixel, paints on top of the
+            // tiled fill (float priority, spec §7.1): its border pixels take the
+            // float's `ring_for` shade, its interior the float's `color_for`.
+            // `float_grid` is length-0 when there is no visible layer, so `.get`
+            // returns `None` and the tiled `pixel_color` shows through unchanged —
+            // the no-float path stays byte-identical (#110).
+            let float_px = |py: usize| -> Option<Rgb> {
+                let i = (*float_grid.get(py * pw + c)?)?;
+                Some(if float_ring[py * pw + c] {
+                    palette.ring_for(float_rects[i].id)
+                } else {
+                    palette.color_for(float_rects[i].id)
+                })
+            };
+            let top = float_px(2 * tr)
+                .or_else(|| pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr));
+            let bottom = float_px(2 * tr + 1)
+                .or_else(|| pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr + 1));
             put_halfblock(&mut out, top, bottom);
         }
         out.push_str(RESET);
@@ -1614,6 +1681,57 @@ mod tests {
             base(crate::floating::FloatLayer::Hidden(&empty)),
             "no floats draws no chips"
         );
+    }
+
+    #[test]
+    fn render_overlays_a_visible_float_on_top_of_the_tiled_grid() {
+        // A tiled pane (id 0) fills the block; a visible float (id 7) sits in the
+        // middle. The float's color (keyed on id 7) must appear in the output, on
+        // top of the tiled fill, and the row width stays exact.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "t", false)];
+        let floats = [PaneRect::new(7, 30, 12, 40, 16, "f", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            16,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+        );
+        let float_fg = format!(
+            "\x1b[38;2;{};{};{}m",
+            palette.color_for(7).0,
+            palette.color_for(7).1,
+            palette.color_for(7).2
+        );
+        assert!(
+            out.contains(&float_fg),
+            "the visible float paints its own color on top"
+        );
+        // Width contract, measured the same way as Task 5 (ANSI stripped via
+        // `visible_lines`, then `UnicodeWidthStr::width`).
+        for line in visible_lines(&out) {
+            assert_eq!(unicode_width::UnicodeWidthStr::width(line.as_str()), 16);
+        }
+    }
+
+    #[test]
+    fn float_pane_at_cell_resolves_a_visible_float_over_the_tiled_pane() {
+        // Same geometry: a click in the float's box resolves to float id 7 (float
+        // priority); a click outside it falls through to None (caller then tries
+        // the tiled hit-test).
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "t", false)];
+        let floats = [PaneRect::new(7, 30, 12, 40, 16, "f", false)];
+        // Center of the float's box in a 16x4 block.
+        assert_eq!(float_pane_at_cell(&tiled, &floats, 16, 4, 0, 8, 1), Some(7));
+        // Top-left corner is tiled-only → the float hit-test misses.
+        assert_eq!(float_pane_at_cell(&tiled, &floats, 16, 4, 0, 0, 0), None);
     }
 
     #[test]

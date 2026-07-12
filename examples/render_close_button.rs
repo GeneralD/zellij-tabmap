@@ -89,10 +89,13 @@ fn main() {
     );
 
     // `ascii` previews the simplified-UI `×` fallback; the default is the Nerd
-    // Font glyph the plugin uses on a fancy terminal.
+    // Font glyph the plugin uses on a fancy terminal. Both variants carry the
+    // per-terminal glyph color the plugin resolves at runtime (#94): the ASCII
+    // `×` is painted black, the Nerd Font glyph the theme's alert red (here the
+    // palette's `with_alert` red).
     let close = match std::env::args().nth(1).as_deref() {
-        Some("ascii") => Close::Ascii,
-        _ => Close::NerdFont,
+        Some("ascii") => Close::Ascii((0, 0, 0)),
+        _ => Close::NerdFont(palette.alert()),
     };
 
     // Four tabs, none of them the lone survivor. Perspective is on (below), so
@@ -110,6 +113,7 @@ fn main() {
         true,  // inactive_dim
         true,  // perspective on — so only the active tab shows the close glyph
         close, // Nerd Font glyph (default) or ASCII `×` (arg = "ascii")
+        &BTreeMap::new(),
     );
 
     // Hide the cursor so a held screenshot doesn't catch a stray cursor block

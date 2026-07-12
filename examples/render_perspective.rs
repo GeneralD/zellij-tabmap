@@ -59,6 +59,7 @@ fn main() {
             true,
             perspective,
             Close::Off,
+            &BTreeMap::new(),
         )
     );
 }

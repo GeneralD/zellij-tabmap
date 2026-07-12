@@ -85,6 +85,7 @@ fn main() {
         true,
         true,
         Close::Off,
+        &BTreeMap::new(),
     );
 
     // Hide the cursor so a held screenshot doesn't catch a stray cursor block

@@ -523,20 +523,40 @@ impl State {
             .map(|pane| pane.id)
     }
 
-    /// Every tab's tiled terminal panes flattened into one wheel-traversal order:
-    /// tabs in ascending position, panes in reading order within each tab (#80).
+    /// Every tab's panes flattened into one wheel-traversal order: tabs in
+    /// ascending position, and within each tab its tiled panes in reading order
+    /// followed by — only when that tab's floating layer is currently visible —
+    /// its floating panes (#80, #110).
     ///
     /// Tab order comes from the authoritative `self.tabs`, not the `PaneManifest`
     /// keys: `TabUpdate` and `PaneUpdate` arrive as separate events, so a just-
     /// closed tab can still linger as a stale position in the manifest. Walking
     /// `self.tabs` drops those, so the wheel never steps into a pane of a tab that
     /// no longer exists.
+    ///
+    /// A *hidden* float is deliberately excluded — it is reached only via its
+    /// corner chip (#110), never the wheel, so wheeling never pops a hidden layer
+    /// open (auto-hide-agnostic; the P0-3 spike left auto-hide unconfirmed).
     fn pane_focus_order(&self) -> Vec<u32> {
         let mut tabs: Vec<&TabInfo> = self.tabs.iter().collect();
         tabs.sort_by_key(|tab| tab.position);
         tabs.into_iter()
-            .filter_map(|tab| self.panes.panes.get(&tab.position))
-            .flat_map(|panes| projection::pane_ids_in_reading_order(panes))
+            .flat_map(|tab| {
+                let panes = self.panes.panes.get(&tab.position);
+                let mut order: Vec<u32> = panes
+                    .map(|p| projection::pane_ids_in_reading_order(p))
+                    .unwrap_or_default();
+                if tab.are_floating_panes_visible {
+                    if let Some(p) = panes {
+                        order.extend(
+                            projection::project_floating(p)
+                                .into_iter()
+                                .map(|f| f.id as u32),
+                        );
+                    }
+                }
+                order
+            })
             .collect()
     }
 }
@@ -1431,6 +1451,37 @@ mod tests {
             .panes
             .insert(5, vec![focusable_pane(99, 0, false)]);
         assert_eq!(state.pane_focus_order(), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn pane_focus_order_appends_visible_floats_but_not_hidden_ones() {
+        // Tab 0 (floating layer VISIBLE) has tiled 10, 20 and a float 15; tab 1
+        // (layer HIDDEN, the default) has tiled 30 and a float 25. The walk visits
+        // each tab's tiled panes in reading order, then only a *visible* tab's
+        // floats: [10, 20, 15, 30]. Float 25 is excluded — a hidden float is
+        // reached via its chip (P2), never the wheel, so wheeling never pops the
+        // layer open (#110; P0-3 unconfirmed → auto-hide-agnostic).
+        let mut state = scroll_state(scroll::ScrollMode::Pane, Some(10));
+        state.tabs[0].are_floating_panes_visible = true;
+        if let Some(panes) = state.panes.panes.get_mut(&0) {
+            panes.push(PaneInfo {
+                id: 15,
+                is_floating: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
+        if let Some(panes) = state.panes.panes.get_mut(&1) {
+            panes.push(PaneInfo {
+                id: 25,
+                is_floating: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
+        assert_eq!(state.pane_focus_order(), vec![10, 20, 15, 30]);
     }
 
     #[test]

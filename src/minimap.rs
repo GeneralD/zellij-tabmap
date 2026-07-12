@@ -741,6 +741,7 @@ pub fn render(
     close: Close,
     gradient: GradientSpec,
     active: bool,
+    floats: crate::floating::FloatLayer<'_>,
 ) -> String {
     let pw = cols;
     let ph = text_rows * 2;
@@ -951,6 +952,19 @@ pub fn render(
             .collect(),
     };
 
+    // Hidden floating panes are chipped into the bottom text row's right corner
+    // (#110): one selectable glyph per float, laid out by `chip_cells`. Only the
+    // `Hidden` layer draws chips; `None`/`Visible` leave `chip_ids` empty, so the
+    // chip layout is empty and this is a no-op (the visible overlay is a separate
+    // arm added in P3). `chip_row` is the bottom text row (`text_rows >= 1` here).
+    let chip_ids: &[usize] = match floats {
+        crate::floating::FloatLayer::Hidden(ids) => ids,
+        _ => &[],
+    };
+    let chip_layout: Vec<(usize, crate::floating::Chip)> =
+        crate::floating::chip_cells(pw, chip_ids.len());
+    let chip_row = text_rows - 1;
+
     let mut out = String::with_capacity(text_rows * pw * 24);
     for tr in 0..text_rows {
         for c in 0..pw {
@@ -1024,6 +1038,42 @@ pub fn render(
                     out.push_str("\x1b[1m");
                     out.push(glyph);
                     out.push_str("\x1b[22m");
+                    continue;
+                }
+            }
+            // Hidden-float chips ride the bottom text row's right corner (#110),
+            // mirroring the badge/close reservation: one glyph per cell over the
+            // underlying fill, sampled over the row's upper pixel. Takes priority
+            // over a same-cell label so the affordance is never overprinted — the
+            // chip is the sole click target for a hidden float (issue #2).
+            if tr == chip_row {
+                if let Some((_, chip)) = chip_layout.iter().find(|(cc, _)| *cc == c) {
+                    let fill =
+                        pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * chip_row);
+                    match fill {
+                        Some(f) => put_bg(&mut out, f),
+                        None => put_default_bg(&mut out),
+                    }
+                    // A float chip takes its own float's color; the `+k` overflow
+                    // marker takes the accent so it reads apart from the chips.
+                    let base = match chip {
+                        crate::floating::Chip::Float(idx) => palette.color_for(chip_ids[*idx]),
+                        crate::floating::Chip::PlusK(_) => palette.accent(),
+                    };
+                    let chip_fg = if active {
+                        base
+                    } else {
+                        crate::color::mixed(
+                            base,
+                            fill.unwrap_or(crate::color::CANVAS),
+                            INACTIVE_LABEL_BLEND,
+                        )
+                    };
+                    put_fg(&mut out, chip_fg);
+                    out.push(match chip {
+                        crate::floating::Chip::Float(_) => crate::floating::CHIP_GLYPH,
+                        crate::floating::Chip::PlusK(_) => crate::floating::CHIP_MORE_GLYPH,
+                    });
                     continue;
                 }
             }
@@ -1170,6 +1220,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert_eq!(out.lines().count(), 3);
     }
@@ -1199,6 +1250,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             false,
+            crate::floating::FloatLayer::None,
         );
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 4);
@@ -1233,6 +1285,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             false,
+            crate::floating::FloatLayer::None,
         );
         assert!(
             full.lines()
@@ -1272,6 +1325,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             false,
+            crate::floating::FloatLayer::None,
         );
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 4);
@@ -1307,6 +1361,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let (r, g, b) = palette.color_for(1);
         assert!(
@@ -1328,6 +1383,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(out.contains("\x1b[38;2;"), "expected a truecolor fg escape");
         assert!(out.contains("\x1b[48;2;"), "expected a truecolor bg escape");
@@ -1348,6 +1404,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(
             out.contains(&fg(palette.ring_for(0))),
@@ -1376,6 +1433,7 @@ mod tests {
                 Close::Off,
                 GradientSpec::OFF,
                 true,
+                crate::floating::FloatLayer::None,
             )
         };
         let id1 = fg(palette.color_for(1));
@@ -1409,7 +1467,8 @@ mod tests {
                 None,
                 Close::Off,
                 GradientSpec::OFF,
-                true
+                true,
+                crate::floating::FloatLayer::None,
             )
             .is_empty()
         );
@@ -1424,9 +1483,70 @@ mod tests {
                 None,
                 Close::Off,
                 GradientSpec::OFF,
-                true
+                true,
+                crate::floating::FloatLayer::None,
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn render_stamps_a_chip_for_each_hidden_float() {
+        // Two hidden floats (ids 7, 9) over a lone tiled pane in a 12-wide, 3-row
+        // block: the bottom row's two rightmost cells carry the chip glyph. Width
+        // per row stays exactly 12 (chips never widen it).
+        let palette = test_palette();
+        let panes = one_focused();
+        let hidden = [7usize, 9usize];
+        let out = render(
+            &panes,
+            &palette,
+            12,
+            3,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Hidden(&hidden),
+        );
+        assert!(out.contains(crate::floating::CHIP_GLYPH), "chips are drawn");
+        // Two chips → the glyph appears twice.
+        assert_eq!(out.matches(crate::floating::CHIP_GLYPH).count(), 2);
+        // Each row still measures exactly 12 display columns. Use the established
+        // minimap test pattern: `visible_lines` strips ANSI, then measure width.
+        for line in visible_lines(&out) {
+            assert_eq!(unicode_width::UnicodeWidthStr::width(line.as_str()), 12);
+        }
+    }
+
+    #[test]
+    fn render_without_floats_is_byte_identical_to_none() {
+        // `FloatLayer::None` must reproduce the pre-#110 output exactly, and an
+        // empty hidden layer draws no chips (byte-identical to None).
+        let palette = test_palette();
+        let panes = one_focused();
+        let base = |floats| {
+            render(
+                &panes,
+                &palette,
+                12,
+                3,
+                0,
+                LabelMode::None,
+                None,
+                Close::Off,
+                GradientSpec::OFF,
+                true,
+                floats,
+            )
+        };
+        let empty: [usize; 0] = [];
+        assert_eq!(
+            base(crate::floating::FloatLayer::None),
+            base(crate::floating::FloatLayer::Hidden(&empty)),
+            "no floats draws no chips"
         );
     }
 
@@ -1446,6 +1566,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert_eq!(out.lines().count(), 2);
         assert!(
@@ -1547,6 +1668,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(wide.contains('c'), "expected label text in a wide block");
         // Too narrow (cw < 4 after normalization): no label, only block glyphs.
@@ -1561,6 +1683,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(!narrow.contains('c'), "narrow block should drop the label");
     }
@@ -1581,6 +1704,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(
             wide.contains('~'),
@@ -1610,6 +1734,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         for ch in ['a', 'b', 'c'] {
             assert!(
@@ -1641,6 +1766,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(
             out.contains('z'),
@@ -1678,6 +1804,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert_eq!(
@@ -1714,6 +1841,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert_eq!(
@@ -1748,6 +1876,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert!(
@@ -1783,6 +1912,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert_eq!(
@@ -1822,6 +1952,7 @@ mod tests {
                 Close::Off,
                 GradientSpec::OFF,
                 true,
+                crate::floating::FloatLayer::None,
             );
             for line in visible_lines(&out) {
                 let w: usize = line.chars().filter_map(UnicodeWidthChar::width).sum();
@@ -1888,6 +2019,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         // 6-column label centered in the 10-column inner span: 3 block cells
@@ -1928,6 +2060,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         // Both halves are emitted, centered by the 4-column char-sum width …
@@ -1966,6 +2099,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert!(
@@ -2002,6 +2136,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(wide.contains('⌘'), "wide block should host the badge");
         let narrow = render(
@@ -2015,6 +2150,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(
             !narrow.contains('⌘'),
@@ -2042,6 +2178,7 @@ mod tests {
                 Close::Off,
                 GradientSpec::OFF,
                 active,
+                crate::floating::FloatLayer::None,
             )
         };
         let active = render_badge(true);
@@ -2088,6 +2225,7 @@ mod tests {
                 Close::Off,
                 GradientSpec::OFF,
                 active,
+                crate::floating::FloatLayer::None,
             )
         };
         let active = render_tab(true);
@@ -2144,6 +2282,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert!(
@@ -2176,6 +2315,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(
             !out.contains('符'),
@@ -2203,6 +2343,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
         assert!(out.contains(&fg(palette.color_for(1))));
@@ -2225,6 +2366,7 @@ mod tests {
             Close::Off,
             GradientSpec::SHEEN,
             true,
+            crate::floating::FloatLayer::None,
         );
         let base = fg(palette.color_for(1));
         let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
@@ -2253,6 +2395,7 @@ mod tests {
             Close::Off,
             GradientSpec::WEAVE,
             true,
+            crate::floating::FloatLayer::None,
         );
         let fill = palette.color_for(1);
         let stop = crate::color::gradient_at(fill, 100);
@@ -2279,6 +2422,7 @@ mod tests {
             Close::Off,
             GradientSpec::SHEEN,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(out.starts_with(&fg(palette.color_for(1))));
     }
@@ -2430,6 +2574,7 @@ mod tests {
             Close::Off,
             lin(90),
             true,
+            crate::floating::FloatLayer::None,
         );
         let fill = palette.color_for(1);
         // size 2 → 4 px tall → an inclusive span of 3 pixels.
@@ -2472,6 +2617,7 @@ mod tests {
             Close::Off,
             radial(RadialDirection::Outward),
             true,
+            crate::floating::FloatLayer::None,
         );
         let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
         assert!(
@@ -2496,6 +2642,7 @@ mod tests {
             Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let without = render(
             &one_plain(),
@@ -2508,6 +2655,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let with_top = with.lines().next().unwrap_or_default();
         assert!(
@@ -2535,6 +2683,7 @@ mod tests {
             Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             false,
+            crate::floating::FloatLayer::None,
         );
         assert_eq!(
             out.matches(CLOSE_GLYPH).count(),
@@ -2570,6 +2719,7 @@ mod tests {
             Close::NerdFont(carried),
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let active_top = active.lines().next().unwrap_or_default();
         assert!(
@@ -2596,6 +2746,7 @@ mod tests {
             Close::NerdFont(carried),
             GradientSpec::OFF,
             false,
+            crate::floating::FloatLayer::None,
         );
         let inactive_top = inactive.lines().next().unwrap_or_default();
         assert!(
@@ -2634,6 +2785,7 @@ mod tests {
             Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert!(
@@ -2661,6 +2813,7 @@ mod tests {
             Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let top = out.lines().next().unwrap_or_default();
         assert!(top.contains('⌘'), "badge survives alongside close: {top:?}");
@@ -2687,6 +2840,7 @@ mod tests {
             Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let top: Vec<char> = visible_lines(&out)[0].chars().collect();
         assert_eq!(top.len(), w, "one visible char per cell: {top:?}");
@@ -2714,6 +2868,7 @@ mod tests {
             Close::Ascii(CLOSE_FG_ASCII),
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let top_line = out.lines().next().unwrap_or_default();
         assert!(

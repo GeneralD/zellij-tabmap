@@ -2,6 +2,20 @@
 //! (later) the visible-float overlay mapping. No zellij types, so the whole
 //! module is unit-tested off-wasm (rule #8), exactly like `minimap`/`scroll`.
 
+use crate::minimap::PaneRect;
+
+/// The floating-pane layer handed to [`crate::minimap::render`] for one tab
+/// (#110). Chosen per tab from `TabInfo.are_floating_panes_visible`:
+/// - `None` — the tab has no floats, or `floating = off`: draw nothing extra.
+/// - `Hidden` — the layer is hidden: draw one corner chip per float id.
+/// - `Visible` — the layer is shown: overlay each float's rect on the grid (P3).
+#[derive(Clone, Copy, Debug)]
+pub enum FloatLayer<'a> {
+    None,
+    Hidden(&'a [usize]),
+    Visible(&'a [PaneRect]),
+}
+
 /// How the bar depicts a tab's floating-pane layer (config key `floating`, #110).
 ///
 /// `Hybrid` is the B/A behaviour from the design: a tab whose floating layer is

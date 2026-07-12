@@ -304,7 +304,17 @@ fn grid_lines(
     active: bool,
 ) -> Vec<StyledLine> {
     let block = minimap::render(
-        panes, palette, width, rows, vinset, mode, badge, close, gradient, active,
+        panes,
+        palette,
+        width,
+        rows,
+        vinset,
+        mode,
+        badge,
+        close,
+        gradient,
+        active,
+        crate::floating::FloatLayer::None,
     );
     padded_rows(block.lines().map(str::to_string), width, rows)
 }

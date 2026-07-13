@@ -510,15 +510,21 @@ impl State {
         focus_terminal_pane(target, false, false);
     }
 
-    /// The id of the focused tiled terminal pane in the active tab, if any — the
-    /// anchor the wheel steps from in `pane` mode.
+    /// The id of the focused terminal pane in the active tab that the wheel can
+    /// step from in `pane` mode, if any — a tiled pane, or a floating one while
+    /// its layer is visible. The floating case mirrors `pane_focus_order`, which
+    /// appends visible floats: without it, wheeling from a focused float would
+    /// find no anchor in the order and stall (#80/#110).
     fn focused_pane_id(&self) -> Option<u32> {
         let active = projection::active_tab(&self.tabs)?;
         self.panes
             .panes
             .get(&active.position)?
             .iter()
-            .filter(|pane| projection::is_tiled_terminal(pane))
+            .filter(|pane| {
+                projection::is_tiled_terminal(pane)
+                    || (active.are_floating_panes_visible && projection::is_floating_terminal(pane))
+            })
             .find(|pane| pane.is_focused)
             .map(|pane| pane.id)
     }
@@ -1428,6 +1434,47 @@ mod tests {
         // No focused pane in the active tab → no anchor, so `pane` mode leaves
         // focus untouched rather than guessing a target.
         let state = scroll_state(scroll::ScrollMode::Pane, None);
+        assert_eq!(state.focused_pane_id(), None);
+    }
+
+    #[test]
+    fn focused_pane_id_resolves_a_focused_visible_float() {
+        // A focused floating pane anchors the wheel while its layer is visible —
+        // `pane_focus_order` appends visible floats, so the anchor must recognize
+        // one too, else wheeling from a focused float finds no anchor and stalls
+        // (#80/#110).
+        let mut state = scroll_state(scroll::ScrollMode::Pane, None);
+        state.tabs[0].are_floating_panes_visible = true;
+        if let Some(panes) = state.panes.panes.get_mut(&0) {
+            panes.push(PaneInfo {
+                id: 15,
+                is_floating: true,
+                is_focused: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
+        assert_eq!(state.focused_pane_id(), Some(15));
+    }
+
+    #[test]
+    fn focused_pane_id_ignores_a_focused_float_while_the_layer_is_hidden() {
+        // A hidden float is reached only via its chip, never the wheel, so it is
+        // no anchor while the layer is hidden — matching `pane_focus_order`, which
+        // excludes hidden floats (#110).
+        let mut state = scroll_state(scroll::ScrollMode::Pane, None);
+        // `are_floating_panes_visible` defaults to false (layer hidden).
+        if let Some(panes) = state.panes.panes.get_mut(&0) {
+            panes.push(PaneInfo {
+                id: 15,
+                is_floating: true,
+                is_focused: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
         assert_eq!(state.focused_pane_id(), None);
     }
 

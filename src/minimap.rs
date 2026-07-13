@@ -826,7 +826,12 @@ pub(crate) fn project_floats_into(
     let boxes: Vec<PaneBox> = floats
         .iter()
         .map(|p| {
-            let px0 = map(p.x, minx, bw, pw).min(pw);
+            // Clamp the left edge to the last column, never `pw`: a float whose
+            // `x` maps to the right edge would otherwise give `px0 == pw`, and
+            // the `hi <= px0` fallback below then yields `px1 == pw` too — an
+            // empty `pw..pw` box that paints nothing. Mirrors `py0`'s
+            // `content_ph - 1` clamp; `pw >= 1` here (guarded above).
+            let px0 = map(p.x, minx, bw, pw).min(pw - 1);
             let px1 = match map(p.x + p.w, minx, bw, pw).min(pw) {
                 hi if hi <= px0 => (px0 + 1).min(pw),
                 hi => hi,
@@ -982,11 +987,15 @@ pub fn render(
     // Float border pixels: the outline of each float box, drawn in the float's
     // `ring_for` shade so it reads as a distinct pane floating above the tiles.
     let mut float_ring = vec![false; float_grid.len()];
-    for b in &float_bounds {
+    for (i, b) in float_bounds.iter().enumerate() {
         for py in b.py0..b.py1 {
             for px in b.px0..b.px1 {
                 let edge = px == b.px0 || px == b.px1 - 1 || py == b.py0 || py == b.py1 - 1;
-                if edge {
+                // Only where this float still *owns* the cell: when two floats
+                // overlap, `float_grid` gives the topmost one, so an occluded
+                // float's border under a later float paints as that float's
+                // interior, never a stray outline poking through it.
+                if edge && float_grid[py * pw + px] == Some(i) {
                     float_ring[py * pw + px] = true;
                 }
             }
@@ -1052,6 +1061,25 @@ pub fn render(
     // corner overlays never collide on a narrow rung.
     let badge_fits = !badge_cells.is_empty()
         && BADGE_COL + badge_cells.len() <= pw.saturating_sub(close_reserve);
+
+    // Hidden floating panes are chipped into the bottom text row's right corner
+    // (#110): one selectable glyph per float, laid out by `chip_cells`. Only the
+    // `Hidden` layer draws chips; `None`/`Visible` leave `chip_ids` empty, so the
+    // chip layout is empty and this is a no-op (the visible overlay is a separate
+    // arm added in P3). `chip_row` is the bottom text row (`text_rows >= 1` here).
+    // Computed before the pane loop so a bottom-row label can stop short of the
+    // chips (`chip_left`), the mirror of the top-row close-glyph `right_bound`.
+    let chip_ids: &[usize] = match floats {
+        crate::floating::FloatLayer::Hidden(ids) => ids,
+        _ => &[],
+    };
+    let chip_layout: Vec<(usize, crate::floating::Chip)> =
+        crate::floating::chip_cells(pw, chip_ids.len());
+    let chip_row = text_rows - 1;
+    // The leftmost reserved chip column, or `None` when no chips draw — a label
+    // on `chip_row` caps its `right_bound` here so a wide glyph can't straddle
+    // and overrun the corner chips.
+    let chip_left = chip_layout.iter().map(|&(c, _)| c).min();
 
     for (i, p) in panes.iter().enumerate() {
         // `project_panes` already computed this pane's box and filled the grid;
@@ -1146,17 +1174,24 @@ pub fn render(
                 } else {
                     centered
                 };
-                // The close glyph sits near the top-right corner, so a label on the
-                // right-edge pane sharing its row must stop short of it — the
-                // mirror of the badge's left-edge `start` nudge above (#86).
-                // `close` is only set on non-receding tabs, so the glyph's row is
-                // the top one (`close_text_row`); `close_col` already carries the
-                // per-mode inset (#94).
-                let right_bound = if close_on && row == close_text_row {
-                    px1.min(close_col)
+                // A label on the right-edge pane must stop short of the corner
+                // overlays sharing its row: the close glyph on the top row (#86,
+                // the mirror of the badge's left-edge `start` nudge) and the
+                // hidden-float chips on the bottom row (#110). `close` is only set
+                // on non-receding tabs, so its glyph rides the top row
+                // (`close_text_row`); `close_col`/`chip_left` carry the reserved
+                // columns. Both default to `px1` (no cap) when absent.
+                let close_bound = if close_on && row == close_text_row {
+                    close_col
                 } else {
                     px1
                 };
+                let chip_bound = if row == chip_row {
+                    chip_left.unwrap_or(px1)
+                } else {
+                    px1
+                };
+                let right_bound = px1.min(close_bound).min(chip_bound);
                 label
                     .chars()
                     .filter_map(|ch| {
@@ -1190,19 +1225,6 @@ pub fn render(
             .map(|b| pane_sweep(gradient, (b.px0, b.px1, b.py0, b.py1)))
             .collect(),
     };
-
-    // Hidden floating panes are chipped into the bottom text row's right corner
-    // (#110): one selectable glyph per float, laid out by `chip_cells`. Only the
-    // `Hidden` layer draws chips; `None`/`Visible` leave `chip_ids` empty, so the
-    // chip layout is empty and this is a no-op (the visible overlay is a separate
-    // arm added in P3). `chip_row` is the bottom text row (`text_rows >= 1` here).
-    let chip_ids: &[usize] = match floats {
-        crate::floating::FloatLayer::Hidden(ids) => ids,
-        _ => &[],
-    };
-    let chip_layout: Vec<(usize, crate::floating::Chip)> =
-        crate::floating::chip_cells(pw, chip_ids.len());
-    let chip_row = text_rows - 1;
 
     // Pixel-level float coverage (#110): a half-block pixel is "under the float"
     // when `float_grid` owns it. Length-0 without a visible layer, so `.get`
@@ -2312,6 +2334,21 @@ mod tests {
         );
         assert!(fb.px1 <= 8 && fb.py1 <= 8);
         // Its grid cells point back to float index 0.
+        assert_eq!(fgrid[fb.py0 * 8 + fb.px0], Some(0));
+    }
+
+    #[test]
+    fn project_floats_into_keeps_a_right_edge_float_visible() {
+        // A float flush against the tiled bbox's right edge maps `x` to `pw`; the
+        // left-edge clamp must pull it back to the last column so the box is a
+        // non-empty one-column strip, not an empty `pw..pw` that paints nothing.
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "t", false)];
+        let bbox = bbox_of(&tiled);
+        let floats = [PaneRect::new(7, 100, 0, 10, 40, "f", false)];
+        let (fgrid, fboxes) = project_floats_into(&floats, bbox, 8, 8, 0);
+        let fb = fboxes[0];
+        assert!(fb.px1 > fb.px0, "non-empty box: {fb:?}");
+        assert_eq!((fb.px0, fb.px1), (7, 8), "clamped to the last column");
         assert_eq!(fgrid[fb.py0 * 8 + fb.px0], Some(0));
     }
 

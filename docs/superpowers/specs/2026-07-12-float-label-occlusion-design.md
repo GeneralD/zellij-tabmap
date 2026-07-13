@@ -46,10 +46,11 @@
 
 ### 幅コントラクト（重要な端ケース）
 
-- 境界が **全角グリフ**（`Glyph`＋`Continuation` で2桁）に当たる場合、`…`（幅1）へ
-  置換すると1桁になる。続く `Continuation` セルがフロート下（=覆い）なら、そのセルは
-  フォールしてフロート塗りが1桁埋めるので、行幅は保たれる。実装・テストで全角境界を
-  必ず検証する。
+- **全角グリフは `…` にしない**: 幅2の `Glyph`＋`Continuation` のいずれかの列がフロート下
+  なら、両列とも即 `Fill`（フロート／タイル塗りへフォール）に落とし、行幅は「置換」では
+  なく「両列ともフォール」で保たれる。`…` は width==1 のグリフにのみ適用する（`resolve_label_plan`
+  の `if c + width > pw || (0..width).any(|k| covered(c + k))` が、行末オーバーフローと
+  被覆の両方を同じ全 `Fill` として扱う）。実装・テストで全角境界を必ず検証する。
 
 ### スコープ / 非目標
 
@@ -62,8 +63,8 @@
 
 - 判定を render ループに埋め込まず、zellij 型を持たない **純粋ヘルパー**へ切り出し、
   `cargo test --lib` で単体テスト（既存の renderer 分離方針どおり）。
-  - 例: `label_over_float(overlay, float_grid, pw, tr, c) -> LabelDraw`
-    （`Char` / `Ellipsis`（=`…`+shadow） / `Occluded`）。
+  - 例: `resolve_label_plan(overlay, cover, pw, text_rows) -> Vec<LabelDraw>`
+    （`Char` / `Ellipsis`（=`…`+shadow） / `Skip`（全角継続セル） / `Fill`）。
 - 影ブレンド率は名前付き定数（例 `LABEL_SHADOW_BLEND = 25`）。
 
 ## 追記（2026-07-13）: 影はフロートが落とすドロップシャドウ

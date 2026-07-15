@@ -14,6 +14,7 @@ pub mod paint;
 pub mod projection;
 pub(crate) mod router;
 pub mod scroll;
+pub mod suppressed;
 pub mod tab_block;
 pub(crate) mod theme;
 pub mod title;

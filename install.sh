@@ -73,15 +73,20 @@ grep -qE "$url_re" "$CONFIG" \
   || die "no tabmap release-URL 'location=' found in $CONFIG
         (this tool manages release-URL installs; a file: install needs no bump)"
 
-cp "$CONFIG" "$CONFIG.bak"
 tmp="$(mktemp)"
 sed -E "s#(location=\")https://github.com/$REPO/releases/(download/[^/\"]+|latest/download)/$ASSET(\")#\1$URL\3#g" \
   "$CONFIG" > "$tmp"
-cat "$tmp" > "$CONFIG"   # rewrite in place (preserves a symlinked config.kdl)
+if cmp -s "$tmp" "$CONFIG"; then
+  config_note="already $VERSION — unchanged"
+else
+  cp "$CONFIG" "$CONFIG.bak"   # snapshot the pre-bump config; revert with: mv "$CONFIG.bak" "$CONFIG"
+  cat "$tmp" > "$CONFIG"       # rewrite in place (preserves a symlinked config.kdl)
+  config_note="bumped (backup: $CONFIG.bak)"
+fi
 rm -f "$tmp"
 
 # --- 2. write the permission grant for the exact URL ------------------------
-mkdir -p "$PERM_DIR"
+mkdir -p "$(dirname "$PERM")"
 [ -f "$PERM" ] || : > "$PERM"
 tmp="$(mktemp)"
 # strip any existing zellij-tabmap grant block(s) — old versions, latest, file:
@@ -108,7 +113,7 @@ rm -f "$tmp"
 # --- report -----------------------------------------------------------------
 cat <<EOF
 zellij-tabmap $VERSION installed.
-  config:      $CONFIG  (backup: $CONFIG.bak)
+  config:      $CONFIG  ($config_note)
   permissions: $PERM
   location:    $URL
 

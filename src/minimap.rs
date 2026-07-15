@@ -31,6 +31,12 @@ pub(crate) const ACTIVE_FG: Rgb = (255, 255, 255);
 /// enough to visually recede while remaining readable. A visual parameter —
 /// retune freely; not a correctness constant.
 pub(crate) const INACTIVE_LABEL_BLEND: u8 = 30;
+/// A visible float casts a drop-shadow onto the tiled cells to its right and
+/// below (#110): their fill is darkened this many percent toward black, so the
+/// float reads as sitting on top. Deliberately low so the shadow stays
+/// understated. A `…` truncation cue drawn inside that band inherits the same
+/// darkening. A visual parameter — retune freely; not a correctness constant.
+const FLOAT_SHADOW_BLEND: u8 = 25;
 /// The Nerd Font glyph stamped as a tab block's close affordance (#86). The
 /// Material Design `md-close_circle` (U+F0159) reads as a close control. It is
 /// drawn in alert red, one cell in from the block's right edge (#94) so a fill
@@ -367,6 +373,122 @@ enum OverlayCell {
     Continuation,
 }
 
+/// Per-cell drawing decision for the tiled-pane labels once a visible float may
+/// overlap them (#110). Resolved as a unit per glyph by [`resolve_label_plan`]
+/// so a wide (CJK) glyph is never split — the row's display width is preserved.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LabelDraw {
+    /// Draw the overlay glyph normally (the leading cell of a clear glyph).
+    Char,
+    /// Draw `…` over a shadow-darkened fill — a single-column boundary glyph the
+    /// float cuts off.
+    Ellipsis,
+    /// Emit nothing — a continuation column of a drawn wide glyph.
+    Skip,
+    /// Fall through to the float overlay / tiled fill — a cell the float covers,
+    /// or a covered wide glyph's column.
+    Fill,
+}
+
+/// Resolve every cell's [`LabelDraw`] from the placed label `overlay` and the
+/// float's per-cell coverage `cover` (both `text_rows * pw` long). Pure, so it
+/// is unit-tested off-wasm. Scanning left-to-right, each glyph is classified as
+/// a unit: a clear glyph draws (leading `Char`, trailing `Skip`); a glyph any of
+/// whose columns the float covers — or a wide glyph with no room for its
+/// continuation before the block's right edge — drops to `Fill` on every column;
+/// a clear **single-column** glyph whose left/right neighbour still carries the
+/// **same pane's** label under the float becomes `Ellipsis`. A wide glyph never
+/// becomes `Ellipsis` (a `…` is one column and would shorten the row), so its cue
+/// degrades to plain occlusion — a rare corner (pane titles are overwhelmingly
+/// single-column). The width invariant (each row's display width stays `pw`) is
+/// enforced here, not assumed of the caller.
+fn resolve_label_plan(
+    overlay: &[Option<OverlayCell>],
+    cover: &[bool],
+    pw: usize,
+    text_rows: usize,
+) -> Vec<LabelDraw> {
+    let mut plan = vec![LabelDraw::Fill; text_rows * pw];
+    for tr in 0..text_rows {
+        let row = tr * pw;
+        let mut c = 0;
+        while c < pw {
+            let (width, pane) = match overlay[row + c] {
+                Some(OverlayCell::Glyph(ch, i)) => {
+                    (UnicodeWidthChar::width(ch).unwrap_or(1).max(1), i)
+                }
+                // A `None` cell, or an orphan `Continuation`, stays `Fill`.
+                _ => {
+                    c += 1;
+                    continue;
+                }
+            };
+            let covered = |x: usize| x < pw && cover[row + x];
+            // A neighbour continues *this* glyph's label only if it is the same
+            // pane's glyph, or a wide-glyph continuation (which belongs to the
+            // glyph before it). A different pane's adjacent label must not trip
+            // the cue — otherwise an untruncated label next to a covered
+            // neighbour would wrongly show `…`.
+            let same_label = |x: usize| {
+                x < pw
+                    && match overlay[row + x] {
+                        Some(OverlayCell::Glyph(_, j)) => j == pane,
+                        Some(OverlayCell::Continuation) => true,
+                        None => false,
+                    }
+            };
+            // A covered glyph, or a wide glyph that would spill past the right
+            // edge (no room for its continuation), drops to `Fill` on every
+            // column it would occupy — never a bare `Char` without its `Skip`,
+            // which would let the wide glyph advance past `pw`.
+            if c + width > pw || (0..width).any(|k| covered(c + k)) {
+                for k in 0..width.min(pw - c) {
+                    plan[row + c + k] = LabelDraw::Fill;
+                }
+            } else if width == 1 {
+                let boundary = (same_label(c + 1) && covered(c + 1))
+                    || (c > 0 && same_label(c - 1) && covered(c - 1));
+                plan[row + c] = if boundary {
+                    LabelDraw::Ellipsis
+                } else {
+                    LabelDraw::Char
+                };
+            } else {
+                plan[row + c] = LabelDraw::Char;
+                for k in 1..width {
+                    plan[row + c + k] = LabelDraw::Skip;
+                }
+            }
+            c += width.max(1);
+        }
+    }
+    plan
+}
+
+/// A visible float's one-cell-wide drop-shadow over a `w`-by-`h` grid (#110):
+/// every non-covered cell that lies to the **right, below, or below-right** of a
+/// covered cell — i.e. the float is up-and-to-the-left of it, as if lit from the
+/// top-left. Pure, so it is unit-tested off-wasm. Applied at **half-block pixel**
+/// resolution (`w = pw`, `h = ph`), so a shadow below the float darkens only the
+/// one adjacent pixel, not the whole cell. With no visible float `cover` is
+/// all-false, so the band is empty and the no-float render stays byte-identical.
+fn drop_shadow(cover: &[bool], w: usize, h: usize) -> Vec<bool> {
+    (0..w * h)
+        .map(|idx| {
+            if cover[idx] {
+                return false;
+            }
+            let (row, col) = (idx / w, idx % w);
+            let covered = |r: usize, c: usize| r < h && c < w && cover[r * w + c];
+            let up = row.checked_sub(1);
+            let left = col.checked_sub(1);
+            left.map(|l| covered(row, l)).unwrap_or(false)
+                || up.map(|u| covered(u, col)).unwrap_or(false)
+                || up.zip(left).map(|(u, l)| covered(u, l)).unwrap_or(false)
+        })
+        .collect()
+}
+
 // ---- core renderer ------------------------------------------------------
 
 /// Maximum change in the sweep position parameter `t` (`0..=100`) between two
@@ -588,6 +710,24 @@ fn pixel_color(
     }
 }
 
+/// The tiled group's bounding box as `(minx, miny, bw, bh)` — origins and
+/// clamped span. The single source both the tiled projection ([`project_panes`])
+/// and the floating overlay ([`project_floats_into`]) map through, so a float is
+/// placed relative to exactly the same box the tiles were, never expanding it
+/// (#110).
+pub(crate) fn bbox_of(panes: &[PaneRect]) -> (u32, u32, f64, f64) {
+    let minx = panes.iter().map(|p| p.x).min().unwrap_or(0);
+    let miny = panes.iter().map(|p| p.y).min().unwrap_or(0);
+    let maxx = panes.iter().map(|p| p.x + p.w).max().unwrap_or(1);
+    let maxy = panes.iter().map(|p| p.y + p.h).max().unwrap_or(1);
+    (
+        minx,
+        miny,
+        (maxx - minx).max(1) as f64,
+        (maxy - miny).max(1) as f64,
+    )
+}
+
 /// Project `panes` into their block-local pixel boxes and the pixel-ownership
 /// grid for a `pw`-column, `ph`-pixel-row canvas (`ph == 2 * text_rows`), with
 /// `vinset` background pixel rows reserved top and bottom (#66).
@@ -614,12 +754,7 @@ fn project_panes(
     let content_ph = ph.saturating_sub(2 * vinset).max(1);
     let vinset = (ph - content_ph) / 2;
 
-    let minx = panes.iter().map(|p| p.x).min().unwrap_or(0);
-    let miny = panes.iter().map(|p| p.y).min().unwrap_or(0);
-    let maxx = panes.iter().map(|p| p.x + p.w).max().unwrap_or(1);
-    let maxy = panes.iter().map(|p| p.y + p.h).max().unwrap_or(1);
-    let bw = (maxx - minx).max(1) as f64;
-    let bh = (maxy - miny).max(1) as f64;
+    let (minx, miny, bw, bh) = bbox_of(panes);
     let map = |v: u32, lo: u32, span: f64, out: usize| -> usize {
         (((v - lo) as f64) / span * out as f64).round() as usize
     };
@@ -662,6 +797,64 @@ fn project_panes(
     (grid, boxes)
 }
 
+/// Map floating panes into their block-local pixel boxes and ownership grid
+/// through a **given** bounding box (the tiled group's), never recomputing it —
+/// so floats overlay the tiled minimap without shifting it (#110). Same rounding
+/// and edge-clamp as [`project_panes`]; a float outside the tiled bbox clamps to
+/// the block edge and never changes `pw`/`ph`. `grid[i]` is the float slice
+/// index (not id), mirroring [`project_panes`].
+pub(crate) fn project_floats_into(
+    floats: &[PaneRect],
+    bbox: (u32, u32, f64, f64),
+    pw: usize,
+    ph: usize,
+    vinset: usize,
+) -> (Vec<Option<usize>>, Vec<PaneBox>) {
+    let mut grid = vec![None::<usize>; ph * pw];
+    if pw == 0 || ph == 0 || floats.is_empty() {
+        return (grid, Vec::new());
+    }
+    let content_ph = ph.saturating_sub(2 * vinset).max(1);
+    let vinset = (ph - content_ph) / 2;
+    let (minx, miny, bw, bh) = bbox;
+    // `saturating_sub`: a float can sit outside the tiled bbox's top-left, where
+    // `v < lo` — unlike a tiled pane, which always satisfies `v >= lo` — so guard
+    // the subtraction instead of underflowing.
+    let map = |v: u32, lo: u32, span: f64, out: usize| -> usize {
+        (((v.saturating_sub(lo)) as f64) / span * out as f64).round() as usize
+    };
+    let boxes: Vec<PaneBox> = floats
+        .iter()
+        .map(|p| {
+            // Clamp the left edge to the last column, never `pw`: a float whose
+            // `x` maps to the right edge would otherwise give `px0 == pw`, and
+            // the `hi <= px0` fallback below then yields `px1 == pw` too — an
+            // empty `pw..pw` box that paints nothing. Mirrors `py0`'s
+            // `content_ph - 1` clamp; `pw >= 1` here (guarded above).
+            let px0 = map(p.x, minx, bw, pw).min(pw - 1);
+            let px1 = match map(p.x + p.w, minx, bw, pw).min(pw) {
+                hi if hi <= px0 => (px0 + 1).min(pw),
+                hi => hi,
+            };
+            let py0 = (vinset + map(p.y, miny, bh, content_ph).min(content_ph - 1)).min(ph);
+            let py1 = match (vinset + map(p.y + p.h, miny, bh, content_ph).min(content_ph)).min(ph)
+            {
+                hi if hi <= py0 => (py0 + 1).min(ph),
+                hi => hi,
+            };
+            PaneBox { px0, px1, py0, py1 }
+        })
+        .collect();
+    for (i, b) in boxes.iter().enumerate() {
+        for py in b.py0..b.py1 {
+            for px in b.px0..b.px1 {
+                grid[py * pw + px] = Some(i);
+            }
+        }
+    }
+    (grid, boxes)
+}
+
 /// The stable id of the pane drawn at block-local cell (`col`, `row`) in a
 /// `cols`-by-`text_rows` minimap of `panes` (same `vinset` as the [`render`] that
 /// drew it), or `None` when the cell is background, inset, or out of range (#74).
@@ -691,6 +884,32 @@ pub fn pane_at_cell(
     let (grid, _) = project_panes(panes, pw, ph, vinset);
     let at = |py: usize| grid[py * pw + col];
     at(2 * row).or_else(|| at(2 * row + 1)).map(|i| panes[i].id)
+}
+
+/// The visible floating pane id drawn at block-local cell (`col`, `row`) over a
+/// tiled minimap of `tiled` with `floats` overlaid, or `None` when the cell is
+/// not on any float (#110). Uses the same [`project_floats_into`] mapping
+/// [`render`] paints with, so draw and hit-test never disagree. The caller tries
+/// this before the tiled [`pane_at_cell`] (float priority, spec §7.1).
+pub fn float_pane_at_cell(
+    tiled: &[PaneRect],
+    floats: &[PaneRect],
+    cols: usize,
+    text_rows: usize,
+    vinset: usize,
+    col: usize,
+    row: usize,
+) -> Option<usize> {
+    let pw = cols;
+    let ph = text_rows * 2;
+    if pw == 0 || text_rows == 0 || col >= pw || row >= text_rows || floats.is_empty() {
+        return None;
+    }
+    let (grid, _) = project_floats_into(floats, bbox_of(tiled), pw, ph, vinset);
+    let at = |py: usize| grid[py * pw + col];
+    at(2 * row)
+        .or_else(|| at(2 * row + 1))
+        .map(|i| floats[i].id)
 }
 
 /// Render `panes` into a `cols` × `text_rows` block (pixel rows = `2*text_rows`).
@@ -741,6 +960,7 @@ pub fn render(
     close: Close,
     gradient: GradientSpec,
     active: bool,
+    floats: crate::floating::FloatLayer<'_>,
 ) -> String {
     let pw = cols;
     let ph = text_rows * 2;
@@ -752,6 +972,35 @@ pub fn render(
     // [`pane_at_cell`] hit-tests against the same `project_panes` output, so a
     // click can never resolve to a pane other than the one drawn.
     let (grid, bounds) = project_panes(panes, pw, ph, vinset);
+    // The visible floating layer overlays the tiled grid, mapped through the same
+    // bbox so it sits in place without shifting the tiles (#110). Kept in its own
+    // grid/boxes so the tiled `grid[i]`/`panes[i]` index space is never mixed.
+    let float_rects: &[PaneRect] = match floats {
+        crate::floating::FloatLayer::Visible(f) => f,
+        _ => &[],
+    };
+    let (float_grid, float_bounds) = if float_rects.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        project_floats_into(float_rects, bbox_of(panes), pw, ph, vinset)
+    };
+    // Float border pixels: the outline of each float box, drawn in the float's
+    // `ring_for` shade so it reads as a distinct pane floating above the tiles.
+    let mut float_ring = vec![false; float_grid.len()];
+    for (i, b) in float_bounds.iter().enumerate() {
+        for py in b.py0..b.py1 {
+            for px in b.px0..b.px1 {
+                let edge = px == b.px0 || px == b.px1 - 1 || py == b.py0 || py == b.py1 - 1;
+                // Only where this float still *owns* the cell: when two floats
+                // overlap, `float_grid` gives the topmost one, so an occluded
+                // float's border under a later float paints as that float's
+                // interior, never a stray outline poking through it.
+                if edge && float_grid[py * pw + px] == Some(i) {
+                    float_ring[py * pw + px] = true;
+                }
+            }
+        }
+    }
     let mut ring = vec![false; ph * pw]; // focus-ring pixels
     let mut overlay = vec![None::<OverlayCell>; text_rows * pw]; // label cells
 
@@ -812,6 +1061,25 @@ pub fn render(
     // corner overlays never collide on a narrow rung.
     let badge_fits = !badge_cells.is_empty()
         && BADGE_COL + badge_cells.len() <= pw.saturating_sub(close_reserve);
+
+    // Hidden floating panes are chipped into the bottom text row's right corner
+    // (#110): one selectable glyph per float, laid out by `chip_cells`. Only the
+    // `Hidden` layer draws chips; `None`/`Visible` leave `chip_ids` empty, so the
+    // chip layout is empty and this is a no-op (the visible overlay is a separate
+    // arm added in P3). `chip_row` is the bottom text row (`text_rows >= 1` here).
+    // Computed before the pane loop so a bottom-row label can stop short of the
+    // chips (`chip_left`), the mirror of the top-row close-glyph `right_bound`.
+    let chip_ids: &[usize] = match floats {
+        crate::floating::FloatLayer::Hidden(ids) => ids,
+        _ => &[],
+    };
+    let chip_layout: Vec<(usize, crate::floating::Chip)> =
+        crate::floating::chip_cells(pw, chip_ids.len());
+    let chip_row = text_rows - 1;
+    // The leftmost reserved chip column, or `None` when no chips draw — a label
+    // on `chip_row` caps its `right_bound` here so a wide glyph can't straddle
+    // and overrun the corner chips.
+    let chip_left = chip_layout.iter().map(|&(c, _)| c).min();
 
     for (i, p) in panes.iter().enumerate() {
         // `project_panes` already computed this pane's box and filled the grid;
@@ -906,17 +1174,24 @@ pub fn render(
                 } else {
                     centered
                 };
-                // The close glyph sits near the top-right corner, so a label on the
-                // right-edge pane sharing its row must stop short of it — the
-                // mirror of the badge's left-edge `start` nudge above (#86).
-                // `close` is only set on non-receding tabs, so the glyph's row is
-                // the top one (`close_text_row`); `close_col` already carries the
-                // per-mode inset (#94).
-                let right_bound = if close_on && row == close_text_row {
-                    px1.min(close_col)
+                // A label on the right-edge pane must stop short of the corner
+                // overlays sharing its row: the close glyph on the top row (#86,
+                // the mirror of the badge's left-edge `start` nudge) and the
+                // hidden-float chips on the bottom row (#110). `close` is only set
+                // on non-receding tabs, so its glyph rides the top row
+                // (`close_text_row`); `close_col`/`chip_left` carry the reserved
+                // columns. Both default to `px1` (no cap) when absent.
+                let close_bound = if close_on && row == close_text_row {
+                    close_col
                 } else {
                     px1
                 };
+                let chip_bound = if row == chip_row {
+                    chip_left.unwrap_or(px1)
+                } else {
+                    px1
+                };
+                let right_bound = px1.min(close_bound).min(chip_bound);
                 label
                     .chars()
                     .filter_map(|ch| {
@@ -950,6 +1225,27 @@ pub fn render(
             .map(|b| pane_sweep(gradient, (b.px0, b.px1, b.py0, b.py1)))
             .collect(),
     };
+
+    // Pixel-level float coverage (#110): a half-block pixel is "under the float"
+    // when `float_grid` owns it. Length-0 without a visible layer, so `.get`
+    // returns `None` → all-false, and the no-float path is unaffected.
+    let float_covered_px: Vec<bool> = (0..ph * pw)
+        .map(|idx| float_grid.get(idx).copied().flatten().is_some())
+        .collect();
+    // A text cell is occluded when EITHER of its two pixels is covered — labels
+    // draw a whole cell, so `resolve_label_plan` decides at cell resolution.
+    let cell_covered: Vec<bool> = (0..text_rows * pw)
+        .map(|idx| {
+            let (tr, c) = (idx / pw, idx % pw);
+            float_covered_px[2 * tr * pw + c] || float_covered_px[(2 * tr + 1) * pw + c]
+        })
+        .collect();
+    let label_plan = resolve_label_plan(&overlay, &cell_covered, pw, text_rows);
+    // The float's one-pixel drop-shadow, on the half-block pixels to its right
+    // and below, so the float reads as floating on top (#110). Pixel resolution:
+    // a half-block below the float darkens only its adjacent half. Empty without
+    // a visible float, so the no-float render stays byte-identical.
+    let shadow_px = drop_shadow(&float_covered_px, pw, ph);
 
     let mut out = String::with_capacity(text_rows * pw * 24);
     for tr in 0..text_rows {
@@ -1027,41 +1323,159 @@ pub fn render(
                     continue;
                 }
             }
-            // A continuation cell is already covered on screen by its wide
-            // glyph's advance — emit nothing so cells stay in lockstep.
-            if let Some(OverlayCell::Continuation) = overlay[tr * pw + c] {
-                continue;
-            }
-            if let Some(OverlayCell::Glyph(ch, i)) = overlay[tr * pw + c] {
-                // Active tab: white label on vivid fill — prominent. Focused pane
-                // also bold for maximum emphasis. Inactive tab: text muted toward
-                // the pane fill so it recedes without becoming unreadable (#59).
-                let highlighted = active && panes[i].focused;
-                // A label paints one background sample for its whole cell; take it
-                // at the text row's vertical center (`2*tr + 0.5`) so a vertical,
-                // diagonal, or radial sweep reads correctly through the text
-                // (at angle 0 the row is irrelevant — byte-identical to the
-                // pre-#71 top-pixel sample).
-                let label_fill =
-                    fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
-                put_bg(&mut out, label_fill);
-                let label_fg = if active {
-                    ACTIVE_FG
-                } else {
-                    crate::color::mixed(ACTIVE_FG, label_fill, INACTIVE_LABEL_BLEND)
-                };
-                put_fg(&mut out, label_fg);
-                if highlighted {
-                    out.push_str("\x1b[1m");
-                    out.push(ch);
-                    out.push_str("\x1b[22m");
+            // Hidden-float chips ride the bottom text row's right corner (#110),
+            // mirroring the badge/close reservation: one glyph per cell over the
+            // underlying fill, sampled over the row's upper pixel. Takes priority
+            // over a same-cell label so the affordance is never overprinted — the
+            // chip is the sole click target for a hidden float (issue #2).
+            if tr == chip_row {
+                if let Some((_, chip)) = chip_layout.iter().find(|(cc, _)| *cc == c) {
+                    let fill =
+                        pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * chip_row);
+                    match fill {
+                        Some(f) => put_bg(&mut out, f),
+                        None => put_default_bg(&mut out),
+                    }
+                    // A float chip takes its own float's color; the `+k` overflow
+                    // marker takes the accent so it reads apart from the chips.
+                    let base = match chip {
+                        crate::floating::Chip::Float(idx) => palette.color_for(chip_ids[*idx]),
+                        crate::floating::Chip::PlusK(_) => palette.accent(),
+                    };
+                    let chip_fg = if active {
+                        base
+                    } else {
+                        crate::color::mixed(
+                            base,
+                            fill.unwrap_or(crate::color::CANVAS),
+                            INACTIVE_LABEL_BLEND,
+                        )
+                    };
+                    put_fg(&mut out, chip_fg);
+                    out.push(match chip {
+                        crate::floating::Chip::Float(_) => crate::floating::CHIP_GLYPH,
+                        crate::floating::Chip::PlusK(_) => crate::floating::CHIP_MORE_GLYPH,
+                    });
                     continue;
                 }
-                out.push(ch);
-                continue;
             }
-            let top = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr);
-            let bottom = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr + 1);
+            // Tiled-pane label vs. the visible float (#110). The pre-resolved
+            // plan says whether this cell draws its glyph, a `…` truncation cue
+            // over a shadow, nothing (a wide glyph's continuation already covered
+            // by its advance), or falls through to the float / tiled fill. With no
+            // visible layer every cell resolves to `Char`/`Skip`/`Fill` exactly as
+            // the pre-#110 branch did, so that path stays byte-identical.
+            match label_plan[tr * pw + c] {
+                LabelDraw::Skip => continue,
+                LabelDraw::Char => {
+                    if let Some(OverlayCell::Glyph(ch, i)) = overlay[tr * pw + c] {
+                        // Active tab: white label on vivid fill — prominent.
+                        // Focused pane also bold for maximum emphasis. Inactive
+                        // tab: text muted toward the pane fill so it recedes
+                        // without becoming unreadable (#59).
+                        let highlighted = active && panes[i].focused;
+                        // A label paints one background sample for its whole cell;
+                        // take it at the text row's vertical center (`2*tr + 0.5`)
+                        // so a vertical, diagonal, or radial sweep reads correctly
+                        // through the text (at angle 0 the row is irrelevant —
+                        // byte-identical to the pre-#71 top-pixel sample).
+                        let label_fill =
+                            fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
+                        // A label paints one uniform background, so it can't shade
+                        // just its top or bottom half; darken the whole cell when
+                        // EITHER of its two pixels falls in the drop-shadow (#110).
+                        let bg = if shadow_px[2 * tr * pw + c] || shadow_px[(2 * tr + 1) * pw + c] {
+                            crate::color::mixed(label_fill, (0, 0, 0), FLOAT_SHADOW_BLEND)
+                        } else {
+                            label_fill
+                        };
+                        put_bg(&mut out, bg);
+                        let label_fg = if active {
+                            ACTIVE_FG
+                        } else {
+                            crate::color::mixed(ACTIVE_FG, label_fill, INACTIVE_LABEL_BLEND)
+                        };
+                        put_fg(&mut out, label_fg);
+                        if highlighted {
+                            out.push_str("\x1b[1m");
+                            out.push(ch);
+                            out.push_str("\x1b[22m");
+                        } else {
+                            out.push(ch);
+                        }
+                        continue;
+                    }
+                }
+                LabelDraw::Ellipsis => {
+                    if let Some(OverlayCell::Glyph(_, i)) = overlay[tr * pw + c] {
+                        // The label continues under the float — mark the cut with
+                        // `…`. The shadow is the float's, not the cue's: this cell
+                        // is darkened only when it falls in the drop-shadow band
+                        // (a left-cut `…` sits in the float's shadow; a right-cut
+                        // one faces the light and stays bright). Same fg/dim as a
+                        // normal label, but never bold: `…` is a marker, not the
+                        // pane's own glyph.
+                        let label_fill =
+                            fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
+                        // A label paints one uniform background, so it can't shade
+                        // just its top or bottom half; darken the whole cell when
+                        // EITHER of its two pixels falls in the drop-shadow (#110).
+                        let bg = if shadow_px[2 * tr * pw + c] || shadow_px[(2 * tr + 1) * pw + c] {
+                            crate::color::mixed(label_fill, (0, 0, 0), FLOAT_SHADOW_BLEND)
+                        } else {
+                            label_fill
+                        };
+                        put_bg(&mut out, bg);
+                        let label_fg = if active {
+                            ACTIVE_FG
+                        } else {
+                            crate::color::mixed(ACTIVE_FG, label_fill, INACTIVE_LABEL_BLEND)
+                        };
+                        put_fg(&mut out, label_fg);
+                        out.push('…');
+                        continue;
+                    }
+                }
+                LabelDraw::Fill => {}
+            }
+            // A visible float, when present at this pixel, paints on top of the
+            // tiled fill (float priority, spec §7.1): its border pixels take the
+            // float's `ring_for` shade, its interior the float's `color_for`.
+            // `float_grid` is length-0 when there is no visible layer, so `.get`
+            // returns `None` and the tiled `pixel_color` shows through unchanged —
+            // the no-float path stays byte-identical (#110).
+            let float_px = |py: usize| -> Option<Rgb> {
+                let i = (*float_grid.get(py * pw + c)?)?;
+                Some(if float_ring[py * pw + c] {
+                    palette.ring_for(float_rects[i].id)
+                } else {
+                    palette.color_for(float_rects[i].id)
+                })
+            };
+            // A tiled pixel in the float's drop-shadow is darkened per pixel, so a
+            // half-block just below the float shades only its adjacent half — the
+            // shadow is one pixel wide, not a whole cell (#110). Float pixels
+            // (resolved first, above) are never shaded; only the tiled fill that
+            // shows through beside/below the float.
+            let shade = |py: usize, px: Option<Rgb>| {
+                if shadow_px[py * pw + c] {
+                    px.map(|col| crate::color::mixed(col, (0, 0, 0), FLOAT_SHADOW_BLEND))
+                } else {
+                    px
+                }
+            };
+            let top = float_px(2 * tr).or_else(|| {
+                shade(
+                    2 * tr,
+                    pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr),
+                )
+            });
+            let bottom = float_px(2 * tr + 1).or_else(|| {
+                shade(
+                    2 * tr + 1,
+                    pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr + 1),
+                )
+            });
             put_halfblock(&mut out, top, bottom);
         }
         out.push_str(RESET);
@@ -1170,6 +1584,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert_eq!(out.lines().count(), 3);
     }
@@ -1199,6 +1614,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             false,
+            crate::floating::FloatLayer::None,
         );
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 4);
@@ -1233,6 +1649,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             false,
+            crate::floating::FloatLayer::None,
         );
         assert!(
             full.lines()
@@ -1272,6 +1689,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             false,
+            crate::floating::FloatLayer::None,
         );
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 4);
@@ -1307,6 +1725,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let (r, g, b) = palette.color_for(1);
         assert!(
@@ -1328,6 +1747,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(out.contains("\x1b[38;2;"), "expected a truecolor fg escape");
         assert!(out.contains("\x1b[48;2;"), "expected a truecolor bg escape");
@@ -1348,6 +1768,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(
             out.contains(&fg(palette.ring_for(0))),
@@ -1376,6 +1797,7 @@ mod tests {
                 Close::Off,
                 GradientSpec::OFF,
                 true,
+                crate::floating::FloatLayer::None,
             )
         };
         let id1 = fg(palette.color_for(1));
@@ -1409,7 +1831,8 @@ mod tests {
                 None,
                 Close::Off,
                 GradientSpec::OFF,
-                true
+                true,
+                crate::floating::FloatLayer::None,
             )
             .is_empty()
         );
@@ -1424,10 +1847,360 @@ mod tests {
                 None,
                 Close::Off,
                 GradientSpec::OFF,
-                true
+                true,
+                crate::floating::FloatLayer::None,
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn render_stamps_a_chip_for_each_hidden_float() {
+        // Two hidden floats (ids 7, 9) over a lone tiled pane in a 12-wide, 3-row
+        // block: the bottom row's two rightmost cells carry the chip glyph. Width
+        // per row stays exactly 12 (chips never widen it).
+        let palette = test_palette();
+        let panes = one_focused();
+        let hidden = [7usize, 9usize];
+        let out = render(
+            &panes,
+            &palette,
+            12,
+            3,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Hidden(&hidden),
+        );
+        assert!(out.contains(crate::floating::CHIP_GLYPH), "chips are drawn");
+        // Two chips → the glyph appears twice.
+        assert_eq!(out.matches(crate::floating::CHIP_GLYPH).count(), 2);
+        // Each row still measures exactly 12 display columns. Use the established
+        // minimap test pattern: `visible_lines` strips ANSI, then measure width.
+        for line in visible_lines(&out) {
+            assert_eq!(unicode_width::UnicodeWidthStr::width(line.as_str()), 12);
+        }
+    }
+
+    #[test]
+    fn render_without_floats_is_byte_identical_to_none() {
+        // `FloatLayer::None` must reproduce the pre-#110 output exactly, and an
+        // empty hidden layer draws no chips (byte-identical to None).
+        let palette = test_palette();
+        let panes = one_focused();
+        let base = |floats| {
+            render(
+                &panes,
+                &palette,
+                12,
+                3,
+                0,
+                LabelMode::None,
+                None,
+                Close::Off,
+                GradientSpec::OFF,
+                true,
+                floats,
+            )
+        };
+        let empty: [usize; 0] = [];
+        assert_eq!(
+            base(crate::floating::FloatLayer::None),
+            base(crate::floating::FloatLayer::Hidden(&empty)),
+            "no floats draws no chips"
+        );
+    }
+
+    #[test]
+    fn render_overlays_a_visible_float_on_top_of_the_tiled_grid() {
+        // A tiled pane (id 0) fills the block; a visible float (id 7) sits in the
+        // middle. The float's color (keyed on id 7) must appear in the output, on
+        // top of the tiled fill, and the row width stays exact.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "t", false)];
+        let floats = [PaneRect::new(7, 30, 12, 40, 16, "f", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            16,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+        );
+        let float_fg = format!(
+            "\x1b[38;2;{};{};{}m",
+            palette.color_for(7).0,
+            palette.color_for(7).1,
+            palette.color_for(7).2
+        );
+        assert!(
+            out.contains(&float_fg),
+            "the visible float paints its own color on top"
+        );
+        // Width contract, measured the same way as Task 5 (ANSI stripped via
+        // `visible_lines`, then `UnicodeWidthStr::width`).
+        for line in visible_lines(&out) {
+            assert_eq!(unicode_width::UnicodeWidthStr::width(line.as_str()), 16);
+        }
+    }
+
+    #[test]
+    fn label_plan_draws_clear_labels_and_skips_wide_continuations() {
+        // Row of 6 cells: "ab" (two 1-col glyphs) at 0,1; a 2-col glyph at 2,3
+        // (Glyph + Continuation); 4,5 empty. No float cover → every glyph draws.
+        let o = |c| Some(OverlayCell::Glyph(c, 0));
+        let overlay = vec![
+            o('a'),
+            o('b'),
+            o('実'),
+            Some(OverlayCell::Continuation),
+            None,
+            None,
+        ];
+        let cover = vec![false; 6];
+        let plan = resolve_label_plan(&overlay, &cover, 6, 1);
+        assert_eq!(
+            plan,
+            vec![
+                LabelDraw::Char, // a
+                LabelDraw::Char, // b
+                LabelDraw::Char, // 実 (leading)
+                LabelDraw::Skip, // 実 continuation
+                LabelDraw::Fill, // empty
+                LabelDraw::Fill,
+            ]
+        );
+    }
+
+    #[test]
+    fn label_plan_occludes_a_covered_glyph_and_cues_its_neighbour() {
+        // "ab": the float covers cell 1 ("b") → that cell falls to Fill; "a" is a
+        // right boundary (its neighbour is covered AND carries a label) → Ellipsis.
+        let o = |c| Some(OverlayCell::Glyph(c, 0));
+        let overlay = vec![o('a'), o('b'), None, None];
+        let cover = vec![false, true, false, false];
+        let plan = resolve_label_plan(&overlay, &cover, 4, 1);
+        assert_eq!(plan[0], LabelDraw::Ellipsis, "a is cut by the float → …");
+        assert_eq!(plan[1], LabelDraw::Fill, "b is under the float");
+    }
+
+    #[test]
+    fn label_plan_left_boundary_is_an_ellipsis() {
+        // The float covers cell 0 (carrying a label glyph); cell 1 ("b") is the
+        // left boundary → Ellipsis.
+        let o = |c| Some(OverlayCell::Glyph(c, 0));
+        let overlay = vec![o('a'), o('b'), None, None];
+        let cover = vec![true, false, false, false];
+        let plan = resolve_label_plan(&overlay, &cover, 4, 1);
+        assert_eq!(plan[0], LabelDraw::Fill);
+        assert_eq!(plan[1], LabelDraw::Ellipsis);
+    }
+
+    #[test]
+    fn label_plan_does_not_cue_a_label_that_merely_abuts_the_float() {
+        // "a" at 0; the float covers cell 1 but there is NO label there → "a" ends
+        // naturally at the float, so no cue.
+        let overlay = vec![Some(OverlayCell::Glyph('a', 0)), None, None, None];
+        let cover = vec![false, true, false, false];
+        let plan = resolve_label_plan(&overlay, &cover, 4, 1);
+        assert_eq!(
+            plan[0],
+            LabelDraw::Char,
+            "no label continues under the float"
+        );
+    }
+
+    #[test]
+    fn label_plan_never_ellipsizes_a_wide_glyph_and_keeps_width() {
+        // A 2-col glyph at 0,1 whose trailing column the float covers → the whole
+        // glyph drops to Fill on BOTH columns (never a 1-col `…`, so width holds).
+        let overlay = vec![
+            Some(OverlayCell::Glyph('実', 0)),
+            Some(OverlayCell::Continuation),
+            None,
+            None,
+        ];
+        let cover = vec![false, true, false, false];
+        let plan = resolve_label_plan(&overlay, &cover, 4, 1);
+        assert_eq!(plan[0], LabelDraw::Fill);
+        assert_eq!(plan[1], LabelDraw::Fill);
+    }
+
+    #[test]
+    fn label_plan_drops_a_wide_glyph_with_no_room_to_fill() {
+        // A 2-col glyph in the LAST column has no room for its continuation, so it
+        // must drop to Fill — never a bare Char that would advance past the row
+        // width (the function enforces the width invariant itself, #110 review).
+        let overlay = vec![None, None, None, Some(OverlayCell::Glyph('実', 0))];
+        let cover = vec![false; 4];
+        let plan = resolve_label_plan(&overlay, &cover, 4, 1);
+        assert_eq!(plan[3], LabelDraw::Fill);
+    }
+
+    #[test]
+    fn label_plan_does_not_cue_across_a_pane_boundary() {
+        // Two adjacent single-column labels from DIFFERENT panes; only pane 1's is
+        // covered. Pane 0's 'a' is untruncated, so it must NOT become `…` just
+        // because a different pane's neighbour is under the float (#110 review).
+        let overlay = vec![
+            Some(OverlayCell::Glyph('a', 0)),
+            Some(OverlayCell::Glyph('X', 1)),
+            None,
+            None,
+        ];
+        let cover = vec![false, true, false, false];
+        let plan = resolve_label_plan(&overlay, &cover, 4, 1);
+        assert_eq!(
+            plan[0],
+            LabelDraw::Char,
+            "a different-pane neighbour is not this label"
+        );
+        assert_eq!(plan[1], LabelDraw::Fill);
+    }
+
+    #[test]
+    fn drop_shadow_falls_one_cell_down_and_right_of_a_covered_cell() {
+        // 3x3 with only (0,0) covered. A drop-shadow (light from top-left) darkens
+        // exactly the cell to its right (0,1), below (1,0), and below-right (1,1)
+        // — one cell wide, nothing up or left of it.
+        let mut cover = vec![false; 9];
+        cover[0] = true; // (0,0)
+        let sh = drop_shadow(&cover, 3, 3);
+        assert!(!sh[0], "the covered cell itself is not shadowed");
+        assert!(sh[1], "right of the float");
+        assert!(sh[3], "below the float");
+        assert!(sh[4], "below-right of the float");
+        assert!(!sh[2], "(0,2) is two columns right — not adjacent");
+        assert!(!sh[6], "(2,0) is two rows below — not adjacent");
+        assert!(!sh[8], "(2,2) is not adjacent to the float");
+    }
+
+    #[test]
+    fn drop_shadow_is_empty_without_coverage() {
+        let sh = drop_shadow(&[false; 6], 3, 2);
+        assert!(sh.iter().all(|&s| !s), "no float → no shadow band");
+    }
+
+    #[test]
+    fn render_occludes_a_tiled_label_under_a_visible_float() {
+        // A tiled pane titled "cargo" fills the block (label centers on cells
+        // 5..9 of text row 2); a visible float whose left edge lands at cell 7
+        // cuts it mid-word. The whole run "cargo" no longer appears verbatim, the
+        // cut is marked with `…`, and the row width contract still holds.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "cargo", false)];
+        let floats = [PaneRect::new(7, 44, 16, 56, 24, "f", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            16,
+            4,
+            0,
+            LabelMode::All,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+        );
+        let stripped = visible_lines(&out).join("\n");
+        assert!(
+            !stripped.contains("cargo"),
+            "the label is cut by the float, not shown whole: {stripped:?}"
+        );
+        assert!(
+            stripped.contains('…'),
+            "the cut is marked with an ellipsis: {stripped:?}"
+        );
+        for line in visible_lines(&out) {
+            assert_eq!(unicode_width::UnicodeWidthStr::width(line.as_str()), 16);
+        }
+    }
+
+    #[test]
+    fn render_float_casts_a_drop_shadow_on_the_tiled_cells_below_and_right() {
+        // A visible float sitting mid-block casts a drop-shadow onto the tiled
+        // cells to its right and below (light from top-left): their fill is
+        // darkened by FLOAT_SHADOW_BLEND. A single flat-filled pane (GradientSpec
+        // OFF) makes the fill a known color, so the darkened shade must appear.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "cargo", false)];
+        let floats = [PaneRect::new(7, 44, 12, 32, 16, "f", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            16,
+            4,
+            0,
+            LabelMode::All,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+        );
+        let fill = palette.color_for(0);
+        let shaded = crate::color::mixed(fill, (0, 0, 0), FLOAT_SHADOW_BLEND);
+        let shaded_fg = format!("\x1b[38;2;{};{};{}m", shaded.0, shaded.1, shaded.2);
+        let shaded_bg = format!("\x1b[48;2;{};{};{}m", shaded.0, shaded.1, shaded.2);
+        assert!(
+            out.contains(&shaded_fg) || out.contains(&shaded_bg),
+            "a drop-shadow cell carries the darkened fill"
+        );
+    }
+
+    #[test]
+    fn render_without_a_float_leaves_the_label_unshadowed() {
+        // No visible float → no coverage → no drop-shadow band, so a labeled pane
+        // renders its label verbatim over the plain fill and with no `…`. This
+        // locks the byte-identical no-float label path (`Char` arm) the occlusion
+        // change must preserve (#110 review).
+        let palette = test_palette();
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "cargo", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            16,
+            4,
+            0,
+            LabelMode::All,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::None,
+        );
+        let stripped = visible_lines(&out).join("\n");
+        assert!(stripped.contains("cargo"), "the whole label shows");
+        assert!(!stripped.contains('…'), "no truncation cue without a float");
+        let fill = palette.color_for(0);
+        let shaded = crate::color::mixed(fill, (0, 0, 0), FLOAT_SHADOW_BLEND);
+        let shaded_bg = format!("\x1b[48;2;{};{};{}m", shaded.0, shaded.1, shaded.2);
+        assert!(
+            !out.contains(&shaded_bg),
+            "no shadow background without a float"
+        );
+    }
+
+    #[test]
+    fn float_pane_at_cell_resolves_a_visible_float_over_the_tiled_pane() {
+        // Same geometry: a click in the float's box resolves to float id 7 (float
+        // priority); a click outside it falls through to None (caller then tries
+        // the tiled hit-test).
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "t", false)];
+        let floats = [PaneRect::new(7, 30, 12, 40, 16, "f", false)];
+        // Center of the float's box in a 16x4 block.
+        assert_eq!(float_pane_at_cell(&tiled, &floats, 16, 4, 0, 8, 1), Some(7));
+        // Top-left corner is tiled-only → the float hit-test misses.
+        assert_eq!(float_pane_at_cell(&tiled, &floats, 16, 4, 0, 0, 0), None);
     }
 
     #[test]
@@ -1446,6 +2219,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert_eq!(out.lines().count(), 2);
         assert!(
@@ -1533,6 +2307,52 @@ mod tests {
     }
 
     #[test]
+    fn project_floats_into_maps_through_the_tiled_bbox_without_expanding_it() {
+        // A tiled pane spans (0,0,100,40); a float sits at (50,20,20,10) inside it.
+        // Mapped through the tiled bbox into an 8x8-pixel canvas, the float lands in
+        // the lower-right quadrant — and the tiled bbox is unchanged by the float.
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "t", false)];
+        let (_, tiled_boxes) = project_panes(&tiled, 8, 8, 0);
+        let bbox = bbox_of(&tiled);
+        let floats = [PaneRect::new(7, 50, 20, 20, 10, "f", false)];
+        let (fgrid, fboxes) = project_floats_into(&floats, bbox, 8, 8, 0);
+        // The tiled pane still fills the whole canvas (float did not expand its bbox).
+        assert_eq!(
+            tiled_boxes[0],
+            PaneBox {
+                px0: 0,
+                px1: 8,
+                py0: 0,
+                py1: 8
+            }
+        );
+        // The float occupies a sub-rectangle in the lower-right, not the whole canvas.
+        let fb = fboxes[0];
+        assert!(
+            fb.px0 >= 4 && fb.py0 >= 4,
+            "float maps to the lower-right quadrant: {fb:?}"
+        );
+        assert!(fb.px1 <= 8 && fb.py1 <= 8);
+        // Its grid cells point back to float index 0.
+        assert_eq!(fgrid[fb.py0 * 8 + fb.px0], Some(0));
+    }
+
+    #[test]
+    fn project_floats_into_keeps_a_right_edge_float_visible() {
+        // A float flush against the tiled bbox's right edge maps `x` to `pw`; the
+        // left-edge clamp must pull it back to the last column so the box is a
+        // non-empty one-column strip, not an empty `pw..pw` that paints nothing.
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "t", false)];
+        let bbox = bbox_of(&tiled);
+        let floats = [PaneRect::new(7, 100, 0, 10, 40, "f", false)];
+        let (fgrid, fboxes) = project_floats_into(&floats, bbox, 8, 8, 0);
+        let fb = fboxes[0];
+        assert!(fb.px1 > fb.px0, "non-empty box: {fb:?}");
+        assert_eq!((fb.px0, fb.px1), (7, 8), "clamped to the last column");
+        assert_eq!(fgrid[fb.py0 * 8 + fb.px0], Some(0));
+    }
+
+    #[test]
     fn labels_appear_when_wide_and_drop_when_narrow() {
         let panes = vec![PaneRect::new(0, 0, 0, 100, 40, "cargo", false)];
         // Wide enough: the label's leading char should be overlaid (dark text fg).
@@ -1547,6 +2367,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(wide.contains('c'), "expected label text in a wide block");
         // Too narrow (cw < 4 after normalization): no label, only block glyphs.
@@ -1561,6 +2382,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(!narrow.contains('c'), "narrow block should drop the label");
     }
@@ -1581,6 +2403,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(
             wide.contains('~'),
@@ -1610,6 +2433,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         for ch in ['a', 'b', 'c'] {
             assert!(
@@ -1641,6 +2465,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(
             out.contains('z'),
@@ -1678,6 +2503,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert_eq!(
@@ -1714,6 +2540,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert_eq!(
@@ -1748,6 +2575,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert!(
@@ -1783,6 +2611,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert_eq!(
@@ -1822,6 +2651,7 @@ mod tests {
                 Close::Off,
                 GradientSpec::OFF,
                 true,
+                crate::floating::FloatLayer::None,
             );
             for line in visible_lines(&out) {
                 let w: usize = line.chars().filter_map(UnicodeWidthChar::width).sum();
@@ -1888,6 +2718,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         // 6-column label centered in the 10-column inner span: 3 block cells
@@ -1928,6 +2759,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         // Both halves are emitted, centered by the 4-column char-sum width …
@@ -1966,6 +2798,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert!(
@@ -2002,6 +2835,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(wide.contains('⌘'), "wide block should host the badge");
         let narrow = render(
@@ -2015,6 +2849,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(
             !narrow.contains('⌘'),
@@ -2042,6 +2877,7 @@ mod tests {
                 Close::Off,
                 GradientSpec::OFF,
                 active,
+                crate::floating::FloatLayer::None,
             )
         };
         let active = render_badge(true);
@@ -2088,6 +2924,7 @@ mod tests {
                 Close::Off,
                 GradientSpec::OFF,
                 active,
+                crate::floating::FloatLayer::None,
             )
         };
         let active = render_tab(true);
@@ -2144,6 +2981,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert!(
@@ -2176,6 +3014,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(
             !out.contains('符'),
@@ -2203,6 +3042,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
         assert!(out.contains(&fg(palette.color_for(1))));
@@ -2225,6 +3065,7 @@ mod tests {
             Close::Off,
             GradientSpec::SHEEN,
             true,
+            crate::floating::FloatLayer::None,
         );
         let base = fg(palette.color_for(1));
         let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
@@ -2253,6 +3094,7 @@ mod tests {
             Close::Off,
             GradientSpec::WEAVE,
             true,
+            crate::floating::FloatLayer::None,
         );
         let fill = palette.color_for(1);
         let stop = crate::color::gradient_at(fill, 100);
@@ -2279,6 +3121,7 @@ mod tests {
             Close::Off,
             GradientSpec::SHEEN,
             true,
+            crate::floating::FloatLayer::None,
         );
         assert!(out.starts_with(&fg(palette.color_for(1))));
     }
@@ -2430,6 +3273,7 @@ mod tests {
             Close::Off,
             lin(90),
             true,
+            crate::floating::FloatLayer::None,
         );
         let fill = palette.color_for(1);
         // size 2 → 4 px tall → an inclusive span of 3 pixels.
@@ -2472,6 +3316,7 @@ mod tests {
             Close::Off,
             radial(RadialDirection::Outward),
             true,
+            crate::floating::FloatLayer::None,
         );
         let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
         assert!(
@@ -2496,6 +3341,7 @@ mod tests {
             Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let without = render(
             &one_plain(),
@@ -2508,6 +3354,7 @@ mod tests {
             Close::Off,
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let with_top = with.lines().next().unwrap_or_default();
         assert!(
@@ -2535,6 +3382,7 @@ mod tests {
             Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             false,
+            crate::floating::FloatLayer::None,
         );
         assert_eq!(
             out.matches(CLOSE_GLYPH).count(),
@@ -2570,6 +3418,7 @@ mod tests {
             Close::NerdFont(carried),
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let active_top = active.lines().next().unwrap_or_default();
         assert!(
@@ -2596,6 +3445,7 @@ mod tests {
             Close::NerdFont(carried),
             GradientSpec::OFF,
             false,
+            crate::floating::FloatLayer::None,
         );
         let inactive_top = inactive.lines().next().unwrap_or_default();
         assert!(
@@ -2634,6 +3484,7 @@ mod tests {
             Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let lines = visible_lines(&out);
         assert!(
@@ -2661,6 +3512,7 @@ mod tests {
             Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let top = out.lines().next().unwrap_or_default();
         assert!(top.contains('⌘'), "badge survives alongside close: {top:?}");
@@ -2687,6 +3539,7 @@ mod tests {
             Close::NerdFont(TEST_CLOSE_FG),
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let top: Vec<char> = visible_lines(&out)[0].chars().collect();
         assert_eq!(top.len(), w, "one visible char per cell: {top:?}");
@@ -2714,6 +3567,7 @@ mod tests {
             Close::Ascii(CLOSE_FG_ASCII),
             GradientSpec::OFF,
             true,
+            crate::floating::FloatLayer::None,
         );
         let top_line = out.lines().next().unwrap_or_default();
         assert!(

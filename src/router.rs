@@ -20,6 +20,13 @@ pub(crate) struct TabPaneGeom {
     pub(crate) rows: usize,
     pub(crate) vinset: usize,
     pub(crate) panes: Vec<minimap::PaneRect>,
+    /// Hidden floating pane ids drawn as corner chips this frame (#110), in the
+    /// same order [`crate::floating::chip_cells`] lays them out. Empty when the
+    /// tab has no hidden floats (its layer is visible / off / it has none).
+    pub(crate) hidden_floats: Vec<usize>,
+    /// Visible floating panes overlaid this frame (#110), for the visible-layer
+    /// hit-test. Empty when the tab's layer is hidden / off / has no floats.
+    pub(crate) visible_floats: Vec<minimap::PaneRect>,
 }
 
 /// The stable id of the minimap pane drawn at click (`row`, `column`), or
@@ -41,6 +48,86 @@ pub(crate) fn pane_at(
     let geom = tab_panes.get(&position)?;
     let col = column.checked_sub(geom.start)?;
     minimap::pane_at_cell(&geom.panes, geom.width, geom.rows, geom.vinset, col, row)
+}
+
+/// The hidden floating-pane id whose corner chip is at click (`row`, `column`),
+/// or `None` when the click missed every chip (#110). Resolves against the exact
+/// chip layout [`crate::floating::chip_index_at_cell`] computed for the tab under
+/// the cursor, so draw and hit-test never disagree. `row` is zellij's click line
+/// (`isize`, negative above the pane); a negative or off-chip cell is a miss.
+/// The caller tries this before the tiled [`pane_at`] (float priority, spec §7.1).
+pub(crate) fn float_chip_at(
+    tab_layout: &[line::TabHit],
+    tab_panes: &BTreeMap<usize, TabPaneGeom>,
+    row: isize,
+    column: usize,
+) -> Option<usize> {
+    let row = usize::try_from(row).ok()?;
+    let position = line::position_at_column(tab_layout, column)?;
+    let geom = tab_panes.get(&position)?;
+    if geom.hidden_floats.is_empty() {
+        return None;
+    }
+    let col = column.checked_sub(geom.start)?;
+    let index = crate::floating::chip_index_at_cell(
+        geom.width,
+        geom.rows,
+        geom.hidden_floats.len(),
+        col,
+        row,
+    )?;
+    geom.hidden_floats.get(index).copied()
+}
+
+/// The overflow count `k` if the click at (`row`, `column`) landed on a tab's
+/// `+k` marker — the decorative stand-in for hidden floats that overflow the
+/// chip run (#110). Unlike [`float_chip_at`] it selects nothing; the caller
+/// consumes the click as a no-op so it never falls through to focus the tiled
+/// pane the marker sits over. Same per-tab geometry resolution as `float_chip_at`.
+pub(crate) fn chip_marker_at(
+    tab_layout: &[line::TabHit],
+    tab_panes: &BTreeMap<usize, TabPaneGeom>,
+    row: isize,
+    column: usize,
+) -> Option<usize> {
+    let row = usize::try_from(row).ok()?;
+    let position = line::position_at_column(tab_layout, column)?;
+    let geom = tab_panes.get(&position)?;
+    if geom.hidden_floats.is_empty() {
+        return None;
+    }
+    let col = column.checked_sub(geom.start)?;
+    crate::floating::chip_marker_k(geom.width, geom.rows, geom.hidden_floats.len(), col, row)
+}
+
+/// The visible floating pane id drawn at click (`row`, `column`) — the overlay
+/// counterpart of [`float_chip_at`] (#110). `None` when the tab has no visible
+/// floats or the cell is off every float box. Resolves against the same
+/// [`minimap::float_pane_at_cell`] mapping `render` painted, so draw and
+/// hit-test never disagree. Tried alongside [`float_chip_at`] before the tiled
+/// [`pane_at`] (float priority, spec §7.1).
+pub(crate) fn float_overlay_at(
+    tab_layout: &[line::TabHit],
+    tab_panes: &BTreeMap<usize, TabPaneGeom>,
+    row: isize,
+    column: usize,
+) -> Option<usize> {
+    let row = usize::try_from(row).ok()?;
+    let position = line::position_at_column(tab_layout, column)?;
+    let geom = tab_panes.get(&position)?;
+    if geom.visible_floats.is_empty() {
+        return None;
+    }
+    let col = column.checked_sub(geom.start)?;
+    minimap::float_pane_at_cell(
+        &geom.panes,
+        &geom.visible_floats,
+        geom.width,
+        geom.rows,
+        geom.vinset,
+        col,
+        row,
+    )
 }
 
 /// Whether `column` falls in the "+" button's drawn span — the pure routing
@@ -88,6 +175,10 @@ pub(crate) enum ClickIntent {
     CloseTab(usize),
     /// Focus this pane id (#74) — a click landed on its drawn minimap cell.
     FocusPane(usize),
+    /// Focus this floating pane id (#110) — a click landed on its corner chip
+    /// (hidden layer) or its overlay (visible layer). Dispatched with
+    /// `should_float_if_hidden = true`, so a hidden float is revealed+focused.
+    FocusFloatingPane(usize),
     /// Switch to this 1-based tab target (#8) — a click landed on a tab block
     /// that draws no minimap (or on its background, off any pane). Carries the
     /// `u32` [`line::switch_target_at_column`] yields, ready for `switch_tab_to`.
@@ -118,6 +209,21 @@ pub(crate) fn route_click(
     if let Some(position) = clicked_close_button(close_layout, row, column) {
         return ClickIntent::CloseTab(position);
     }
+    // Floating panes sit on top of the tiled minimap, so a float — a hidden-layer
+    // corner chip or a visible-layer overlay — wins over the tiled pane in the
+    // same cell (float priority, spec §7.1).
+    if let Some(id) = float_chip_at(tab_layout, tab_panes, row, column)
+        .or_else(|| float_overlay_at(tab_layout, tab_panes, row, column))
+    {
+        return ClickIntent::FocusFloatingPane(id);
+    }
+    // The `+k` overflow marker is decorative — it stands in for hidden floats
+    // that don't fit the chip run and selects nothing. Consume a click on it as
+    // a no-op so it never falls through to focus the tiled pane it sits over
+    // (#110). Making those overflow floats reachable is a follow-up (#113).
+    if chip_marker_at(tab_layout, tab_panes, row, column).is_some() {
+        return ClickIntent::NoOp;
+    }
     if let Some(id) = pane_at(tab_layout, tab_panes, row, column) {
         return ClickIntent::FocusPane(id);
     }
@@ -145,6 +251,8 @@ mod tests {
                 .iter()
                 .map(|&(id, x, y, w, h)| minimap::PaneRect::new(id, x, y, w, h, "sh", false))
                 .collect(),
+            hidden_floats: Vec::new(),
+            visible_floats: Vec::new(),
         }
     }
 
@@ -365,6 +473,91 @@ mod tests {
         assert_eq!(
             route_click(button, &close_layout, &tab_layout, &tab_panes, 1, 5),
             ClickIntent::NoOp,
+        );
+    }
+
+    #[test]
+    fn float_chip_at_resolves_a_hidden_float_click() {
+        // A grid-rung tab at cols 10..30, MIN_ROWS tall, with two hidden floats
+        // (ids 7, 9). Chips ride the bottom row (MIN_ROWS - 1 = 2), block-local
+        // cols 18,19 → chips 0,1 → absolute cols 28,29. A click on the rightmost
+        // chip resolves to float 9, the next to 7; a click above the bottom misses.
+        let tab_layout = vec![hit_active(0, 10, 20)];
+        let mut g = geom(10, 20, &[]);
+        g.hidden_floats = vec![7, 9];
+        let tab_panes: BTreeMap<usize, TabPaneGeom> = [(0usize, g)].into_iter().collect();
+        assert_eq!(
+            float_chip_at(&tab_layout, &tab_panes, 2, 29),
+            Some(9),
+            "rightmost chip → float 9"
+        );
+        assert_eq!(float_chip_at(&tab_layout, &tab_panes, 2, 28), Some(7));
+        assert_eq!(
+            float_chip_at(&tab_layout, &tab_panes, 1, 29),
+            None,
+            "not the bottom row"
+        );
+    }
+
+    #[test]
+    fn route_click_prefers_a_float_chip_over_the_tiled_pane_under_it() {
+        // The bottom-right corner holds both a tiled pane (whole block) and a
+        // float chip. route_click resolves the chip first (float priority §7.1).
+        let tab_layout = vec![hit_active(0, 10, 20)];
+        let mut g = geom(10, 20, &[(5, 0, 0, 80, 24)]); // one tiled pane fills the block
+        g.hidden_floats = vec![7];
+        let tab_panes: BTreeMap<usize, TabPaneGeom> = [(0usize, g)].into_iter().collect();
+        // Chip at the bottom-right cell (row 2, col 10+20-1 = 29).
+        assert_eq!(
+            route_click(None, &[], &tab_layout, &tab_panes, 2, 29),
+            ClickIntent::FocusFloatingPane(7),
+            "the chip beats the tiled pane beneath it",
+        );
+        // A click elsewhere in the block still focuses the tiled pane.
+        assert_eq!(
+            route_click(None, &[], &tab_layout, &tab_panes, 0, 12),
+            ClickIntent::FocusPane(5),
+        );
+    }
+
+    #[test]
+    fn route_click_prefers_a_visible_float_overlay_over_the_tiled_pane() {
+        // A tab whose visible float overlay covers part of the block. A click on
+        // the float resolves to FocusFloatingPane; elsewhere falls to the tiled
+        // pane.
+        let tab_layout = vec![hit_active(0, 10, 20)];
+        let mut g = geom(10, 20, &[(0, 0, 0, 100, 40)]); // tiled fills block
+        g.visible_floats = vec![minimap::PaneRect::new(7, 30, 12, 40, 16, "f", false)];
+        let tab_panes: BTreeMap<usize, TabPaneGeom> = [(0usize, g)].into_iter().collect();
+        // A click at the float's center (block-local ~col 8, row 1 → absolute col 18).
+        assert_eq!(
+            route_click(None, &[], &tab_layout, &tab_panes, 1, 18),
+            ClickIntent::FocusFloatingPane(7),
+        );
+    }
+
+    #[test]
+    fn route_click_treats_the_overflow_marker_as_a_no_op() {
+        // A narrow block (3 cols) with 5 hidden floats overflows the chip run:
+        // `chip_cells(3, 5)` = [ +k marker @0, Float0 @1, Float1 @2 ]. A tiled
+        // pane fills the block. Clicking the marker cell must NOT fall through to
+        // focus that tiled pane (#110) — the marker is decorative, so the click
+        // is a no-op — while a real chip cell still focuses its float.
+        let tab_layout = vec![hit_active(0, 10, 3)];
+        let mut g = geom(10, 3, &[(5, 0, 0, 80, 24)]); // tiled pane fills the block
+        g.hidden_floats = vec![101, 102, 103, 104, 105];
+        let tab_panes: BTreeMap<usize, TabPaneGeom> = [(0usize, g)].into_iter().collect();
+        let chip_row = (MIN_ROWS - 1) as isize;
+        // Marker at block-local col 0 → absolute col 10: no-op, not FocusPane(5).
+        assert_eq!(
+            route_click(None, &[], &tab_layout, &tab_panes, chip_row, 10),
+            ClickIntent::NoOp,
+            "the +k marker never focuses the pane beneath it",
+        );
+        // A real float chip still resolves (block-local col 2 → absolute col 12).
+        assert_eq!(
+            route_click(None, &[], &tab_layout, &tab_panes, chip_row, 12),
+            ClickIntent::FocusFloatingPane(102),
         );
     }
 }

@@ -435,3 +435,33 @@ unit-tested; only the final `new_tab(...)` call stays uncovered. So the
 projection/decision is verified natively and just the irreducible host call is
 left to wasm — the same split as #7 (data via the eprintln oracle, paint via
 renderer unit tests).
+
+---
+
+## 18. Hidden floating panes stay in the `PaneManifest` with ids (verified 0.44.3)
+
+Toggling a tab's floating layer off (`toggle-floating-panes`) does **not** drop
+its floating panes from the `PaneManifest`. Verified empirically with the
+eprintln oracle (#4) against zellij 0.44.3 while building #110:
+
+- Each float keeps its entry — `is_floating = true`, its **id**, and its full
+  `pane_x/y/columns/rows` geometry — even after the layer is hidden, and it
+  survives unrelated `PaneUpdate`s (e.g. a tiled split) while hidden.
+- `TabInfo::are_floating_panes_visible` flips to `false` when the layer hides,
+  but `TabInfo::selectable_floating_panes_count` still counts the hidden floats.
+- Float geometry is in the **same tab-relative cell space as tiled panes** (a
+  float reports e.g. `x=30 y=12 w=60 h=18` next to a tiled `x=0 y=3 w=120 h=37`
+  under a `size=3` bar — `y` starts below the bar, exactly like tiled content).
+
+Consequences for a bar plugin: you can depict hidden floats individually (one
+chip per id) and reveal-and-focus a specific one with
+`focus_terminal_pane(id, /*should_float_if_hidden=*/true, false)` — the id is
+still valid while the layer is hidden. Terminal-pane ids and plugin-pane ids are
+**separate spaces**, so a float can share a numeric id with the bar's own plugin
+pane (`id=1` terminal float vs `id=1` plugin bar); filter with
+`is_floating && !is_plugin` to get just the terminal floats.
+
+**Not verified:** whether the layer auto-hides when focus moves off an unpinned
+float (the expect PTY detached before that probe). Design float wheel-walk to
+not depend on it — walk only tiled + already-visible floats; reach hidden floats
+via their chip, never by a wheel-triggered reveal.

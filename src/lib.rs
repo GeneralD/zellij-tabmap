@@ -7,6 +7,7 @@
 
 pub mod color;
 pub mod config;
+pub mod floating;
 pub mod line;
 pub mod minimap;
 pub mod paint;
@@ -176,6 +177,14 @@ impl ZellijPlugin for State {
                     router::ClickIntent::FocusPane(id) => {
                         focus_terminal_pane(id as u32, false, false);
                     }
+                    // A floating chip (hidden layer) or overlay (visible) — reveal
+                    // and focus it. Unlike the tiled `FocusPane` arm, a hidden float
+                    // has no on-screen footprint, so `should_float_if_hidden = true`
+                    // both reveals its layer and focuses it in one step (#110). Rides
+                    // the already-granted `ChangeApplicationState`.
+                    router::ClickIntent::FocusFloatingPane(id) => {
+                        focus_terminal_pane(id as u32, true, false);
+                    }
                     router::ClickIntent::SwitchTab(target) => switch_tab_to(target),
                     router::ClickIntent::NoOp => {}
                 }
@@ -270,6 +279,42 @@ impl ZellijPlugin for State {
             })
             .collect();
 
+        // Build each visible tab's floating layer spec from its live pane set and
+        // the tab's `are_floating_panes_visible` flag (#110). `floating = off`
+        // yields an empty map, so every tab renders exactly as before. A hidden
+        // layer becomes chips (ids); a visible layer becomes an overlay (rects,
+        // painted in a later step). Keyed by position like `panes_by_position`.
+        let floats_by_position: BTreeMap<usize, floating::FloatSpec> = match self.config.floating {
+            floating::FloatingMode::Off => BTreeMap::new(),
+            floating::FloatingMode::Hybrid => layout
+                .tabs
+                .iter()
+                .map(|hit| {
+                    let panes = self
+                        .panes
+                        .panes
+                        .get(&hit.position)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    let floats = projection::project_floating(panes);
+                    let visible = self
+                        .tabs
+                        .iter()
+                        .find(|t| t.position == hit.position)
+                        .map(|t| t.are_floating_panes_visible)
+                        .unwrap_or(false);
+                    let spec = if floats.is_empty() {
+                        floating::FloatSpec::None
+                    } else if visible {
+                        floating::FloatSpec::Visible(floats)
+                    } else {
+                        floating::FloatSpec::Hidden(floats.iter().map(|f| f.id).collect())
+                    };
+                    (hit.position, spec)
+                })
+                .collect(),
+        };
+
         // Offer the close glyph only when enabled *and* more than one tab is open,
         // so the last tab keeps no close target and can't be shut from under the
         // session (#86). Per tab it lands on the active tab — and, with perspective
@@ -311,6 +356,10 @@ impl ZellijPlugin for State {
                 self.config.inactive_dim,
                 self.config.perspective,
                 close,
+                // Per-tab floating layer (#110): visible layers overlay, hidden
+                // layers chip, keyed by tab position (built above from the live
+                // manifest + each tab's `are_floating_panes_visible`).
+                &floats_by_position,
             )
         );
 
@@ -349,6 +398,22 @@ impl ZellijPlugin for State {
                             .get(&hit.position)
                             .cloned()
                             .unwrap_or_default(),
+                        // Hidden-float chip ids for this tab (#110), taken from the
+                        // float spec built above. Only a *hidden* layer draws chips,
+                        // so a visible/absent layer leaves this empty and the click
+                        // falls back to the tiled pane under it.
+                        hidden_floats: match floats_by_position.get(&hit.position) {
+                            Some(floating::FloatSpec::Hidden(ids)) => ids.clone(),
+                            _ => Vec::new(),
+                        },
+                        // Visible-float overlay rects for this tab (#110), from the
+                        // same spec. Only a *visible* layer overlays, so a
+                        // hidden/absent layer leaves this empty and the click routes
+                        // to a chip or the tiled pane instead.
+                        visible_floats: match floats_by_position.get(&hit.position) {
+                            Some(floating::FloatSpec::Visible(rects)) => rects.clone(),
+                            _ => Vec::new(),
+                        },
                     },
                 )
             })
@@ -445,33 +510,59 @@ impl State {
         focus_terminal_pane(target, false, false);
     }
 
-    /// The id of the focused tiled terminal pane in the active tab, if any — the
-    /// anchor the wheel steps from in `pane` mode.
+    /// The id of the focused terminal pane in the active tab that the wheel can
+    /// step from in `pane` mode, if any — a tiled pane, or a floating one while
+    /// its layer is visible. The floating case mirrors `pane_focus_order`, which
+    /// appends visible floats: without it, wheeling from a focused float would
+    /// find no anchor in the order and stall (#80/#110).
     fn focused_pane_id(&self) -> Option<u32> {
         let active = projection::active_tab(&self.tabs)?;
         self.panes
             .panes
             .get(&active.position)?
             .iter()
-            .filter(|pane| projection::is_tiled_terminal(pane))
+            .filter(|pane| {
+                projection::is_tiled_terminal(pane)
+                    || (active.are_floating_panes_visible && projection::is_floating_terminal(pane))
+            })
             .find(|pane| pane.is_focused)
             .map(|pane| pane.id)
     }
 
-    /// Every tab's tiled terminal panes flattened into one wheel-traversal order:
-    /// tabs in ascending position, panes in reading order within each tab (#80).
+    /// Every tab's panes flattened into one wheel-traversal order: tabs in
+    /// ascending position, and within each tab its tiled panes in reading order
+    /// followed by — only when that tab's floating layer is currently visible —
+    /// its floating panes (#80, #110).
     ///
     /// Tab order comes from the authoritative `self.tabs`, not the `PaneManifest`
     /// keys: `TabUpdate` and `PaneUpdate` arrive as separate events, so a just-
     /// closed tab can still linger as a stale position in the manifest. Walking
     /// `self.tabs` drops those, so the wheel never steps into a pane of a tab that
     /// no longer exists.
+    ///
+    /// A *hidden* float is deliberately excluded — it is reached only via its
+    /// corner chip (#110), never the wheel, so wheeling never pops a hidden layer
+    /// open (auto-hide-agnostic; the P0-3 spike left auto-hide unconfirmed).
     fn pane_focus_order(&self) -> Vec<u32> {
         let mut tabs: Vec<&TabInfo> = self.tabs.iter().collect();
         tabs.sort_by_key(|tab| tab.position);
         tabs.into_iter()
-            .filter_map(|tab| self.panes.panes.get(&tab.position))
-            .flat_map(|panes| projection::pane_ids_in_reading_order(panes))
+            .flat_map(|tab| {
+                let panes = self.panes.panes.get(&tab.position);
+                let mut order: Vec<u32> = panes
+                    .map(|p| projection::pane_ids_in_reading_order(p))
+                    .unwrap_or_default();
+                if tab.are_floating_panes_visible {
+                    if let Some(p) = panes {
+                        order.extend(
+                            projection::project_floating(p)
+                                .into_iter()
+                                .map(|f| f.id as u32),
+                        );
+                    }
+                }
+                order
+            })
             .collect()
     }
 }
@@ -831,6 +922,8 @@ mod tests {
                 .iter()
                 .map(|&(id, x, y, w, h)| minimap::PaneRect::new(id, x, y, w, h, "sh", false))
                 .collect(),
+            hidden_floats: Vec::new(),
+            visible_floats: Vec::new(),
         }
     }
 
@@ -934,6 +1027,90 @@ mod tests {
             "the active tab's panes are recorded for click-to-focus"
         );
         assert_eq!(state.tab_panes.get(&0).map(|g| g.rows), Some(MIN_ROWS));
+    }
+
+    #[test]
+    fn render_records_hidden_float_chips_for_a_tab_with_a_hidden_layer() {
+        // A tab whose floating layer is hidden and holds two floats records their
+        // ids as chips in the tab's geometry, so a later click can reveal+focus one.
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![TabInfo {
+            active: true,
+            are_floating_panes_visible: false,
+            ..tab(0, 1)
+        }];
+        state.panes.panes.insert(
+            0,
+            vec![
+                content_pane(0, 1, 80, 24), // tiled
+                PaneInfo {
+                    id: 7,
+                    is_floating: true,
+                    ..Default::default()
+                }, // hidden float
+                PaneInfo {
+                    id: 9,
+                    is_floating: true,
+                    ..Default::default()
+                }, // hidden float
+            ],
+        );
+
+        state.render(MIN_ROWS, 80);
+
+        assert_eq!(
+            state.tab_panes.get(&0).map(|g| g.hidden_floats.clone()),
+            Some(vec![7, 9]),
+            "hidden floats are recorded as chips for click-to-reveal",
+        );
+    }
+
+    #[test]
+    fn floating_off_records_no_chips() {
+        // With `floating = off` the bar ignores floats entirely (pre-#110 look).
+        let mut state = State::default();
+        state.permitted = true;
+        state.config = Config {
+            floating: crate::floating::FloatingMode::Off,
+            ..Default::default()
+        };
+        state.tabs = vec![TabInfo {
+            active: true,
+            are_floating_panes_visible: false,
+            ..tab(0, 1)
+        }];
+        state.panes.panes.insert(
+            0,
+            vec![
+                content_pane(0, 1, 80, 24),
+                PaneInfo {
+                    id: 7,
+                    is_floating: true,
+                    ..Default::default()
+                },
+            ],
+        );
+
+        state.render(MIN_ROWS, 80);
+        assert_eq!(
+            state.tab_panes.get(&0).map(|g| g.hidden_floats.len()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn left_click_on_a_chip_dispatches_a_floating_focus() {
+        // A recorded chip click resolves to FocusFloatingPane and dispatches the
+        // host effect (a no-op stub off-wasm) without panicking, deferring the
+        // repaint. Bottom row = MIN_ROWS - 1 = 2; rightmost chip cell = col
+        // 10 + 20 - 1 = 29.
+        let mut state = State::default();
+        state.tab_layout = vec![hit_active(0, 10, 20)];
+        let mut g = geom(10, 20, &[]);
+        g.hidden_floats = vec![7];
+        state.tab_panes = [(0usize, g)].into_iter().collect();
+        assert!(!state.update(Event::Mouse(Mouse::LeftClick(2, 29))));
     }
 
     #[test]
@@ -1261,6 +1438,47 @@ mod tests {
     }
 
     #[test]
+    fn focused_pane_id_resolves_a_focused_visible_float() {
+        // A focused floating pane anchors the wheel while its layer is visible —
+        // `pane_focus_order` appends visible floats, so the anchor must recognize
+        // one too, else wheeling from a focused float finds no anchor and stalls
+        // (#80/#110).
+        let mut state = scroll_state(scroll::ScrollMode::Pane, None);
+        state.tabs[0].are_floating_panes_visible = true;
+        if let Some(panes) = state.panes.panes.get_mut(&0) {
+            panes.push(PaneInfo {
+                id: 15,
+                is_floating: true,
+                is_focused: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
+        assert_eq!(state.focused_pane_id(), Some(15));
+    }
+
+    #[test]
+    fn focused_pane_id_ignores_a_focused_float_while_the_layer_is_hidden() {
+        // A hidden float is reached only via its chip, never the wheel, so it is
+        // no anchor while the layer is hidden — matching `pane_focus_order`, which
+        // excludes hidden floats (#110).
+        let mut state = scroll_state(scroll::ScrollMode::Pane, None);
+        // `are_floating_panes_visible` defaults to false (layer hidden).
+        if let Some(panes) = state.panes.panes.get_mut(&0) {
+            panes.push(PaneInfo {
+                id: 15,
+                is_floating: true,
+                is_focused: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
+        assert_eq!(state.focused_pane_id(), None);
+    }
+
+    #[test]
     fn pane_focus_order_flattens_tabs_then_reading_order() {
         // Tabs in ascending position, panes in reading order within each: tab 0's
         // 10 (x=0) then 20 (x=40), then tab 1's 30 — the global wheel traversal.
@@ -1280,6 +1498,37 @@ mod tests {
             .panes
             .insert(5, vec![focusable_pane(99, 0, false)]);
         assert_eq!(state.pane_focus_order(), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn pane_focus_order_appends_visible_floats_but_not_hidden_ones() {
+        // Tab 0 (floating layer VISIBLE) has tiled 10, 20 and a float 15; tab 1
+        // (layer HIDDEN, the default) has tiled 30 and a float 25. The walk visits
+        // each tab's tiled panes in reading order, then only a *visible* tab's
+        // floats: [10, 20, 15, 30]. Float 25 is excluded — a hidden float is
+        // reached via its chip (P2), never the wheel, so wheeling never pops the
+        // layer open (#110; P0-3 unconfirmed → auto-hide-agnostic).
+        let mut state = scroll_state(scroll::ScrollMode::Pane, Some(10));
+        state.tabs[0].are_floating_panes_visible = true;
+        if let Some(panes) = state.panes.panes.get_mut(&0) {
+            panes.push(PaneInfo {
+                id: 15,
+                is_floating: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
+        if let Some(panes) = state.panes.panes.get_mut(&1) {
+            panes.push(PaneInfo {
+                id: 25,
+                is_floating: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
+        assert_eq!(state.pane_focus_order(), vec![10, 20, 15, 30]);
     }
 
     #[test]

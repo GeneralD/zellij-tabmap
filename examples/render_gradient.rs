@@ -65,6 +65,7 @@ fn main() {
                 Close::Off,
                 spec,
                 true,
+                zellij_tabmap::floating::FloatLayer::None,
             )
         );
     }

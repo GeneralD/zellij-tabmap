@@ -355,6 +355,30 @@ impl Palette {
     pub fn ring_for(&self, pane_id: usize) -> Rgb {
         derived_ring(self.color_for(pane_id))
     }
+
+    /// Blend fraction toward a float's own fill for the ring of an **un**focused
+    /// float (#116). The focused float keeps the full [`ring_for`](Self::ring_for)
+    /// outline; every other float's ring recedes toward its fill by this much, so
+    /// the focused float reads as the prominent one among sibling floats. A
+    /// visual-tuning parameter, not a correctness constant.
+    const UNFOCUSED_FLOAT_RING_BLEND: u8 = 50;
+
+    /// Boundary-ring color for a visible float (#110, #116). Every float carries a
+    /// ring so it reads as floating above the tiles; the focused float keeps its
+    /// full [`ring_for`](Self::ring_for) shade while an unfocused float weakens
+    /// toward its own [`color_for`](Self::color_for) fill by
+    /// `UNFOCUSED_FLOAT_RING_BLEND`, so only the focused float carries the strong
+    /// outline. The interior fill is unaffected.
+    pub fn float_ring_for(&self, pane_id: usize, focused: bool) -> Rgb {
+        match focused {
+            true => self.ring_for(pane_id),
+            false => mixed(
+                self.ring_for(pane_id),
+                self.color_for(pane_id),
+                Self::UNFOCUSED_FLOAT_RING_BLEND,
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -490,6 +514,31 @@ mod tests {
         // reads darker than the pane.
         let p = Palette::new(vec![(220, 210, 200)], (200, 100, 50));
         assert!(luma(p.ring_for(0)) < luma((220, 210, 200)));
+        Ok(())
+    }
+
+    #[test]
+    fn float_ring_weakens_only_when_unfocused() -> R {
+        // A visible float always carries a boundary ring so it reads as floating
+        // above the tiles (#110). #116 keeps the FOCUSED float's ring at full
+        // strength and weakens every other float's ring toward its own fill, so
+        // the focused float stands out among its sibling floats.
+        let p = palette();
+        // Focused: unchanged — exactly the shade `ring_for` gives.
+        assert_eq!(p.float_ring_for(1, true), p.ring_for(1));
+        // Unfocused: blended toward the float's own fill — strictly weaker than
+        // the full ring, but never collapsed into the bare fill.
+        let weak = p.float_ring_for(1, false);
+        assert_ne!(weak, p.ring_for(1), "unfocused ring must be weakened");
+        assert_ne!(weak, p.color_for(1), "but not collapsed into the fill");
+        assert_eq!(
+            weak,
+            mixed(
+                p.ring_for(1),
+                p.color_for(1),
+                Palette::UNFOCUSED_FLOAT_RING_BLEND
+            )
+        );
         Ok(())
     }
 

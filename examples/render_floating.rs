@@ -61,10 +61,10 @@ fn main() {
             PaneRect::new(1, 60, 0, 60, 40, "zsh", false),
         ],
     );
-    // ⌘2 (active) — a 2×2-ish grid, with a visible float overlaid (below). No
-    // tiled pane is focused here: focus is on the float (below), and zellij
+    // ⌘2 (active) — a 2×2-ish grid, with two visible floats overlaid (below), one
+    // focused. No tiled pane is focused here: focus is on a float, and zellij
     // focuses one pane at a time, so the tiled panes carry no focus ring — only
-    // the float stands out.
+    // the focused float carries the strong ring.
     panes.insert(
         1,
         vec![
@@ -76,15 +76,19 @@ fn main() {
     // ⌘3 — a single editor pane, with a hidden float layer (two chips, below).
     panes.insert(2, vec![PaneRect::new(5, 0, 0, 120, 40, "docs", true)]);
 
-    // The per-tab floating layer, keyed the same way. Tab 1's layer is VISIBLE,
-    // so its float overlays the grid mapped through the tiles' own bbox
-    // (`x=36,y=10,w=48,h=20` lands the float in the block's center); tab 2's
-    // layer is HIDDEN, so its two floats become corner chips (ids 101, 102 key
-    // their color). Tab 0 has none.
+    // The per-tab floating layer, keyed the same way. Tab 1's layer is VISIBLE
+    // with TWO floats overlaid through the tiles' own bbox: `htop` is focused, so
+    // it keeps the full boundary ring, while `logs` is unfocused, so its ring
+    // recedes toward its fill — the focused float stands out among its siblings
+    // (#116). Tab 2's layer is HIDDEN, so its two floats become corner chips (ids
+    // 101, 102 key their color). Tab 0 has none.
     let mut floats = BTreeMap::new();
     floats.insert(
         1,
-        FloatSpec::Visible(vec![PaneRect::new(100, 36, 10, 48, 20, "htop", true)]),
+        FloatSpec::Visible(vec![
+            PaneRect::new(100, 8, 8, 44, 22, "htop", true), // focused → full ring
+            PaneRect::new(103, 68, 8, 44, 22, "logs", false), // unfocused → weakened ring
+        ]),
     );
     floats.insert(2, FloatSpec::Hidden(vec![101, 102]));
 

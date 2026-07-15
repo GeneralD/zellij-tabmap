@@ -985,7 +985,8 @@ pub fn render(
         project_floats_into(float_rects, bbox_of(panes), pw, ph, vinset)
     };
     // Float border pixels: the outline of each float box, drawn in the float's
-    // `ring_for` shade so it reads as a distinct pane floating above the tiles.
+    // `float_ring_for` shade so it reads as a distinct pane floating above the
+    // tiles (weakened for unfocused floats, #116).
     let mut float_ring = vec![false; float_grid.len()];
     for (i, b) in float_bounds.iter().enumerate() {
         for py in b.py0..b.py1 {
@@ -1440,14 +1441,16 @@ pub fn render(
             }
             // A visible float, when present at this pixel, paints on top of the
             // tiled fill (float priority, spec §7.1): its border pixels take the
-            // float's `ring_for` shade, its interior the float's `color_for`.
+            // float's `float_ring_for` shade — the full ring when the float is
+            // focused, weakened toward the fill otherwise so the focused float
+            // stands out (#116) — and its interior the float's `color_for`.
             // `float_grid` is length-0 when there is no visible layer, so `.get`
             // returns `None` and the tiled `pixel_color` shows through unchanged —
             // the no-float path stays byte-identical (#110).
             let float_px = |py: usize| -> Option<Rgb> {
                 let i = (*float_grid.get(py * pw + c)?)?;
                 Some(if float_ring[py * pw + c] {
-                    palette.ring_for(float_rects[i].id)
+                    palette.float_ring_for(float_rects[i].id, float_rects[i].focused)
                 } else {
                     palette.color_for(float_rects[i].id)
                 })
@@ -1950,6 +1953,51 @@ mod tests {
         for line in visible_lines(&out) {
             assert_eq!(unicode_width::UnicodeWidthStr::width(line.as_str()), 16);
         }
+    }
+
+    #[test]
+    fn render_keeps_a_focused_floats_ring_and_weakens_an_unfocused_one() {
+        // Same float in two focus states (#116): focused keeps the full `ring_for`
+        // outline; unfocused weakens it toward the fill. Match the RGB triple
+        // without the fg/bg prefix, so a ring pixel counts whether it lands on a
+        // cell's top (fg) or bottom (bg) half.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(0, 0, 0, 100, 40, "t", false)];
+        let triple = |c: (u8, u8, u8)| format!("2;{};{};{}m", c.0, c.1, c.2);
+        let render_float = |focused: bool| {
+            let floats = [PaneRect::new(7, 30, 12, 40, 16, "f", focused)];
+            render(
+                &tiled,
+                &palette,
+                16,
+                4,
+                0,
+                LabelMode::None,
+                None,
+                Close::Off,
+                GradientSpec::OFF,
+                true,
+                crate::floating::FloatLayer::Visible(&floats),
+            )
+        };
+        let full_ring = triple(palette.ring_for(7));
+        let weak_ring = triple(palette.float_ring_for(7, false));
+
+        let focused = render_float(true);
+        assert!(
+            focused.contains(&full_ring),
+            "a focused float keeps its full ring"
+        );
+
+        let unfocused = render_float(false);
+        assert!(
+            unfocused.contains(&weak_ring),
+            "an unfocused float shows the weakened ring"
+        );
+        assert!(
+            !unfocused.contains(&full_ring),
+            "an unfocused float no longer shows the full ring"
+        );
     }
 
     #[test]

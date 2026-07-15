@@ -154,6 +154,13 @@ Press <kbd>y</kbd> and close the pane. Two caveats still make this unsuitable as
 ./install.sh v0.13.0    # or pin an explicit version
 ```
 
+Or run it straight from GitHub without cloning (it only edits `config.kdl` and `permissions.kdl` — pipe it through `less` first if you'd rather read it):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GeneralD/zellij-tabmap/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/GeneralD/zellij-tabmap/main/install.sh | bash -s -- v0.13.0   # pin a version
+```
+
 It rewrites the `tabmap location=` URL in your `config.kdl` to the target version (keeping every option intact) and writes the `ReadApplicationState` + `ChangeApplicationState` grant for that exact URL into `permissions.kdl` — so there is no un-focusable y/n prompt and no per-release re-grant. It never downloads the wasm locally (zellij still fetches it from the URL) and it verifies the release asset exists before pointing your config at it, so it can't poison the cache. Because it pins the version, the stale-`latest`-cache problem does not apply. Restart zellij (a fresh session) afterward — `permissions.kdl` is read only at server start.
 
 If a fetch ever returns a non-wasm body (e.g. a 404 page when the release asset is not published yet), zellij caches that error text **as the wasm**, permanently — the log then shows `magic header not detected`. Recover by deleting both cache traces for that URL (a hashed blob directly under zellij's cache root, and the `https:/github.com/GeneralD/zellij-tabmap/releases/…` directory tree beneath it) and starting a fresh session.

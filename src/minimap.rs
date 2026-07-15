@@ -2093,6 +2093,54 @@ mod tests {
     }
 
     #[test]
+    fn hidden_float_chip_wins_the_shared_corner_over_a_suppressed_marker() {
+        // Same two-pane layout as the test above: pane 3 (right half) is a cover,
+        // so its marker lands in the block's bottom-right cell. A hidden-float
+        // chip is reserved in that exact corner cell, so the chip owns it (#110)
+        // and the marker yields — the spec §4.3 collision rule the code guards.
+        let palette = test_palette();
+        let panes = [
+            PaneRect::new(2, 0, 0, 60, 40, "a", false),
+            PaneRect::new(3, 60, 0, 60, 40, "b", false),
+        ];
+        let render_with = |floats| {
+            render(
+                &panes,
+                &palette,
+                24,
+                4,
+                0,
+                LabelMode::None,
+                None,
+                Close::Off,
+                GradientSpec::OFF,
+                true,
+                floats,
+                &[3], // pane 3 covers a suppressed pane
+            )
+        };
+
+        // Baseline: with no chip layer, the cover pane shows the marker in that cell.
+        let marker_only = render_with(crate::floating::FloatLayer::None);
+        assert!(
+            marker_only.contains(crate::suppressed::SUPPRESSED_MARKER_GLYPH),
+            "with no chip, the cover pane shows the suppressed marker"
+        );
+
+        // A single hidden float reserves that same bottom-right cell → the chip
+        // draws there and the marker is skipped, not stacked on top of it.
+        let chipped = render_with(crate::floating::FloatLayer::Hidden(&[101]));
+        assert!(
+            chipped.contains(crate::floating::CHIP_GLYPH),
+            "the hidden float draws its chip in the shared corner"
+        );
+        assert!(
+            !chipped.contains(crate::suppressed::SUPPRESSED_MARKER_GLYPH),
+            "the marker yields the shared corner cell to the chip (spec §4.3)"
+        );
+    }
+
+    #[test]
     fn label_plan_draws_clear_labels_and_skips_wide_continuations() {
         // Row of 6 cells: "ab" (two 1-col glyphs) at 0,1; a 2-col glyph at 2,3
         // (Glyph + Continuation); 4,5 empty. No float cover → every glyph draws.

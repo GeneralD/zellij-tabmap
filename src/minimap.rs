@@ -1087,14 +1087,16 @@ pub fn render(
     // suppressed pane in its slot — gets ONE glyph in its block-local bottom-right
     // cell, signalling "something is suppressed behind this". `bounds[i]` is the
     // same PaneBox `pane_at_cell` uses, so the marker lands on the exact rectangle
-    // drawn. Presence only (one per cover). A cell already reserved by a hidden-float
-    // chip is skipped — the chip owns its corner (#110).
+    // drawn. Presence only (one per cover). Each entry is `(col, text_row, pane
+    // index)`; the index feeds the marker's fill sample below. A cell already
+    // reserved by a hidden-float chip is dropped — the chip owns its corner (#110).
     let suppressed_marks: Vec<(usize, usize, usize)> = panes
         .iter()
         .zip(bounds.iter())
-        .filter(|(p, _)| suppressed_covers.contains(&p.id))
-        .filter(|(_, b)| b.px1 > b.px0 && b.py1 > b.py0)
-        .map(|(p, b)| (b.px1 - 1, (b.py1 - 1) / 2, p.id))
+        .enumerate()
+        .filter(|(_, (p, _))| suppressed_covers.contains(&p.id))
+        .filter(|(_, (_, b))| b.px1 > b.px0 && b.py1 > b.py0)
+        .map(|(i, (_, b))| (b.px1 - 1, (b.py1 - 1) / 2, i))
         .filter(|(col, tr, _)| !(*tr == chip_row && chip_layout.iter().any(|(cc, _)| cc == col)))
         .collect();
 
@@ -1376,22 +1378,34 @@ pub fn render(
                     continue;
                 }
             }
-            // A suppressed-pane marker overrides a same-cell label so the awareness cue
-            // is never overprinted (like the chip above). Drawn in the cover pane's ring
-            // shade so it contrasts with its own fill (reusing the #47/#116 ring
-            // vocabulary). Markers are passed for the active tab only, so no inactive blend.
-            if let Some((_, _, cover_id)) = suppressed_marks
+            // A suppressed-pane marker signals "something is stashed behind this pane"
+            // in the cover pane's block-local bottom-right cell. It belongs to the
+            // TILED layer, so — exactly like a tiled label — it yields to a visible
+            // float that owns the cell (float priority, spec §7.1) and to a wide
+            // label's continuation (whose leading glyph already advanced through this
+            // cell, #110), falling through to those paths instead of punching a hole.
+            // When it does draw, its background takes the float drop-shadow like the
+            // fill beneath it, and is sampled from the pane FILL (not the focus ring)
+            // so the ring-shade glyph always contrasts — a focused cover's border cell
+            // would otherwise sample the ring for both fg and bg and hide the marker.
+            // Active tab only, so no inactive blend.
+            if let Some(&(_, _, i)) = suppressed_marks
                 .iter()
                 .find(|(mc, mr, _)| *mc == c && *mr == tr)
             {
-                let fill = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr);
-                match fill {
-                    Some(f) => put_bg(&mut out, f),
-                    None => put_default_bg(&mut out),
+                if !cell_covered[tr * pw + c] && !matches!(label_plan[tr * pw + c], LabelDraw::Skip)
+                {
+                    let base = fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
+                    let bg = if shadow_px[2 * tr * pw + c] || shadow_px[(2 * tr + 1) * pw + c] {
+                        crate::color::mixed(base, (0, 0, 0), FLOAT_SHADOW_BLEND)
+                    } else {
+                        base
+                    };
+                    put_bg(&mut out, bg);
+                    put_fg(&mut out, palette.ring_for(panes[i].id));
+                    out.push(crate::suppressed::SUPPRESSED_MARKER_GLYPH);
+                    continue;
                 }
-                put_fg(&mut out, palette.ring_for(*cover_id));
-                out.push(crate::suppressed::SUPPRESSED_MARKER_GLYPH);
-                continue;
             }
             // Tiled-pane label vs. the visible float (#110). The pre-resolved
             // plan says whether this cell draws its glyph, a `…` truncation cue
@@ -2138,6 +2152,106 @@ mod tests {
             !chipped.contains(crate::suppressed::SUPPRESSED_MARKER_GLYPH),
             "the marker yields the shared corner cell to the chip (spec §4.3)"
         );
+    }
+
+    #[test]
+    fn a_visible_float_occludes_the_suppressed_marker() {
+        // The marker belongs to the tiled layer, so a visible float that covers its
+        // corner cell must paint on top of it (float priority, spec §7.1) rather than
+        // the marker punching a bright hole through the float.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "a", false)];
+        // A float over the whole bottom-right quadrant — through the tiles' own bbox
+        // it lands on the cover pane's bottom-right marker cell.
+        let floats = [PaneRect::new(7, 60, 20, 60, 20, "f", false)];
+        let render_with = |layer| {
+            render(
+                &tiled,
+                &palette,
+                24,
+                4,
+                0,
+                LabelMode::None,
+                None,
+                Close::Off,
+                GradientSpec::OFF,
+                true,
+                layer,
+                &[2], // pane 2 covers a suppressed pane
+            )
+        };
+
+        let occluded = render_with(crate::floating::FloatLayer::Visible(&floats));
+        assert!(
+            !occluded.contains(crate::suppressed::SUPPRESSED_MARKER_GLYPH),
+            "a visible float covering the corner occludes the marker"
+        );
+        // Guard that the occlusion is float-specific: the same cover shows the marker
+        // when no visible float owns the cell.
+        let bare = render_with(crate::floating::FloatLayer::None);
+        assert!(
+            bare.contains(crate::suppressed::SUPPRESSED_MARKER_GLYPH),
+            "without a covering float the marker draws as usual"
+        );
+    }
+
+    #[test]
+    fn a_focused_cover_marker_stays_legible() -> Result<(), Box<dyn std::error::Error>> {
+        // The common edit-scrollback case: the cover pane is focused, so its border
+        // cells carry the focus ring. The marker's bottom-right cell sits on that
+        // ring; sampling the ring for BOTH the glyph and its background would make the
+        // marker vanish. The background must come from the pane fill so the ring-shade
+        // glyph contrasts.
+        let palette = test_palette();
+        let panes = [PaneRect::new(3, 0, 0, 120, 40, "b", true)]; // focused cover
+        let out = render(
+            &panes,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::None,
+            &[3],
+        );
+        assert!(
+            out.contains(crate::suppressed::SUPPRESSED_MARKER_GLYPH),
+            "the focused cover still shows the marker"
+        );
+        let before = out
+            .split(crate::suppressed::SUPPRESSED_MARKER_GLYPH)
+            .next()
+            .ok_or("marker glyph not found")?;
+        let bg = last_sgr_rgb(before, "48;2;").ok_or("no marker background")?;
+        let fg = last_sgr_rgb(before, "38;2;").ok_or("no marker foreground")?;
+        assert_eq!(
+            fg,
+            palette.ring_for(3),
+            "marker foreground is the cover's ring shade"
+        );
+        assert_ne!(
+            bg, fg,
+            "marker background must contrast with its foreground"
+        );
+        assert_ne!(
+            bg,
+            palette.ring_for(3),
+            "background is the pane fill, not the focus ring"
+        );
+        Ok(())
+    }
+
+    /// Parse the RGB triple of the last `\x1b[<prefix>r;g;bm` SGR before `s` ends —
+    /// e.g. `last_sgr_rgb(before_glyph, "48;2;")` returns the background set just
+    /// before a glyph. Test-only helper for asserting rendered colors.
+    fn last_sgr_rgb(s: &str, prefix: &str) -> Option<(u8, u8, u8)> {
+        let rest = &s[s.rfind(prefix)? + prefix.len()..];
+        let mut nums = rest[..rest.find('m')?].split(';').map(str::parse::<u8>);
+        Some((nums.next()?.ok()?, nums.next()?.ok()?, nums.next()?.ok()?))
     }
 
     #[test]

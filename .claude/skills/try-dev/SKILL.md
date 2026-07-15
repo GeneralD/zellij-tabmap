@@ -7,6 +7,9 @@ description: >-
   a dev build of the bar before releasing it — triggers: "try the dev build",
   "preview this branch's bar", "devビルドを試したい", "floatingを体験したい",
   "このブランチのバーを見たい".
+allowed-tools:
+  - Bash(.claude/skills/try-dev/try-dev.sh*)
+  - Bash(zellij*)
 ---
 
 # try-dev — preview a dev build of the bar
@@ -26,7 +29,7 @@ It wraps `.claude/skills/try-dev/try-dev.sh`.
 
 - **no arg** → build the **current** worktree's HEAD (the common dev case)
 - **`BRANCH`** → build that branch (reuses its worktree, or creates a temp one
-  under `.claude/worktrees/try-dev-<branch>`)
+  under `.worktrees/try-dev-<branch>`)
 - **`WORKTREE`** (a path) → build in that worktree
 - **`--release`** → optimized build (default is a fast **debug** build)
 - **`--no-build`** → skip cargo; use the last-built wasm as-is
@@ -71,7 +74,7 @@ The dev session is disposable: exit it (`Ctrl+q`) and close the tab. Nothing
 persists except the single refreshed dev grant in `permissions.kdl` and the
 build in `target/` — both overwritten on the next run, so nothing accumulates.
 A temp worktree created for a named branch stays until you remove it
-(`git worktree remove .claude/worktrees/try-dev-<branch>`).
+(`git worktree remove .worktrees/try-dev-<branch>`).
 
 ## Why a separate session (not a new tab in your current one)
 

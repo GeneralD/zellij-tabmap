@@ -15,6 +15,7 @@
 #     BRANCH|WORKTREE  build that branch (reusing/creating a worktree) or a
 #                      worktree path; omit to build the current worktree's HEAD
 #     --release        optimized build (default: fast debug build)
+#     --debug          fast debug build (the default; explicit opposite of --release)
 #     --no-build       skip cargo; use the last-built wasm as-is
 #     --logs           add a `tail -F zellij.log` pane to the dev tab
 #     --no-launch      prepare only; print the launch command
@@ -62,25 +63,52 @@ else
         | awk -v b="refs/heads/$BRANCH" '/^worktree /{w=substr($0,10)} /^branch /{if(substr($0,8)==b) print w}' \
         | head -1)"
   if [ -z "$SRC" ]; then
-    git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH" \
-      || git -C "$REPO_ROOT" ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1 \
-      || die "no such branch or worktree: $BRANCH"
-    SRC="$REPO_ROOT/.claude/worktrees/try-dev-$(printf '%s' "$BRANCH" | tr '/' '-')"
-    if [ ! -d "$SRC" ]; then
-      git -C "$REPO_ROOT" fetch -q origin "$BRANCH" 2>/dev/null || true
+    if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+      local_ref=1
+    elif git -C "$REPO_ROOT" ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+      local_ref=0
+    else
+      die "no such branch or worktree: $BRANCH"
+    fi
+    # temp worktrees live under the committed-gitignored .worktrees/ (portable
+    # across clones, unlike .claude/worktrees which only .git/info/exclude hides)
+    SRC="$REPO_ROOT/.worktrees/try-dev-$(printf '%s' "$BRANCH" | tr '/' '-')"
+    if [ -d "$SRC" ]; then
+      # a prior run's worktree — reuse only if it is actually on $BRANCH, so the
+      # feat/x-y vs feat/x/y sanitized-name collision can't silently build the
+      # wrong branch
+      [ "$(git -C "$SRC" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$BRANCH" ] \
+        || die "worktree $SRC exists but is not on '$BRANCH' (name collision) — remove it and retry"
+    elif [ "$local_ref" = 1 ]; then
       git -C "$REPO_ROOT" worktree add -q "$SRC" "$BRANCH" \
+        || die "failed to create a worktree for $BRANCH"
+      echo "created worktree: $SRC"
+    else
+      # remote-only branch: fetch it, then branch a local ref from FETCH_HEAD
+      git -C "$REPO_ROOT" fetch -q origin "$BRANCH" \
+        || die "failed to fetch origin/$BRANCH"
+      git -C "$REPO_ROOT" worktree add -q -b "$BRANCH" "$SRC" FETCH_HEAD \
         || die "failed to create a worktree for $BRANCH"
       echo "created worktree: $SRC"
     fi
   fi
 fi
 
+# --- launching needs zellij; fail fast before the (slow) build ----------------
+command -v zellij >/dev/null 2>&1 || die "zellij not found — install it: https://zellij.dev"
+
 # --- build (or locate the existing build) -------------------------------------
-WASM="$SRC/target/wasm32-wasip1/$PROFILE/zellij-tabmap.wasm"
+# honor a configured target dir (CARGO_TARGET_DIR); cargo resolves a relative
+# value against its cwd, which is $SRC in the build below, so mirror that here
+CARGO_TARGET="${CARGO_TARGET_DIR:-$SRC/target}"
+case "$CARGO_TARGET" in /*) ;; *) CARGO_TARGET="$SRC/$CARGO_TARGET" ;; esac
+WASM="$CARGO_TARGET/wasm32-wasip1/$PROFILE/zellij-tabmap.wasm"
 if [ "$BUILD" = 1 ]; then
   command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust: https://rustup.rs"
-  rustup target list --installed 2>/dev/null | grep -qx wasm32-wasip1 \
-    || die "the wasm32-wasip1 target is missing — run: rustup target add wasm32-wasip1"
+  if command -v rustup >/dev/null 2>&1; then
+    rustup target list --installed 2>/dev/null | grep -qx wasm32-wasip1 \
+      || die "the wasm32-wasip1 target is missing — run: rustup target add wasm32-wasip1"
+  fi
   echo "building ($PROFILE) in $SRC ..."
   if [ "$PROFILE" = release ]; then
     ( cd "$SRC" && cargo build --target wasm32-wasip1 --release ) || die "cargo build failed"

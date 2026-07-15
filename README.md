@@ -147,6 +147,22 @@ Press <kbd>y</kbd> and close the pane. Two caveats still make this unsuitable as
 - **Updates never arrive.** zellij caches the downloaded wasm **by URL and never re-fetches it**, so the `latest` URL keeps serving whatever version you first loaded; clearing zellij's cache is the only way to move forward. (A version-pinned `releases/download/vX.Y.Z/` URL avoids the stale-cache problem but then needs a fresh permission grant on every release.)
 - **Blank bar on first launch — and once again after every version bump.** An uncached URL downloads on its first session while the bar sits empty; worse, zellij broadcasts its one-shot initial tab/pane snapshot at server start, so if the download is still in flight the freshly-loaded plugin **misses that snapshot** and the bar stays blank until the *next* event (e.g. opening a second tab). A version-pinned `releases/download/vX.Y.Z/` URL is uncached again after each bump, so this recurs **once per upgrade**. Two ways out: **pre-warm** the exact URL with the `zellij plugin --` grant step above — it downloads and caches the wasm as a side effect, so the later template-loaded bar starts from a warm cache and never blanks — or, after the download lands, just **open a second tab (or restart the session) once** and it is permanent. This cannot be fixed in the plugin: while the download is in flight the wasm is not running yet (zellij paints its own placeholder, not ours), and a plugin that loads late has no side-effect-free way to *pull* the full tab/pane geometry the minimap needs — zellij-tile 0.44 only delivers it through the next pushed `TabUpdate` / `PaneUpdate`. The `file:` install above sidesteps the whole race: a local path has no download window, so the bar paints on the first tab even right after an update.
 
+**Prefer the release URL but want painless upgrades?** [`install.sh`](install.sh) in this repo automates the two chores above for a **version-pinned** URL install. Run it from a clone:
+
+```bash
+./install.sh            # install/upgrade to the latest release
+./install.sh v0.13.0    # or pin an explicit version
+```
+
+Or run it straight from GitHub without cloning (it only edits `config.kdl` and `permissions.kdl` — pipe it through `less` first if you'd rather read it):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GeneralD/zellij-tabmap/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/GeneralD/zellij-tabmap/main/install.sh | bash -s -- v0.13.0   # pin a version
+```
+
+It rewrites the `tabmap location=` URL in your `config.kdl` to the target version (keeping every option intact) and writes the `ReadApplicationState` + `ChangeApplicationState` grant for that exact URL into `permissions.kdl` — so there is no un-focusable y/n prompt and no per-release re-grant. It never downloads the wasm locally (zellij still fetches it from the URL) and it verifies the release asset exists before pointing your config at it, so it can't poison the cache. Because it pins the version, the stale-`latest`-cache problem does not apply. Restart zellij (a fresh session) afterward — `permissions.kdl` is read only at server start.
+
 If a fetch ever returns a non-wasm body (e.g. a 404 page when the release asset is not published yet), zellij caches that error text **as the wasm**, permanently — the log then shows `magic header not detected`. Recover by deleting both cache traces for that URL (a hashed blob directly under zellij's cache root, and the `https:/github.com/GeneralD/zellij-tabmap/releases/…` directory tree beneath it) and starting a fresh session.
 
 </details>

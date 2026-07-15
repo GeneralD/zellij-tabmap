@@ -465,3 +465,38 @@ pane (`id=1` terminal float vs `id=1` plugin bar); filter with
 float (the expect PTY detached before that probe). Design float wheel-walk to
 not depend on it — walk only tiled + already-visible floats; reach hidden floats
 via their chip, never by a wheel-triggered reveal.
+
+---
+
+## 19. Suppressed panes stay in the `PaneManifest`, sharing their cover's exact rect (verified 0.44.3)
+
+A **suppressed** (background) pane is one hidden behind the pane that replaced
+its slot — e.g. `edit-scrollback` opens `$EDITOR` over the current pane, or
+`new-pane --in-place` *suspends* (does not close, unless `--close-replaced-pane`)
+the pane it replaces. Verified empirically with the eprintln oracle (#4) against
+zellij 0.44.3 while building #118:
+
+- The suppressed pane keeps its entry — `is_suppressed = true`, its **id**, and
+  its full `pane_x/y/columns/rows` — while hidden, and survives unrelated
+  `PaneUpdate`s.
+- Its geometry is the **exact rect of its cover** (the replacement pane). Observed:
+  suppressed `id=0 x=0 y=3 w=120 h=37` under a cover `id=1` (focused,
+  `title="EDITING SCROLLBACK"`) reporting the *same* `x=0 y=3 w=120 h=37`. Since
+  tiled panes partition the space without overlap, exactly one visible tiled pane
+  contains a suppressed pane's rect — its cover.
+- **Both plugins and terminals can be suppressed.** A suppressed *plugin* overlay
+  also appears (the zellij-attention plugin: `is_suppressed=true is_plugin=true
+  x=30 y=10 w=60 h=20`). Filter with `is_suppressed && !is_plugin` to get just the
+  user's suppressed terminal panes — the suppressed sibling of the tiled/floating
+  filters in `src/projection.rs`.
+
+Consequence for a bar plugin (#118): you can mark the *cover* pane (the visible
+tiled pane whose rect contains a suppressed pane) to signal "something is hidden
+behind this", by matching suppressed rects against the tiled set via geometry
+containment. `is_suppressed` is read-only within the existing `ReadApplicationState`
+grant — no new permission (so no #15 freeze).
+
+**Harness note:** driving this headlessly needs a client attached when the
+suppress happens (#3) — `zellij action edit-scrollback` / `new-pane --in-place`
+land as no-ops on the plugin's `update()` until an `expect` PTY re-attaches
+(#4); the attach and the trigger must overlap in time.

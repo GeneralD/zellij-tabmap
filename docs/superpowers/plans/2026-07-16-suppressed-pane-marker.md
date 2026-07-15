@@ -78,6 +78,27 @@ Judge and write the conclusion into this plan (a `### Spike result` block) and t
 
 `git checkout src/lib.rs`. **Never commit the oracle.** Carry only the recorded conclusion forward.
 
+### Spike result (run 2026-07-16, zellij 0.44.3) — **Approach A confirmed**
+
+Isolated session `tabmap-spike118` + the `DBG118` oracle + expect PTY. A suppressed
+terminal pane was created with `new-pane --in-place` (which *suspends* the replaced
+pane — `--close-replaced-pane` help confirms it) and with `edit-scrollback`. Raw
+`DBG118` findings:
+
+- A suppressed **terminal** pane appears in the manifest with `is_suppressed=true`,
+  `is_plugin=false`, and **valid geometry**:
+  `id=0 suppressed=true plugin=false x=0 y=3 w=120 h=37`.
+- Its **cover** — the replacement pane (`id=1`, focused, `title="EDITING SCROLLBACK"`)
+  — reports the **exact same rect** `x=0 y=3 w=120 h=37`. So the suppressed rect is
+  contained by (equal to) its cover → `suppressed::covers(cover, suppressed)` holds.
+- Suppressed **plugin** panes also exist (the zellij-attention overlay:
+  `suppressed=true plugin=true x=30 y=10 w=60 h=20`). The `is_suppressed && !is_plugin`
+  predicate (Task 2) correctly **includes** the terminal one and **excludes** this
+  plugin one.
+- Tiled panes partition the space (no overlap), so the cover is the *only* tiled pane
+  containing the suppressed rect → `cover_ids` marks exactly the cover. **Proceed with
+  Approach A (Tasks 2–7).**
+
 ---
 
 ## Phase 1 — Pure layer (Approach A; TDD, gated on Task 1)

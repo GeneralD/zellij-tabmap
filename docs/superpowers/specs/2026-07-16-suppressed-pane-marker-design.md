@@ -101,6 +101,22 @@ floating 設計 §9 と同じスパイク先行方針に従い、実装前に **
    - 不安定 / ジオメトリが読めない → **案 B**（タブブロック隅に件数マーカー）へフォールバックし、
     この仕様の §4.2〜§4.3 を差し替える。
 
+### スパイク結果（実施済み 2026-07-16、zellij 0.44.3）→ **案 A 確定**
+
+隔離セッション `tabmap-spike118` ＋ `DBG118` オラクル ＋ expect PTY で実機裏取り済み。
+`new-pane --in-place`（置換ペインを *suspend* する）と `edit-scrollback` で terminal の
+suppressed を生成し観測:
+
+- terminal の suppressed ペインは manifest に出る: `id=0 suppressed=true plugin=false
+  x=0 y=3 w=120 h=37`（有効な幾何）。
+- カバー（置換ペイン `id=1` focused `title="EDITING SCROLLBACK"`）は**同一 rect**
+  `x=0 y=3 w=120 h=37` → suppressed rect はカバー rect に**内包**（＝ `covers()` 成立）。
+- suppressed な**プラグイン**ペインも存在（attention: `suppressed=true plugin=true
+  x=30 y=10 w=60 h=20`）。`is_suppressed && !is_plugin` 述語は terminal を**含み**プラグインを
+  **除外**することを確認。
+- タイルペインは空間を重複なく分割するため、suppressed rect を内包するタイルはカバー1枚のみ
+  → `cover_ids` はカバーだけをマークする。**案 A で実装する。**
+
 （プラグインパネルは `dump-screen` で読めない（rule #7）ため、データ/投影はオラクルで、
 paint はレンダラ単体テストで、という #110 と同じ二分割検証を踏襲する。）
 

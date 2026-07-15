@@ -51,6 +51,7 @@ pub fn bar(
     perspective: bool,
     close: Close,
     floats_by_position: &BTreeMap<usize, crate::floating::FloatSpec>,
+    suppressed_covers_by_position: &BTreeMap<usize, Vec<usize>>,
 ) -> String {
     // #59: inactive tabs render through the canvas-receded palette while the
     // active tab keeps full vibrancy, so the selected tab reads at a glance.
@@ -87,6 +88,13 @@ pub fn bar(
                 .get(&hit.position)
                 .map(crate::floating::FloatSpec::layer)
                 .unwrap_or(crate::floating::FloatLayer::None);
+            // This tab's suppressed-pane cover ids (#118), resolved the same way
+            // as `floats` — absent → an empty slice, so a tab with no covers
+            // stamps no marker.
+            let suppressed_covers = suppressed_covers_by_position
+                .get(&hit.position)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             tab_block::assemble(
                 panes,
                 tab_palette,
@@ -99,6 +107,7 @@ pub fn bar(
                 perspective,
                 tab_close,
                 floats,
+                suppressed_covers,
             )
         })
         .collect();
@@ -325,6 +334,7 @@ mod tests {
             false,
             Close::Off,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
         for row in 1..=3 {
             assert!(
@@ -354,6 +364,7 @@ mod tests {
             false,
             false,
             Close::Off,
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
         assert!(out.contains("\u{2318}4"), "position 3 → ⌘4");
@@ -390,6 +401,7 @@ mod tests {
             false,
             false,
             Close::Off,
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
         assert!(
@@ -445,6 +457,7 @@ mod tests {
             false,
             Close::Off,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
         assert!(
             out.contains(&fg(palette.color_for(0))),
@@ -484,6 +497,7 @@ mod tests {
             false,
             Close::Off,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
         assert!(
             out.contains(&fg(palette.color_for(1))),
@@ -521,6 +535,7 @@ mod tests {
             false,
             Close::Off,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
         // Middle row (row 2): left marker at col 1, right marker at col 8.
         assert!(out.contains("\u{1b}[2;1H\u{2190} +2 "));
@@ -552,6 +567,7 @@ mod tests {
             false,
             Close::Off,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
         // rows=3 → middle row index 1 → 1-based row 2, button start col 18+1=19.
         assert!(
@@ -580,6 +596,7 @@ mod tests {
             false,
             false,
             Close::Off,
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
         assert!(!out.contains('+'), "no button reserved → no + drawn");

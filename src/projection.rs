@@ -106,9 +106,11 @@ pub fn project_floating(panes: &[PaneInfo]) -> Vec<PaneRect> {
 /// Whether a pane is a **suppressed** terminal pane — one hidden behind the pane
 /// that replaced its slot (#118). The suppressed sibling of [`is_tiled_terminal`]
 /// / [`is_floating_terminal`]: keeps `is_suppressed` panes but drops plugin ones
-/// (a plugin-driven suppress is chrome, not the user's content).
+/// (a plugin-driven suppress is chrome, not the user's content) and floating ones
+/// (cover-matching runs against the tiled set, so a suppressed float has no cover
+/// to match and could only false-match an unrelated tiled pane that contains it).
 pub fn is_suppressed_terminal(pane: &PaneInfo) -> bool {
-    pane.is_suppressed && !pane.is_plugin
+    pane.is_suppressed && !pane.is_plugin && !pane.is_floating
 }
 
 /// Project a tab's **suppressed** panes into renderer rectangles — the parallel
@@ -337,8 +339,9 @@ mod tests {
             }, // plugin suppress → dropped
             PaneInfo {
                 is_floating: true,
+                is_suppressed: true,
                 ..Default::default()
-            }, // float → dropped
+            }, // suppressed float → dropped (cover-matching is tiled-only)
             content_pane(0, 1, 80, 24, true), // tiled → dropped
             PaneInfo {
                 id: 7,

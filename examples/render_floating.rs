@@ -92,6 +92,13 @@ fn main() {
     );
     floats.insert(2, FloatSpec::Hidden(vec![101, 102]));
 
+    // The active tab (⌘2) also hides a suppressed pane behind its full-width
+    // `git` pane (id 4) — e.g. an edit-scrollback editor took its slot. Only the
+    // active tab shows the awareness marker (#118), so this map carries the single
+    // active-position entry; a `◳` lands in that cover pane's bottom-right corner.
+    let mut suppressed_covers = BTreeMap::new();
+    suppressed_covers.insert(1usize, vec![4usize]);
+
     // Three tabs, active in the middle. Perspective is off so every tab renders
     // at full height and the overlay / chips read clearly on each block; a plain
     // `pack` (no "+" button) keeps the focus on the floating affordances.
@@ -107,6 +114,7 @@ fn main() {
         false,      // perspective off — full height, so overlays/chips are legible
         Close::Off, // keep the focus on the floating panes
         &floats,
+        &suppressed_covers,
     );
 
     // Hide the cursor so a held screenshot doesn't catch a stray cursor block

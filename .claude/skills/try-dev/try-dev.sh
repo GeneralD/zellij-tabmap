@@ -132,7 +132,9 @@ LAYOUT="${TMPDIR:-/tmp}/tabmap-dev.kdl"
   echo '            }'
   echo '        }'
   echo '        children'
-  echo '        pane size=1 borderless=true { plugin location="status-bar" }'
+  echo '        pane size=1 borderless=true {'
+  echo '            plugin location="status-bar"'
+  echo '        }'
   echo '    }'
   echo '    tab name="dev" focus=true {'
   if [ "$LOGS" = 1 ]; then

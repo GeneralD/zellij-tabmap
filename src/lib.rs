@@ -14,6 +14,7 @@ pub mod paint;
 pub mod projection;
 pub(crate) mod router;
 pub mod scroll;
+pub mod suppressed;
 pub mod tab_block;
 pub(crate) mod theme;
 pub mod title;
@@ -341,6 +342,22 @@ impl ZellijPlugin for State {
             minimap::Close::Off
         };
 
+        // Suppressed-pane awareness markers, active tab only (#118, design §3). Empty
+        // for every other tab, so only the tab you're on shows the cue.
+        let suppressed_covers_by_position: BTreeMap<usize, Vec<usize>> = {
+            let panes = self
+                .panes
+                .panes
+                .get(&active_position)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let covers = suppressed::cover_ids(
+                &projection::project_suppressed(panes),
+                &projection::project(panes),
+            );
+            BTreeMap::from([(active_position, covers)])
+        };
+
         // `close` already carries the per-terminal glyph form (#86, #94), so the
         // renderer stamps the right glyph, column, and color directly — no
         // post-render swap.
@@ -360,6 +377,7 @@ impl ZellijPlugin for State {
                 // layers chip, keyed by tab position (built above from the live
                 // manifest + each tab's `are_floating_panes_visible`).
                 &floats_by_position,
+                &suppressed_covers_by_position,
             )
         );
 

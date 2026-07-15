@@ -103,6 +103,39 @@ pub fn project_floating(panes: &[PaneInfo]) -> Vec<PaneRect> {
         .collect()
 }
 
+/// Whether a pane is a **suppressed** terminal pane — one hidden behind the pane
+/// that replaced its slot (#118). The suppressed sibling of [`is_tiled_terminal`]
+/// / [`is_floating_terminal`]: keeps `is_suppressed` panes but drops plugin ones
+/// (a plugin-driven suppress is chrome, not the user's content) and floating ones
+/// (cover-matching runs against the tiled set, so a suppressed float has no cover
+/// to match and could only false-match an unrelated tiled pane that contains it).
+pub fn is_suppressed_terminal(pane: &PaneInfo) -> bool {
+    pane.is_suppressed && !pane.is_plugin && !pane.is_floating
+}
+
+/// Project a tab's **suppressed** panes into renderer rectangles — the parallel
+/// of [`project`] / [`project_floating`] for the suppressed layer (#118). Carries
+/// id + geometry so cover-matching ([`crate::suppressed::cover_ids`]) can find
+/// which visible tiled pane hides each. Title/focus ride along for parity with
+/// the other projectors; only id + geometry are used downstream.
+pub fn project_suppressed(panes: &[PaneInfo]) -> Vec<PaneRect> {
+    panes
+        .iter()
+        .filter(|pane| is_suppressed_terminal(pane))
+        .map(|pane| {
+            PaneRect::new(
+                pane.id as usize,
+                pane.pane_x as u32,
+                pane.pane_y as u32,
+                pane.pane_columns as u32,
+                pane.pane_rows as u32,
+                pane.title.clone(),
+                pane.is_focused,
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +327,40 @@ mod tests {
     fn project_floating_is_empty_without_floats() {
         assert!(project_floating(&[content_pane(0, 1, 80, 24, true)]).is_empty());
         assert!(project_floating(&[]).is_empty());
+    }
+
+    #[test]
+    fn project_suppressed_keeps_only_suppressed_terminals() {
+        let panes = [
+            PaneInfo {
+                is_plugin: true,
+                is_suppressed: true,
+                ..Default::default()
+            }, // plugin suppress → dropped
+            PaneInfo {
+                is_floating: true,
+                is_suppressed: true,
+                ..Default::default()
+            }, // suppressed float → dropped (cover-matching is tiled-only)
+            content_pane(0, 1, 80, 24, true), // tiled → dropped
+            PaneInfo {
+                id: 7,
+                is_suppressed: true,
+                pane_x: 40,
+                pane_y: 1,
+                pane_columns: 40,
+                pane_rows: 24,
+                title: "sh".to_string(),
+                ..Default::default()
+            },
+        ];
+        let rects = project_suppressed(&panes);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].id, 7);
+        assert_eq!(
+            (rects[0].x, rects[0].y, rects[0].w, rects[0].h),
+            (40, 1, 40, 24)
+        );
     }
 
     #[test]

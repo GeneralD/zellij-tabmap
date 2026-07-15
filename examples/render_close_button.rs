@@ -114,6 +114,7 @@ fn main() {
         true,  // perspective on — so only the active tab shows the close glyph
         close, // Nerd Font glyph (default) or ASCII `×` (arg = "ascii")
         &BTreeMap::new(),
+        &BTreeMap::new(), // suppressed-pane covers — none in this sample
     );
 
     // Hide the cursor so a held screenshot doesn't catch a stray cursor block

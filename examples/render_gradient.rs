@@ -66,6 +66,7 @@ fn main() {
                 spec,
                 true,
                 zellij_tabmap::floating::FloatLayer::None,
+                &[], // suppressed-pane covers — none in this sample
             )
         );
     }

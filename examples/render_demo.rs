@@ -85,6 +85,7 @@ fn main() {
             true,
             Close::Off,
             &BTreeMap::new(),
+            &BTreeMap::new(), // suppressed-pane covers — none in this sample
         )
     );
 }

@@ -103,9 +103,8 @@ pub(crate) fn chip_marker_target_at(
     let col = column.checked_sub(geom.start)?;
     let k =
         crate::floating::chip_marker_k(geom.width, geom.rows, geom.hidden_floats.len(), col, row)?;
-    geom.hidden_floats
-        .get(geom.hidden_floats.len().saturating_sub(k))
-        .copied()
+    let index = geom.hidden_floats.len().checked_sub(k)?;
+    geom.hidden_floats.get(index).copied()
 }
 
 /// The visible floating pane id drawn at click (`row`, `column`) — the overlay

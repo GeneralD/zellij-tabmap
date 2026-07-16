@@ -4156,4 +4156,151 @@ mod tests {
             "an inactive tab's float label is muted toward the fill, not pure white"
         );
     }
+
+    /// Drop SGR escape sequences (`\x1b[...m`), leaving only visible glyphs —
+    /// test-only, for measuring a rendered row's display width.
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn f_focused_mode_labels_only_the_focused_float() {
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        // Two large side-by-side floats; only the right one is focused.
+        let floats = [
+            PaneRect::new(9, 0, 0, 60, 40, "vim", false),
+            PaneRect::new(8, 60, 0, 60, 40, "cargo", true),
+        ];
+        let out = render(
+            &tiled,
+            &palette,
+            40,
+            4,
+            0,
+            LabelMode::Focused,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+        );
+        assert!(
+            out.contains('c') && out.contains('g'),
+            "the focused float (cargo) is labeled"
+        );
+        assert!(
+            !out.contains('v'),
+            "the unfocused float (vim) is not labeled under Focused"
+        );
+    }
+
+    #[test]
+    fn f_none_mode_labels_no_floats() {
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 0, 0, 120, 40, "cargo", true)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+        );
+        assert!(
+            !out.contains('c') && !out.contains('g'),
+            "LabelMode::None draws no float label"
+        );
+    }
+
+    #[test]
+    fn f_wide_glyph_label_preserves_row_width() {
+        // A CJK float title must not break the one-visible-cell-per-column
+        // invariant: every rendered row carries exactly `pw` display columns.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 0, 0, 120, 40, "実行中", true)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::All,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+        );
+        // Each line (minus the trailing reset) must be `pw` display columns wide.
+        for line in out.lines() {
+            let visible = strip_ansi(line);
+            let width: usize = visible
+                .chars()
+                .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
+                .sum();
+            assert_eq!(width, 24, "row stays 24 display columns: {visible:?}");
+        }
+    }
+
+    #[test]
+    fn f_overlapping_floats_only_the_top_is_labeled() {
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        // `vim` (bottom, i=0) spans the whole block; `cargo` (top, i=1) covers
+        // only vim's right half — enough to own at least one of vim's centered
+        // label cells (so the ownership check suppresses vim's whole label),
+        // while cargo's own label sits in different columns. This makes the
+        // ownership check load-bearing: without it, vim's 'v' would bleed
+        // through in the columns cargo does not overwrite.
+        let floats = [
+            PaneRect::new(8, 0, 0, 120, 40, "vim", false), // bottom, full block
+            PaneRect::new(9, 60, 0, 60, 40, "cargo", false), // top, right half
+        ];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::All,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+        );
+        assert!(
+            out.contains('c') && out.contains('g'),
+            "the topmost float (cargo) is labeled"
+        );
+        assert!(
+            !out.contains('v'),
+            "the occluded float (vim) does not bleed its label through"
+        );
+    }
 }

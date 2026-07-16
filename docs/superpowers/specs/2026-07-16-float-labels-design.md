@@ -21,8 +21,11 @@
   （`float_rects` と index 整合）と、ピクセル→フロート index の `float_grid: Vec<Option<usize>>`
   を返す。`float_bounds[i]` がラベルを置くべき矩形そのもの。
 - `float_rects: &[PaneRect]` は id / title / focused を持つ。
-- オーバーレイは**アクティブタブの表示中レイヤーのみ**描かれるので、ラベルは常にアクティブ配色
-  （`ACTIVE_FG`）でよい。
+- フロートオーバーレイは**非アクティブタブでも**描かれる（#110 由来の挙動: `paint.rs` は
+  `floats_by_position` を `hit.active` で絞らない）。したがってラベル配色はタイルラベルと同様
+  `active` フラグに従う: アクティブタブは `ACTIVE_FG`、非アクティブタブは
+  `mixed(ACTIVE_FG, fill, INACTIVE_LABEL_BLEND)` で減衰させ、bold は `active && focused` の
+  ときだけ付ける。
 - `LabelMode`（`None`/`Focused`/`All`）は **config ではなく** L0–L4 劣化ラダー
   （`tab_block.rs`）がタブの割当幅から選ぶ。L0=All / L1=Focused / L2+=None。
 - タイルラベルの配置は `render()` 内インライン: `title::summarize` で内部幅に切り詰め →
@@ -36,7 +39,7 @@
 | ゲーティング | **`LabelMode` を再利用**（config 追加なし）。All=収まるフロート全部 / Focused=フォーカス中フロートのみ / None=出さない。幅に応じて自動劣化。 |
 | サイズしきい値 | **控えめ**。オーバーレイ box が **内部幅 ≥ 4 cols（`fw-2 ≥ 4`）かつ 高さ ≥ 6px（3 text rows）** の時だけラベル。小・中フロートは色＋リングのみ。 |
 | 配置 | tiled と DRY。`title::summarize` ＋ `charwise_width` ＋ `OverlayCell` を流用し、縦中央の**内部**行にセンタリング。 |
-| 配色 | bg=フロート内部色 `color_for(id)`、fg=`ACTIVE_FG`。フォーカス中フロートは **bold**（タイル同様）。 |
+| 配色 | bg=フロート内部色 `color_for(id)`。fg はタイルラベルと同様 `active` 依存: アクティブタブ=`ACTIVE_FG` / 非アクティブタブ=`mixed(ACTIVE_FG, fill, INACTIVE_LABEL_BLEND)`。bold は `active && focused` のときだけ。 |
 | 権限 / config | **新規 zellij 権限なし・config キー追加なし**（純レンダリング、既存グラント内）。 |
 
 ## 4. 設計
@@ -78,7 +81,9 @@
 
 - 当該セルに `float_overlay` があり、かつ **その cell が当該フロートの内部**
   （`float_grid[2*tr*pw+c] == Some(i)` かつ `float_grid[(2*tr+1)*pw+c] == Some(i)`）なら:
-  - `Glyph(ch, i)`: bg=`color_for(float_rects[i].id)`、fg=`ACTIVE_FG`、`focused` なら bold で `ch` を出力、`continue`。
+  - `Glyph(ch, i)`: bg=`color_for(float_rects[i].id)`、fg は `active` 依存（アクティブ=`ACTIVE_FG` /
+    非アクティブ=`mixed(ACTIVE_FG, fill, INACTIVE_LABEL_BLEND)`）、`active && focused` のとき bold で
+    `ch` を出力、`continue`。
   - `Continuation`: 無出力で `continue`（先頭の全角グリフが advance 済み。#118 で直した行幅崩れの再発防止）。
 - 所有チェックを両ピクセルに課すことで、フロートが重なった領域では**最上位フロートのラベルだけ**が
   出る（`float_ring` と同じ所有判定）。フロートは drop-shadow を受けない（既存方針）ので、ラベル
@@ -119,6 +124,8 @@ native ホストトリプルで `cargo test --lib`。wasm ビルドと CI-exact 
 ## 8. スコープ外 / 先送り
 
 - 隠れフロート**チップ**のラベル（チップは1セルなので不可）。
-- **非アクティブタブ**のフロートラベル（オーバーレイ自体がアクティブタブ限定）。
+- （当初は「非アクティブタブのフロートラベルはスコープ外（オーバーレイはアクティブタブ限定）」と
+  していたが、これは誤り。オーバーレイは #110 由来で非アクティブタブにも描かれるため、§2 の通り
+  ラベルは `active` フラグでミュートして対応済み — スコープ外ではない。）
 - **pinned フロート**の識別（#119、zellij の `is_pinned` 待ちでブロック）。
 - ラベルの**複数行**表示（1 text row のみ、タイル同様）。

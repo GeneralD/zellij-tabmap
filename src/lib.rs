@@ -178,11 +178,12 @@ impl ZellijPlugin for State {
                     router::ClickIntent::FocusPane(id) => {
                         focus_terminal_pane(id as u32, false, false);
                     }
-                    // A floating chip (hidden layer) or overlay (visible) — reveal
-                    // and focus it. Unlike the tiled `FocusPane` arm, a hidden float
-                    // has no on-screen footprint, so `should_float_if_hidden = true`
-                    // both reveals its layer and focuses it in one step (#110). Rides
-                    // the already-granted `ChangeApplicationState`.
+                    // A floating chip (hidden layer), overlay (visible), or the `+k`
+                    // overflow marker (targets the first folded hidden float, #113) —
+                    // reveal and focus it. Unlike the tiled `FocusPane` arm, a hidden
+                    // float has no on-screen footprint, so `should_float_if_hidden =
+                    // true` both reveals its layer and focuses it in one step (#110).
+                    // Rides the already-granted `ChangeApplicationState`.
                     router::ClickIntent::FocusFloatingPane(id) => {
                         focus_terminal_pane(id as u32, true, false);
                     }

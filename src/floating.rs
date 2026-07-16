@@ -67,10 +67,12 @@ impl std::str::FromStr for FloatingMode {
     }
 }
 
-/// One drawn chip cell's content (#110). `Float(i)` is a selectable chip for the
-/// `i`-th hidden float (its glyph is colored by that float's id); `PlusK(k)` is
-/// the non-selectable overflow marker standing in for `k` floats that did not
-/// fit. Returned by [`chip_cells`] paired with the block-local column it sits in.
+/// One drawn chip cell's content (#110). `Float(i)` is a chip individually
+/// addressable by index for the `i`-th hidden float (its glyph is colored by
+/// that float's id); `PlusK(k)` is the overflow marker standing in for `k`
+/// floats that did not fit as individual chips — clicking it still resolves
+/// to a float (the first one it folds, #113), just not via an `i` index.
+/// Returned by [`chip_cells`] paired with the block-local column it sits in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Chip {
     Float(usize),
@@ -138,10 +140,11 @@ pub fn chip_index_at_cell(
 
 /// The overflow count `k` if block-local cell (`col`, `row`) is the `+k`
 /// **marker** cell in a `cols`-by-`text_rows` block with `count` floats, else
-/// `None` (#110). The marker counterpart of [`chip_index_at_cell`], which
-/// resolves only the selectable float chips — the marker itself selects
-/// nothing, but the hit-test lets the router consume a click on it (a no-op)
-/// instead of falling through to the tiled pane beneath. Mirrors [`chip_cells`].
+/// `None`. The marker counterpart of [`chip_index_at_cell`], which resolves
+/// only the individually-shown float chips. A click on the marker itself
+/// resolves to the FIRST folded float (#113: `count - k`, computed by the
+/// router) rather than a no-op — this helper just reports `k` so the router
+/// can derive that fold boundary. Mirrors [`chip_cells`].
 pub fn chip_marker_k(
     cols: usize,
     text_rows: usize,

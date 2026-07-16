@@ -1483,15 +1483,23 @@ pub fn render(
             }
             // A float label (#120) is the top layer: it paints over its own
             // float's interior on a cell that float fully owns (verified at
-            // placement), white and bold when focused. A continuation cell emits
+            // placement), white (or muted toward the fill on an inactive tab,
+            // same as every other label/badge) and bold only when both the tab
+            // is active and the float is focused. A continuation cell emits
             // nothing — the leading wide glyph already advanced through it,
             // preserving the row width (#118). The cell is float-interior, and
             // floats take no drop-shadow, so the background is the flat fill.
             match float_overlay[tr * pw + c] {
                 Some(OverlayCell::Glyph(ch, fi)) => {
-                    put_bg(&mut out, palette.color_for(float_rects[fi].id));
-                    put_fg(&mut out, ACTIVE_FG);
-                    if float_rects[fi].focused {
+                    let fill = palette.color_for(float_rects[fi].id);
+                    put_bg(&mut out, fill);
+                    let label_fg = if active {
+                        ACTIVE_FG
+                    } else {
+                        crate::color::mixed(ACTIVE_FG, fill, INACTIVE_LABEL_BLEND)
+                    };
+                    put_fg(&mut out, label_fg);
+                    if active && float_rects[fi].focused {
                         out.push_str("\x1b[1m");
                         out.push(ch);
                         out.push_str("\x1b[22m");
@@ -2126,7 +2134,6 @@ mod tests {
         // cell's top (fg) or bottom (bg) half.
         let palette = test_palette();
         let tiled = [PaneRect::new(0, 0, 0, 100, 40, "t", false)];
-        let triple = |c: (u8, u8, u8)| format!("2;{};{};{}m", c.0, c.1, c.2);
         let render_float = |focused: bool| {
             let floats = [PaneRect::new(7, 30, 12, 40, 16, "f", focused)];
             render(
@@ -2189,7 +2196,6 @@ mod tests {
                 covers,
             )
         };
-        let triple = |c: (u8, u8, u8)| format!("2;{};{};{}m", c.0, c.1, c.2);
         let marker_fg = triple(palette.ring_for(3));
 
         let marked = render_with(&[3]);
@@ -4111,5 +4117,43 @@ mod tests {
             &[],
         );
         assert!(out.contains("\x1b[1m"), "a focused float's label is bold");
+    }
+
+    #[test]
+    fn f_an_inactive_tabs_float_label_is_never_bold_or_pure_white() {
+        // An inactive tab can still carry a visible floating layer (a hidden
+        // tab's floats stay `Visible` in the manifest; `active` alone gates
+        // emphasis). The label must still render its glyphs, but muted toward
+        // the fill like every other label/badge (#59) — never bold and never
+        // pure `ACTIVE_FG` white, even though the float itself is focused.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 0, 0, 120, 40, "cargo", true)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::All,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            false,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+        );
+        assert!(
+            out.contains('c') && out.contains('a') && out.contains('r'),
+            "an inactive tab's large float still shows its title glyphs"
+        );
+        assert!(
+            !out.contains("\x1b[1m"),
+            "an inactive tab's float label is never bold"
+        );
+        assert!(
+            !out.contains(&triple(ACTIVE_FG)),
+            "an inactive tab's float label is muted toward the fill, not pure white"
+        );
     }
 }

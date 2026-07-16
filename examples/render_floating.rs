@@ -16,6 +16,11 @@
 //! (no floats), the **active** tab carrying a visible-float overlay, and a tab
 //! whose hidden layer shows two corner chips.
 //!
+//! On the active tab, the focused `htop` float is sized to clear the float
+//! label size gate (#120), so its overlay shows the summarized title `htop`
+//! centered inside it, white and bold like a focused tiled-pane label; the
+//! shorter `logs` float stays under the height gate and renders unlabeled.
+//!
 //! This drives the **real** render path — `paint::bar` forwards the per-tab
 //! `FloatSpec` through `tab_block::assemble` into `minimap::render`, the same
 //! code the plugin runs — so the preview can never drift from what ships.
@@ -82,12 +87,18 @@ fn main() {
     // recedes toward its fill — the focused float stands out among its siblings
     // (#116). Tab 2's layer is HIDDEN, so its two floats become corner chips (ids
     // 101, 102 key their color). Tab 0 has none.
+    //
+    // `htop`'s box is tall enough (virtual y=4..34 of the tab's 0..40 span) to
+    // clear the float label size gate (#120: interior width >= 4 cols AND
+    // height >= 6 px), so its overlay shows the `htop` title. `logs` keeps its
+    // original, shorter height, which stays under the height gate — a visible
+    // side-by-side contrast between a labeled and an unlabeled float.
     let mut floats = BTreeMap::new();
     floats.insert(
         1,
         FloatSpec::Visible(vec![
-            PaneRect::new(100, 8, 8, 44, 22, "htop", true), // focused → full ring
-            PaneRect::new(103, 68, 8, 44, 22, "logs", false), // unfocused → weakened ring
+            PaneRect::new(100, 8, 4, 44, 30, "htop", true), // focused → full ring + title
+            PaneRect::new(103, 68, 8, 44, 22, "logs", false), // unfocused → weakened ring, no label
         ]),
     );
     floats.insert(2, FloatSpec::Hidden(vec![101, 102]));

@@ -571,6 +571,13 @@ mod tests {
             route_click(None, &[], &tab_layout, &tab_panes, chip_row, 12),
             ClickIntent::FocusFloatingPane(102),
         );
+        // The marker rides only the bottom text row: one row above its column,
+        // the click falls through to the tiled pane as before.
+        assert_eq!(
+            route_click(None, &[], &tab_layout, &tab_panes, chip_row - 1, 10),
+            ClickIntent::FocusPane(5),
+            "one row above the marker still focuses the tiled pane",
+        );
     }
 
     #[test]

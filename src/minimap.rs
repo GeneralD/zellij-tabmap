@@ -37,6 +37,14 @@ pub(crate) const INACTIVE_LABEL_BLEND: u8 = 30;
 /// understated. A `…` truncation cue drawn inside that band inherits the same
 /// darkening. A visual parameter — retune freely; not a correctness constant.
 const FLOAT_SHADOW_BLEND: u8 = 25;
+/// Minimum interior width (columns inside the 1px ring, `fw - 2`) a visible
+/// float overlay must have before it carries a label (#120) — below this a
+/// truncated title is illegible, so the float stays color + ring only.
+const FLOAT_LABEL_MIN_INNER_WIDTH: usize = 4;
+/// Minimum pixel height a float overlay must span before it carries a label
+/// (#120). A label is one text row (2px); the ring owns the top and bottom
+/// pixel, so 6px (3 text rows) is the smallest box with a fully-interior row.
+const FLOAT_LABEL_MIN_HEIGHT_PX: usize = 6;
 /// The Nerd Font glyph stamped as a tab block's close affordance (#86). The
 /// Material Design `md-close_circle` (U+F0159) reads as a close control. It is
 /// drawn in alert red, one cell in from the block's right edge (#94) so a fill
@@ -1006,6 +1014,72 @@ pub fn render(
     let mut ring = vec![false; ph * pw]; // focus-ring pixels
     let mut overlay = vec![None::<OverlayCell>; text_rows * pw]; // label cells
 
+    // Float labels (#120): a large-enough visible float carries its summarized
+    // title, centered on an interior text row, painted over its own fill in the
+    // paint loop below. Reuses the tiled label vocabulary (`summarize` +
+    // display-width scan + `OverlayCell`) but in its own overlay so the tiled
+    // `grid[i]` index space is never mixed. Gated by the same `LabelMode` the
+    // tiled labels use (the L0–L4 ladder), plus a conservative size gate.
+    let mut float_overlay = vec![None::<OverlayCell>; text_rows * pw];
+    for (i, b) in float_bounds.iter().enumerate() {
+        let want = match mode {
+            LabelMode::None => false,
+            LabelMode::Focused => float_rects[i].focused,
+            LabelMode::All => true,
+        };
+        let inner = (b.px1 - b.px0).saturating_sub(2);
+        if !want || inner < FLOAT_LABEL_MIN_INNER_WIDTH || b.py1 - b.py0 < FLOAT_LABEL_MIN_HEIGHT_PX
+        {
+            continue;
+        }
+        // Centered interior text row: the row nearest the box's vertical center
+        // whose two pixels both sit inside the ring band [py0+1, py1-2]. The
+        // height gate (≥ 6px) guarantees one exists.
+        let first_interior = (b.py0 + 1).div_ceil(2);
+        let last_interior = (b.py1 - 3) / 2;
+        let row = ((b.py0 + b.py1) / 2 / 2).clamp(first_interior, last_interior);
+        let label = crate::title::summarize(&float_rects[i].title, inner, false);
+        let label_width = crate::title::charwise_width(&label);
+        if label_width == 0 || row >= text_rows {
+            continue;
+        }
+        // Center by display width; stop short of the right ring column.
+        let start = b.px0 + 1 + inner.saturating_sub(label_width) / 2;
+        let right_bound = b.px1 - 1;
+        let cells: Vec<(usize, char, usize)> = label
+            .chars()
+            .filter_map(|ch| {
+                UnicodeWidthChar::width(ch)
+                    .filter(|w| *w >= 1)
+                    .map(|w| (ch, w))
+            })
+            .scan(start, |col, (ch, w)| {
+                let at = *col;
+                *col += w;
+                Some((at, ch, w))
+            })
+            .take_while(|(at, _, w)| at + w <= right_bound)
+            .collect();
+        // Only label where THIS float owns every covered cell (both pixels) —
+        // an overlapping float on top keeps its own label/fill, no bleed-through.
+        // Checked once here so the paint branch below needs no ownership test.
+        let owned = cells.iter().all(|(at, _, w)| {
+            (*at..*at + *w).all(|cc| {
+                float_grid[2 * row * pw + cc] == Some(i)
+                    && float_grid[(2 * row + 1) * pw + cc] == Some(i)
+            })
+        });
+        if !owned {
+            continue;
+        }
+        cells.iter().for_each(|&(at, ch, w)| {
+            float_overlay[row * pw + at] = Some(OverlayCell::Glyph(ch, i));
+            (at + 1..at + w).for_each(|cc| {
+                float_overlay[row * pw + cc] = Some(OverlayCell::Continuation);
+            });
+        });
+    }
+
     // The shortcut badge occupies the top text row's left cells, after a
     // one-cell margin, drawn over the underlying cell color — the pane fill, or
     // the focus ring where it sits on a focused pane's outline — so it reads
@@ -1407,6 +1481,28 @@ pub fn render(
                     continue;
                 }
             }
+            // A float label (#120) is the top layer: it paints over its own
+            // float's interior on a cell that float fully owns (verified at
+            // placement), white and bold when focused. A continuation cell emits
+            // nothing — the leading wide glyph already advanced through it,
+            // preserving the row width (#118). The cell is float-interior, and
+            // floats take no drop-shadow, so the background is the flat fill.
+            match float_overlay[tr * pw + c] {
+                Some(OverlayCell::Glyph(ch, fi)) => {
+                    put_bg(&mut out, palette.color_for(float_rects[fi].id));
+                    put_fg(&mut out, ACTIVE_FG);
+                    if float_rects[fi].focused {
+                        out.push_str("\x1b[1m");
+                        out.push(ch);
+                        out.push_str("\x1b[22m");
+                    } else {
+                        out.push(ch);
+                    }
+                    continue;
+                }
+                Some(OverlayCell::Continuation) => continue,
+                None => {}
+            }
             // Tiled-pane label vs. the visible float (#110). The pre-resolved
             // plan says whether this cell draws its glyph, a `…` truncation cue
             // over a shadow, nothing (a wide glyph's continuation already covered
@@ -1615,6 +1711,13 @@ mod tests {
 
     fn bg(c: Rgb) -> String {
         format!("\x1b[48;2;{};{};{}m", c.0, c.1, c.2)
+    }
+
+    /// The bare `"2;r;g;b"` triple shared by both the `38;` (fg) and `48;` (bg)
+    /// SGR forms — a match on this substring counts a color whether it lands on
+    /// a cell's foreground or background half.
+    fn triple(c: Rgb) -> String {
+        format!("2;{};{};{}m", c.0, c.1, c.2)
     }
 
     fn one_focused() -> Vec<PaneRect> {
@@ -3929,5 +4032,84 @@ mod tests {
             CLOSE_GLYPH_ASCII,
             "the ASCII close sits one cell in from the right edge: {top:?}"
         );
+    }
+
+    #[test]
+    fn f_a_large_float_shows_its_label() {
+        // A visible float spanning the whole block is large enough to carry its
+        // summarized title; LabelMode::All labels every fitting float.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 0, 0, 120, 40, "cargo", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::All,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+        );
+        assert!(
+            out.contains('c') && out.contains('a') && out.contains('r'),
+            "a large float shows its title glyphs"
+        );
+        // The label sits on the float's interior fill, in white.
+        assert!(out.contains(&triple(ACTIVE_FG)), "float label is white");
+    }
+
+    #[test]
+    fn f_a_small_float_has_no_label() {
+        // A float below the size gate stays color + ring only.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 0, 0, 20, 8, "cargo", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::All,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+        );
+        // "cargo" summarizes to a command basename; none of its glyphs should
+        // appear as a label on a box too small to hold one.
+        assert!(
+            !out.contains('c') && !out.contains('g'),
+            "a small float shows no label"
+        );
+    }
+
+    #[test]
+    fn f_a_focused_float_label_is_bold() {
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 0, 0, 120, 40, "cargo", true)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::All,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+        );
+        assert!(out.contains("\x1b[1m"), "a focused float's label is bold");
     }
 }

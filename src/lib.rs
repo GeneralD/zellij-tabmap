@@ -40,6 +40,13 @@ pub struct State {
     permitted: bool,
     tabs: Vec<TabInfo>,
     panes: PaneManifest,
+    /// Per-tab pinned floating-pane ids (#119), keyed by tab position and
+    /// rebuilt on every `PaneUpdate` from a per-tab session-layout dump
+    /// ([`Self::refresh_pinned`]) — pin state is invisible in `PaneInfo`.
+    /// Drives the hidden-layer partition (pinned floats overlay, the rest
+    /// chip), the corner pin marker, and the wheel/anchor visibility of
+    /// hidden-layer pinned floats. Ids are `PaneRect`-space (`usize`).
+    pinned_by_tab: BTreeMap<usize, Vec<usize>>,
     /// Pane colors derived from the live theme. Starts at the default-theme
     /// fallback (see [`color::Palette::default`]) and is refreshed on every
     /// `ModeUpdate`, which is how zellij delivers the active style.
@@ -75,13 +82,6 @@ pub struct State {
     /// "close tab N" against the live frame. Empty whenever the close button is
     /// disabled, only one tab is open, or no frame has drawn yet.
     close_layout: Vec<line::CloseHit>,
-    /// Per-tab pinned floating-pane ids (#119), keyed by tab position and
-    /// rebuilt on every `PaneUpdate` from a per-tab session-layout dump
-    /// ([`Self::refresh_pinned`]) — pin state is invisible in `PaneInfo`.
-    /// Drives the hidden-layer partition (pinned floats overlay, the rest
-    /// chip), the corner pin marker, and the wheel/anchor visibility of
-    /// hidden-layer pinned floats. Ids are `PaneRect`-space (`usize`).
-    pinned_by_tab: BTreeMap<usize, Vec<usize>>,
 }
 
 impl ZellijPlugin for State {
@@ -536,10 +536,10 @@ impl State {
             .iter()
             .filter(|(_, panes)| panes.iter().any(projection::is_floating_terminal))
             .filter_map(|(&position, panes)| {
-                let kdl = layout_dump_for_tab(position)?;
-                let rects = pinned::pinned_float_rects(&kdl);
-                let ids = pinned::pinned_ids(&rects, &projection::project_floating(panes));
-                (!ids.is_empty()).then_some((position, ids))
+                let kdl = layout_dump_for_tab(position);
+                let floats = projection::project_floating(panes);
+                let ids = pinned::pinned_ids_for_tab(kdl.as_deref(), &floats)?;
+                Some((position, ids))
             })
             .collect();
     }
@@ -1717,6 +1717,65 @@ mod tests {
             Some(vec![7]),
             "the pinned float stays an overlay while its layer is hidden"
         );
+    }
+
+    #[test]
+    fn render_keeps_pin_state_scoped_to_its_own_tab() {
+        // Two tabs, both with a hidden layer of floats; `pinned_by_tab` names
+        // an id only in tab 0. Tab 1's floats must chip exactly as if no pins
+        // existed anywhere — a pin entry for one tab must never leak into
+        // another tab's partition.
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                are_floating_panes_visible: false,
+                ..tab(0, 1)
+            },
+            TabInfo {
+                are_floating_panes_visible: false,
+                ..tab(1, 2)
+            },
+        ];
+        state.panes.panes.insert(
+            0,
+            vec![
+                content_pane(0, 1, 80, 24),
+                floating_pane(7, 10, 5, 30, 10),
+                floating_pane(9, 40, 8, 20, 6),
+            ],
+        );
+        state.panes.panes.insert(
+            1,
+            vec![
+                content_pane(0, 1, 80, 24),
+                floating_pane(20, 10, 5, 30, 10),
+                floating_pane(21, 40, 8, 20, 6),
+            ],
+        );
+        state.pinned_by_tab = BTreeMap::from([(0usize, vec![7usize])]);
+
+        state.render(MIN_ROWS, 80);
+
+        let tab0 = state.tab_panes.get(&0);
+        assert_eq!(
+            tab0.map(|g| g.hidden_floats.clone()),
+            Some(vec![9]),
+            "tab 0's pin partitions as before"
+        );
+        assert_eq!(
+            tab0.map(|g| g.visible_floats.iter().map(|f| f.id).collect::<Vec<_>>()),
+            Some(vec![7])
+        );
+
+        let tab1 = state.tab_panes.get(&1);
+        assert_eq!(
+            tab1.map(|g| g.hidden_floats.clone()),
+            Some(vec![20, 21]),
+            "tab 1 has no pin entry, so every float chips"
+        );
+        assert_eq!(tab1.map(|g| g.visible_floats.len()), Some(0));
     }
 
     #[test]

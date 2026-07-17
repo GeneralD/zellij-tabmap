@@ -149,6 +149,17 @@ pub fn pinned_ids(pinned: &[CellRect], floats: &[PaneRect]) -> Vec<usize> {
         .collect()
 }
 
+/// One tab's pinned-float ids, resolved end to end from its dump text (rule
+/// #17: the wasm-only `dump_session_layout_for_tab` call itself stays in
+/// `lib.rs`, but everything downstream of the KDL string is pure and belongs
+/// here, where `cargo test --lib` can actually exercise it). `None` when the
+/// dump is unavailable (`kdl`) or nothing in it is pinned, so a caller
+/// building a sparse map can skip the entry entirely with `?`/`filter_map`.
+pub(crate) fn pinned_ids_for_tab(kdl: Option<&str>, floats: &[PaneRect]) -> Option<Vec<usize>> {
+    let ids = pinned_ids(&pinned_float_rects(kdl?), floats);
+    (!ids.is_empty()).then_some(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,5 +409,40 @@ mod tests {
         }];
         let floats = [float(7, 30, 12, 60, 18), float(9, 30, 12, 60, 18)];
         assert_eq!(pinned_ids(&pinned, &floats), vec![7, 9]);
+    }
+
+    #[test]
+    fn pinned_ids_for_tab_is_none_without_a_dump() {
+        // The wasm-only dump call yields no text off-wasm (rule #17) — the
+        // resolver must treat a missing dump as "no pins", not panic or guess.
+        let floats = [float(7, 30, 12, 60, 18)];
+        assert_eq!(pinned_ids_for_tab(None, &floats), None);
+    }
+
+    #[test]
+    fn pinned_ids_for_tab_is_none_when_the_dump_has_no_pins() {
+        // A live dump with a float but no `pinned true` line resolves to no
+        // entry, not an empty-vec entry — callers skip it with `?`.
+        let kdl = r#"layout {
+    tab name="t" {
+        pane
+        floating_panes {
+            pane {
+                height 10
+                width 40
+                x 5
+                y 8
+            }
+        }
+    }
+}"#;
+        let floats = [float(7, 5, 8, 40, 10)];
+        assert_eq!(pinned_ids_for_tab(Some(kdl), &floats), None);
+    }
+
+    #[test]
+    fn pinned_ids_for_tab_resolves_a_matching_pin_end_to_end() {
+        let floats = [float(7, 30, 12, 60, 18), float(9, 5, 8, 40, 10)];
+        assert_eq!(pinned_ids_for_tab(Some(DUMP), &floats), Some(vec![7]));
     }
 }

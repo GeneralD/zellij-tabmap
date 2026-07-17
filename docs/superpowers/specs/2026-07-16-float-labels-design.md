@@ -127,5 +127,7 @@ native ホストトリプルで `cargo test --lib`。wasm ビルドと CI-exact 
 - （当初は「非アクティブタブのフロートラベルはスコープ外（オーバーレイはアクティブタブ限定）」と
   していたが、これは誤り。オーバーレイは #110 由来で非アクティブタブにも描かれるため、§2 の通り
   ラベルは `active` フラグでミュートして対応済み — スコープ外ではない。）
-- **pinned フロート**の識別（#119、zellij の `is_pinned` 待ちでブロック）。
+- **pinned フロート**の識別 — その後 `is_pinned` を待たず
+  `dump_session_layout_for_tab` の KDL 経由で読めることが判明し、#119
+  （[`2026-07-17-pinned-floats-design.md`](2026-07-17-pinned-floats-design.md)）で別途出荷。
 - ラベルの**複数行**表示（1 text row のみ、タイル同様）。

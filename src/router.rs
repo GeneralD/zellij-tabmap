@@ -111,8 +111,9 @@ pub(crate) fn chip_marker_target_at(
 /// counterpart of [`float_chip_at`] (#110). `None` when the tab has no visible
 /// floats or the cell is off every float box. Resolves against the same
 /// [`minimap::float_pane_at_cell`] mapping `render` painted, so draw and
-/// hit-test never disagree. Tried alongside [`float_chip_at`] before the tiled
-/// [`pane_at`] (float priority, spec §7.1).
+/// hit-test never disagree. Tried after the chip run ([`float_chip_at`] /
+/// [`chip_marker_target_at`] — chips paint on top of a Mixed layer's overlay,
+/// #119) and before the tiled [`pane_at`] (float priority, spec §7.1).
 pub(crate) fn float_overlay_at(
     tab_layout: &[line::TabHit],
     tab_panes: &BTreeMap<usize, TabPaneGeom>,
@@ -218,19 +219,17 @@ pub(crate) fn route_click(
         return ClickIntent::CloseTab(position);
     }
     // Floating panes sit on top of the tiled minimap, so a float — a hidden-layer
-    // corner chip or a visible-layer overlay — wins over the tiled pane in the
-    // same cell (float priority, spec §7.1).
+    // corner chip, the `+k` overflow marker, or a visible-layer overlay — wins
+    // over the tiled pane in the same cell (float priority, spec §7.1). The chip
+    // run resolves before the overlay because it also PAINTS above it: a Mixed
+    // layer (#119) can park a pinned overlay under the marker cell, and the
+    // click must follow what the eye sees. A click on the marker reveals-and-
+    // focuses the FIRST folded float (#113): the reveal un-hides the whole
+    // layer, so the rest become individually clickable overlay boxes.
     if let Some(id) = float_chip_at(tab_layout, tab_panes, row, column)
+        .or_else(|| chip_marker_target_at(tab_layout, tab_panes, row, column))
         .or_else(|| float_overlay_at(tab_layout, tab_panes, row, column))
     {
-        return ClickIntent::FocusFloatingPane(id);
-    }
-    // The `+k` overflow marker folds the hidden floats that don't fit the chip
-    // run. A click on it reveals-and-focuses the FIRST folded float (#113):
-    // the reveal un-hides the whole layer, so the rest become individually
-    // clickable overlay boxes. Resolving here — before the tiled fallback —
-    // also keeps the marker shielding the pane it sits over (#110).
-    if let Some(id) = chip_marker_target_at(tab_layout, tab_panes, row, column) {
         return ClickIntent::FocusFloatingPane(id);
     }
     if let Some(id) = pane_at(tab_layout, tab_panes, row, column) {
@@ -576,6 +575,34 @@ mod tests {
             route_click(None, &[], &tab_layout, &tab_panes, chip_row - 1, 10),
             ClickIntent::FocusPane(5),
             "one row above the marker still focuses the tiled pane",
+        );
+    }
+
+    #[test]
+    fn route_click_lets_the_marker_beat_a_pinned_overlay_beneath_it() {
+        // A Mixed layer (#119) can park a pinned overlay under the `+k` marker
+        // cell: 5 unpinned floats overflow the 3-col chip run while pinned
+        // float 9's box covers the whole block. The marker paints on top of
+        // the overlay (chips own their row), so the click must resolve to the
+        // marker's first folded float — not to the pinned overlay beneath it.
+        let tab_layout = vec![hit_active(0, 10, 3)];
+        let mut g = geom(10, 3, &[(5, 0, 0, 80, 24)]);
+        g.hidden_floats = vec![101, 102, 103, 104, 105];
+        g.visible_floats = vec![minimap::PaneRect::new(9, 0, 0, 80, 24, "f", false)];
+        let tab_panes: BTreeMap<usize, TabPaneGeom> = [(0usize, g)].into_iter().collect();
+        let chip_row = (MIN_ROWS - 1) as isize;
+        // Marker at block-local col 0 → absolute col 10: the first folded
+        // float (id 103), never the overlay that owns the same cell.
+        assert_eq!(
+            route_click(None, &[], &tab_layout, &tab_panes, chip_row, 10),
+            ClickIntent::FocusFloatingPane(103),
+            "the painted marker wins the click over the overlay beneath",
+        );
+        // Off the chip run the pinned overlay still resolves as usual.
+        assert_eq!(
+            route_click(None, &[], &tab_layout, &tab_panes, chip_row - 1, 10),
+            ClickIntent::FocusFloatingPane(9),
+            "off the chip run the pinned overlay takes the click",
         );
     }
 

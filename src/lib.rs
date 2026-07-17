@@ -11,6 +11,7 @@ pub mod floating;
 pub mod line;
 pub mod minimap;
 pub mod paint;
+pub mod pinned;
 pub mod projection;
 pub(crate) mod router;
 pub mod scroll;
@@ -39,6 +40,13 @@ pub struct State {
     permitted: bool,
     tabs: Vec<TabInfo>,
     panes: PaneManifest,
+    /// Per-tab pinned floating-pane ids (#119), keyed by tab position and
+    /// rebuilt on every `PaneUpdate` from a per-tab session-layout dump
+    /// ([`Self::refresh_pinned`]) — pin state is invisible in `PaneInfo`.
+    /// Drives the hidden-layer partition (pinned floats overlay, the rest
+    /// chip), the corner pin marker, and the wheel/anchor visibility of
+    /// hidden-layer pinned floats. Ids are `PaneRect`-space (`usize`).
+    pinned_by_tab: BTreeMap<usize, Vec<usize>>,
     /// Pane colors derived from the live theme. Starts at the default-theme
     /// fallback (see [`color::Palette::default`]) and is refreshed on every
     /// `ModeUpdate`, which is how zellij delivers the active style.
@@ -126,6 +134,10 @@ impl ZellijPlugin for State {
             }
             Event::PaneUpdate(panes) => {
                 self.panes = panes;
+                // Pin state rides only in the session-layout dump (#119) —
+                // refresh it with the same cadence as the manifest it
+                // correlates against.
+                self.refresh_pinned();
                 true
             }
             Event::ModeUpdate(mode_info) => {
@@ -310,7 +322,19 @@ impl ZellijPlugin for State {
                     } else if visible {
                         floating::FloatSpec::Visible(floats)
                     } else {
-                        floating::FloatSpec::Hidden(floats.iter().map(|f| f.id).collect())
+                        // A hidden layer's pinned floats stay on the real
+                        // screen (#119) — zellij renders pinned floats while
+                        // the layer is hidden — so they keep overlaying and
+                        // only the rest fold into chips.
+                        let (overlay, chipped): (Vec<_>, Vec<_>) = floats
+                            .into_iter()
+                            .partition(|f| self.is_pinned(hit.position, f.id));
+                        let chips = chipped.into_iter().map(|f| f.id).collect();
+                        if overlay.is_empty() {
+                            floating::FloatSpec::Hidden(chips)
+                        } else {
+                            floating::FloatSpec::Mixed { chips, overlay }
+                        }
                     };
                     (hit.position, spec)
                 })
@@ -379,6 +403,9 @@ impl ZellijPlugin for State {
                 // manifest + each tab's `are_floating_panes_visible`).
                 &floats_by_position,
                 &suppressed_covers_by_position,
+                // Pinned-float ids (#119), rebuilt from the live session-layout
+                // dump on every `PaneUpdate` (see `refresh_pinned`).
+                &self.pinned_by_tab,
             )
         );
 
@@ -418,19 +445,25 @@ impl ZellijPlugin for State {
                             .cloned()
                             .unwrap_or_default(),
                         // Hidden-float chip ids for this tab (#110), taken from the
-                        // float spec built above. Only a *hidden* layer draws chips,
-                        // so a visible/absent layer leaves this empty and the click
+                        // float spec built above. A *hidden* layer draws every
+                        // float as a chip; a *mixed* layer draws only its unpinned
+                        // half as chips (#119), the rest overlaying instead. A
+                        // visible/absent layer leaves this empty and the click
                         // falls back to the tiled pane under it.
                         hidden_floats: match floats_by_position.get(&hit.position) {
                             Some(floating::FloatSpec::Hidden(ids)) => ids.clone(),
+                            Some(floating::FloatSpec::Mixed { chips, .. }) => chips.clone(),
                             _ => Vec::new(),
                         },
                         // Visible-float overlay rects for this tab (#110), from the
-                        // same spec. Only a *visible* layer overlays, so a
-                        // hidden/absent layer leaves this empty and the click routes
-                        // to a chip or the tiled pane instead.
+                        // same spec. A *visible* layer overlays every float; a
+                        // *mixed* layer overlays only its pinned half (#119), which
+                        // stays on the real screen while the rest of that hidden
+                        // layer chips. A hidden/absent layer leaves this empty and
+                        // the click routes to a chip or the tiled pane instead.
                         visible_floats: match floats_by_position.get(&hit.position) {
                             Some(floating::FloatSpec::Visible(rects)) => rects.clone(),
+                            Some(floating::FloatSpec::Mixed { overlay, .. }) => overlay.clone(),
                             _ => Vec::new(),
                         },
                     },
@@ -484,6 +517,35 @@ impl State {
         ]
     }
 
+    /// Rebuild [`Self::pinned_by_tab`] from a per-tab session-layout dump
+    /// (#119). A pin toggle arrives as a `PaneUpdate` with no `PaneInfo`
+    /// field changed, so manifest-keyed caching would miss it — every
+    /// float-bearing tab is re-dumped on each `PaneUpdate` instead. Tabs
+    /// without floats are skipped (no dump), and `floating = off` skips
+    /// everything: the bar depicts no floats, so pin data would be dead
+    /// weight.
+    fn refresh_pinned(&mut self) {
+        if self.config.floating == floating::FloatingMode::Off {
+            self.pinned_by_tab = BTreeMap::new();
+            return;
+        }
+        self.pinned_by_tab = self
+            .tabs
+            .iter()
+            .map(|t| t.position)
+            .filter_map(|position| {
+                let panes = self.panes.panes.get(&position)?;
+                if !panes.iter().any(projection::is_floating_terminal) {
+                    return None;
+                }
+                let kdl = layout_dump_for_tab(position);
+                let floats = projection::project_floating(panes);
+                let ids = pinned::pinned_ids_for_tab(kdl.as_deref(), &floats)?;
+                Some((position, ids))
+            })
+            .collect();
+    }
+
     /// Dispatch a wheel event to the configured navigation: switch tabs, walk
     /// panes, or do nothing (#80, restored #108). zellij scroll events carry no
     /// position, so the gesture is bar-wide — it acts on the live tab/pane set,
@@ -529,11 +591,21 @@ impl State {
         focus_terminal_pane(target, false, false);
     }
 
+    /// Whether float `id` in the tab at `position` is pinned (#119). Pinned
+    /// floats stay on the real screen while their layer is hidden, so the
+    /// wheel and the focus anchor treat them as visible.
+    fn is_pinned(&self, position: usize, id: usize) -> bool {
+        self.pinned_by_tab
+            .get(&position)
+            .is_some_and(|ids| ids.contains(&id))
+    }
+
     /// The id of the focused terminal pane in the active tab that the wheel can
     /// step from in `pane` mode, if any — a tiled pane, or a floating one while
-    /// its layer is visible. The floating case mirrors `pane_focus_order`, which
-    /// appends visible floats: without it, wheeling from a focused float would
-    /// find no anchor in the order and stall (#80/#110).
+    /// its layer is visible or it is pinned. The floating case mirrors
+    /// `pane_focus_order`, which appends visible and pinned floats: without it,
+    /// wheeling from a focused float would find no anchor in the order and
+    /// stall (#80/#110/#119).
     fn focused_pane_id(&self) -> Option<u32> {
         let active = projection::active_tab(&self.tabs)?;
         self.panes
@@ -542,7 +614,9 @@ impl State {
             .iter()
             .filter(|pane| {
                 projection::is_tiled_terminal(pane)
-                    || (active.are_floating_panes_visible && projection::is_floating_terminal(pane))
+                    || (projection::is_floating_terminal(pane)
+                        && (active.are_floating_panes_visible
+                            || self.is_pinned(active.position, pane.id as usize)))
             })
             .find(|pane| pane.is_focused)
             .map(|pane| pane.id)
@@ -550,8 +624,9 @@ impl State {
 
     /// Every tab's panes flattened into one wheel-traversal order: tabs in
     /// ascending position, and within each tab its tiled panes in reading order
-    /// followed by — only when that tab's floating layer is currently visible —
-    /// its floating panes (#80, #110).
+    /// followed by its floating panes that are on the real screen — all of them
+    /// when the tab's floating layer is visible, only the pinned ones while it
+    /// is hidden (#80, #110, #119).
     ///
     /// Tab order comes from the authoritative `self.tabs`, not the `PaneManifest`
     /// keys: `TabUpdate` and `PaneUpdate` arrive as separate events, so a just-
@@ -559,9 +634,11 @@ impl State {
     /// `self.tabs` drops those, so the wheel never steps into a pane of a tab that
     /// no longer exists.
     ///
-    /// A *hidden* float is deliberately excluded — it is reached only via its
-    /// corner chip (#110), never the wheel, so wheeling never pops a hidden layer
-    /// open (auto-hide-agnostic; the P0-3 spike left auto-hide unconfirmed).
+    /// A hidden *unpinned* float is deliberately excluded — it is reached only
+    /// via its corner chip (#110), never the wheel, so wheeling never pops a
+    /// hidden layer open (auto-hide-agnostic; the P0-3 spike left auto-hide
+    /// unconfirmed). A pinned float stays on the real screen while its layer is
+    /// hidden (#119), so it walks like a visible one.
     fn pane_focus_order(&self) -> Vec<u32> {
         let mut tabs: Vec<&TabInfo> = self.tabs.iter().collect();
         tabs.sort_by_key(|tab| tab.position);
@@ -571,19 +648,38 @@ impl State {
                 let mut order: Vec<u32> = panes
                     .map(|p| projection::pane_ids_in_reading_order(p))
                     .unwrap_or_default();
-                if tab.are_floating_panes_visible {
-                    if let Some(p) = panes {
-                        order.extend(
-                            projection::project_floating(p)
-                                .into_iter()
-                                .map(|f| f.id as u32),
-                        );
-                    }
+                if let Some(p) = panes {
+                    order.extend(
+                        projection::project_floating(p)
+                            .into_iter()
+                            .filter(|f| {
+                                tab.are_floating_panes_visible || self.is_pinned(tab.position, f.id)
+                            })
+                            .map(|f| f.id as u32),
+                    );
                 }
                 order
             })
             .collect()
     }
+}
+
+/// The KDL text of one tab's live session layout, via the host (#119) — or
+/// `None` when the dump fails (the cue is additive, so a failed dump just
+/// means "no pins this frame"). `dump_session_layout_for_tab` reads its reply
+/// back from the plugin's stdin (rule #17), which panics off-wasm, so the
+/// native-test build stubs the whole call; tests inject `pinned_by_tab`
+/// directly instead.
+#[cfg(not(test))]
+fn layout_dump_for_tab(tab_index: usize) -> Option<String> {
+    dump_session_layout_for_tab(tab_index)
+        .ok()
+        .map(|(kdl, _metadata)| kdl)
+}
+
+#[cfg(test)]
+fn layout_dump_for_tab(_tab_index: usize) -> Option<String> {
+    None
 }
 
 // Native test builds link the whole lib, which references zellij-tile's host
@@ -734,6 +830,20 @@ mod tests {
             pane_columns: w,
             pane_rows: h,
             title: "sh".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// A floating terminal pane with real geometry, as the manifest reports it.
+    fn floating_pane(id: u32, x: usize, y: usize, w: usize, h: usize) -> PaneInfo {
+        PaneInfo {
+            id,
+            is_floating: true,
+            pane_x: x,
+            pane_y: y,
+            pane_columns: w,
+            pane_rows: h,
+            title: "f".to_string(),
             ..Default::default()
         }
     }
@@ -1498,6 +1608,26 @@ mod tests {
     }
 
     #[test]
+    fn focused_pane_id_resolves_a_focused_hidden_pinned_float() {
+        // Mirrors `focused_pane_id_ignores_a_focused_float_while_the_layer_is
+        // _hidden`, but pinned: the float is on screen, so it anchors the
+        // wheel even while its layer is hidden.
+        let mut state = scroll_state(scroll::ScrollMode::Pane, None);
+        if let Some(panes) = state.panes.panes.get_mut(&0) {
+            panes.push(PaneInfo {
+                id: 15,
+                is_floating: true,
+                is_focused: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
+        state.pinned_by_tab = BTreeMap::from([(0usize, vec![15usize])]);
+        assert_eq!(state.focused_pane_id(), Some(15));
+    }
+
+    #[test]
     fn pane_focus_order_flattens_tabs_then_reading_order() {
         // Tabs in ascending position, panes in reading order within each: tab 0's
         // 10 (x=0) then 20 (x=40), then tab 1's 30 — the global wheel traversal.
@@ -1551,6 +1681,51 @@ mod tests {
     }
 
     #[test]
+    fn pane_focus_order_includes_a_hidden_layers_pinned_float() {
+        // Tab 1's layer is hidden but its float 25 is pinned — it is on the
+        // real screen (#119), so the wheel walks it; the unpinned hidden
+        // float case stays excluded (pinned_by_tab carries no entry for it).
+        let mut state = scroll_state(scroll::ScrollMode::Pane, Some(10));
+        if let Some(panes) = state.panes.panes.get_mut(&1) {
+            panes.push(PaneInfo {
+                id: 25,
+                is_floating: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
+        state.pinned_by_tab = BTreeMap::from([(1usize, vec![25usize])]);
+        assert_eq!(state.pane_focus_order(), vec![10, 20, 30, 25]);
+    }
+
+    #[test]
+    fn pane_focus_order_skips_an_unpinned_float_beside_a_pinned_one() {
+        // Tab 1's hidden layer holds floats 25 and 26 but only 26 is pinned —
+        // the map entry gates per float id, not per tab, so 25 stays
+        // chip-only while 26 joins the walk.
+        let mut state = scroll_state(scroll::ScrollMode::Pane, Some(10));
+        if let Some(panes) = state.panes.panes.get_mut(&1) {
+            panes.push(PaneInfo {
+                id: 25,
+                is_floating: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+            panes.push(PaneInfo {
+                id: 26,
+                is_floating: true,
+                pane_x: 60,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
+        state.pinned_by_tab = BTreeMap::from([(1usize, vec![26usize])]);
+        assert_eq!(state.pane_focus_order(), vec![10, 20, 30, 26]);
+    }
+
+    #[test]
     fn scroll_dispatches_each_mode_without_panicking() {
         // Host effects (`switch_tab_to` / `focus_terminal_pane`) are no-op stubs
         // off-wasm, so the contract is that every mode dispatches both directions
@@ -1588,5 +1763,192 @@ mod tests {
         let mut state = scroll_state(scroll::ScrollMode::Tab, Some(10));
         assert!(!state.update(Event::Mouse(Mouse::ScrollUp(0))));
         assert!(!state.update(Event::Mouse(Mouse::ScrollDown(0))));
+    }
+
+    #[test]
+    fn render_partitions_a_hidden_layer_by_pin_state() {
+        // A hidden layer with floats 7 (pinned) and 9: the pinned one records
+        // as an overlay rect (it is still on the real screen, #119) while only
+        // the unpinned one chips.
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![TabInfo {
+            active: true,
+            are_floating_panes_visible: false,
+            ..tab(0, 1)
+        }];
+        state.panes.panes.insert(
+            0,
+            vec![
+                content_pane(0, 1, 80, 24),
+                floating_pane(7, 10, 5, 30, 10),
+                floating_pane(9, 40, 8, 20, 6),
+            ],
+        );
+        state.pinned_by_tab = BTreeMap::from([(0usize, vec![7usize])]);
+
+        state.render(MIN_ROWS, 80);
+
+        let geom = state.tab_panes.get(&0);
+        assert_eq!(
+            geom.map(|g| g.hidden_floats.clone()),
+            Some(vec![9]),
+            "only the unpinned float chips"
+        );
+        assert_eq!(
+            geom.map(|g| g.visible_floats.iter().map(|f| f.id).collect::<Vec<_>>()),
+            Some(vec![7]),
+            "the pinned float stays an overlay while its layer is hidden"
+        );
+    }
+
+    #[test]
+    fn render_keeps_pin_state_scoped_to_its_own_tab() {
+        // Two tabs, both with a hidden layer of floats; `pinned_by_tab` names
+        // an id only in tab 0. Tab 1's floats must chip exactly as if no pins
+        // existed anywhere — a pin entry for one tab must never leak into
+        // another tab's partition.
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![
+            TabInfo {
+                active: true,
+                are_floating_panes_visible: false,
+                ..tab(0, 1)
+            },
+            TabInfo {
+                are_floating_panes_visible: false,
+                ..tab(1, 2)
+            },
+        ];
+        state.panes.panes.insert(
+            0,
+            vec![
+                content_pane(0, 1, 80, 24),
+                floating_pane(7, 10, 5, 30, 10),
+                floating_pane(9, 40, 8, 20, 6),
+            ],
+        );
+        state.panes.panes.insert(
+            1,
+            vec![
+                content_pane(0, 1, 80, 24),
+                floating_pane(20, 10, 5, 30, 10),
+                floating_pane(21, 40, 8, 20, 6),
+            ],
+        );
+        state.pinned_by_tab = BTreeMap::from([(0usize, vec![7usize])]);
+
+        state.render(MIN_ROWS, 80);
+
+        let tab0 = state.tab_panes.get(&0);
+        assert_eq!(
+            tab0.map(|g| g.hidden_floats.clone()),
+            Some(vec![9]),
+            "tab 0's pin partitions as before"
+        );
+        assert_eq!(
+            tab0.map(|g| g.visible_floats.iter().map(|f| f.id).collect::<Vec<_>>()),
+            Some(vec![7])
+        );
+
+        let tab1 = state.tab_panes.get(&1);
+        assert_eq!(
+            tab1.map(|g| g.hidden_floats.clone()),
+            Some(vec![20, 21]),
+            "tab 1 has no pin entry, so every float chips"
+        );
+        assert_eq!(tab1.map(|g| g.visible_floats.len()), Some(0));
+    }
+
+    #[test]
+    fn render_keeps_a_fully_pinned_hidden_layer_chipless() {
+        // Every hidden float pinned → all overlay, no chips.
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![TabInfo {
+            active: true,
+            are_floating_panes_visible: false,
+            ..tab(0, 1)
+        }];
+        state.panes.panes.insert(
+            0,
+            vec![content_pane(0, 1, 80, 24), floating_pane(7, 10, 5, 30, 10)],
+        );
+        state.pinned_by_tab = BTreeMap::from([(0usize, vec![7usize])]);
+
+        state.render(MIN_ROWS, 80);
+
+        let geom = state.tab_panes.get(&0);
+        assert_eq!(geom.map(|g| g.hidden_floats.len()), Some(0));
+        assert_eq!(geom.map(|g| g.visible_floats.len()), Some(1));
+    }
+
+    #[test]
+    fn a_visible_layer_ignores_pin_state() {
+        // Pin only changes hidden-layer classification: a visible layer keeps
+        // every float in the overlay exactly as before.
+        let mut state = State::default();
+        state.permitted = true;
+        state.tabs = vec![TabInfo {
+            active: true,
+            are_floating_panes_visible: true,
+            ..tab(0, 1)
+        }];
+        state.panes.panes.insert(
+            0,
+            vec![
+                content_pane(0, 1, 80, 24),
+                floating_pane(7, 10, 5, 30, 10),
+                floating_pane(9, 40, 8, 20, 6),
+            ],
+        );
+        state.pinned_by_tab = BTreeMap::from([(0usize, vec![7usize])]);
+
+        state.render(MIN_ROWS, 80);
+
+        let geom = state.tab_panes.get(&0);
+        assert_eq!(geom.map(|g| g.hidden_floats.len()), Some(0));
+        assert_eq!(geom.map(|g| g.visible_floats.len()), Some(2));
+    }
+
+    #[test]
+    fn pane_update_refreshes_pinned_without_a_host_panic_off_wasm() {
+        // The dump call is wasm-only (rule #17); the native seam returns None,
+        // so a PaneUpdate with floats must neither panic nor invent pins —
+        // and stale entries from a previous refresh are dropped.
+        let mut state = State::default();
+        state.pinned_by_tab = BTreeMap::from([(0usize, vec![7usize])]);
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(
+            0,
+            vec![content_pane(0, 1, 80, 24), floating_pane(7, 10, 5, 30, 10)],
+        );
+
+        assert!(state.update(Event::PaneUpdate(manifest)));
+        assert!(
+            state.pinned_by_tab.is_empty(),
+            "the native seam yields no dumps, so no pins survive a refresh"
+        );
+    }
+
+    #[test]
+    fn floating_off_clears_the_pinned_map() {
+        // With `floating = off` the bar depicts no floats — the refresh skips
+        // every dump and drops stale pin data.
+        let mut state = State::default();
+        state.config = Config {
+            floating: crate::floating::FloatingMode::Off,
+            ..Default::default()
+        };
+        state.pinned_by_tab = BTreeMap::from([(0usize, vec![7usize])]);
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(
+            0,
+            vec![content_pane(0, 1, 80, 24), floating_pane(7, 10, 5, 30, 10)],
+        );
+
+        assert!(state.update(Event::PaneUpdate(manifest)));
+        assert!(state.pinned_by_tab.is_empty());
     }
 }

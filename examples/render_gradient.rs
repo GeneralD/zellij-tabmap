@@ -67,6 +67,7 @@ fn main() {
                 true,
                 zellij_tabmap::floating::FloatLayer::None,
                 &[], // suppressed-pane covers — none in this sample
+                &[], // pinned-float ids — none in this sample
             )
         );
     }

@@ -45,6 +45,11 @@ const FLOAT_LABEL_MIN_INNER_WIDTH: usize = 4;
 /// (#120). A label is one text row (2px); the ring owns the top and bottom
 /// pixel, so 6px (3 text rows) is the smallest box with a fully-interior row.
 const FLOAT_LABEL_MIN_HEIGHT_PX: usize = 6;
+/// The pin-marker glyph stamped in a pinned float's top-right corner cell
+/// (#119): POSITION INDICATOR — standard Unicode, single display column, no
+/// Nerd Font dependency (matching ◲ / ◳ / ⋯). A visual parameter — retune
+/// freely after render checks; not a correctness constant.
+pub(crate) const PIN_MARKER_GLYPH: char = '⌖';
 /// The Nerd Font glyph stamped as a tab block's close affordance (#86). The
 /// Material Design `md-close_circle` (U+F0159) reads as a close control. It is
 /// drawn in alert red, one cell in from the block's right edge (#94) so a fill
@@ -956,6 +961,9 @@ pub fn float_pane_at_cell(
 /// only enables it on grid rungs wide enough to host it (see
 /// [`crate::tab_block::assemble`]) and records the matching click cell — at the
 /// same per-mode [`Close::right_offset`] — so a `LeftClick` there closes the tab.
+///
+/// `pinned_floats` lists the ids of overlay floats that are pinned (#119);
+/// each stamps a [`PIN_MARKER_GLYPH`] in its top-right corner cell.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     panes: &[PaneRect],
@@ -970,6 +978,7 @@ pub fn render(
     active: bool,
     floats: crate::floating::FloatLayer<'_>,
     suppressed_covers: &[usize],
+    pinned_floats: &[usize],
 ) -> String {
     let pw = cols;
     let ph = text_rows * 2;
@@ -986,6 +995,7 @@ pub fn render(
     // grid/boxes so the tiled `grid[i]`/`panes[i]` index space is never mixed.
     let float_rects: &[PaneRect] = match floats {
         crate::floating::FloatLayer::Visible(f) => f,
+        crate::floating::FloatLayer::Mixed { overlay, .. } => overlay,
         _ => &[],
     };
     let (float_grid, float_bounds) = if float_rects.is_empty() {
@@ -1080,6 +1090,26 @@ pub fn render(
         });
     }
 
+    // Pin markers (#119): a pinned float stamps one glyph in its top-right
+    // corner cell, the float-layer sibling of the suppressed marker's
+    // corner-cell vocabulary (#118). Only where the float itself owns both of
+    // the cell's pixels (an overlapping float on top keeps its own paint),
+    // and only when the box is at least two columns wide — a one-column float
+    // would be all marker. Each entry is (col, text_row, float index).
+    let pin_marks: Vec<(usize, usize, usize)> = float_bounds
+        .iter()
+        .enumerate()
+        .filter(|(i, b)| pinned_floats.contains(&float_rects[*i].id) && b.px1 - b.px0 >= 2)
+        .filter_map(|(i, b)| {
+            let col = b.px1 - 1;
+            let row = b.py0.div_ceil(2);
+            let owned = row < text_rows
+                && float_grid[2 * row * pw + col] == Some(i)
+                && float_grid[(2 * row + 1) * pw + col] == Some(i);
+            owned.then_some((col, row, i))
+        })
+        .collect();
+
     // The shortcut badge occupies the top text row's left cells, after a
     // one-cell margin, drawn over the underlying cell color — the pane fill, or
     // the focus ring where it sits on a focused pane's outline — so it reads
@@ -1147,6 +1177,7 @@ pub fn render(
     // chips (`chip_left`), the mirror of the top-row close-glyph `right_bound`.
     let chip_ids: &[usize] = match floats {
         crate::floating::FloatLayer::Hidden(ids) => ids,
+        crate::floating::FloatLayer::Mixed { chips, .. } => chips,
         _ => &[],
     };
     let chip_layout: Vec<(usize, crate::floating::Chip)> =
@@ -1481,6 +1512,28 @@ pub fn render(
                     continue;
                 }
             }
+            // A pinned float's corner pin (#119): bg the float's flat fill,
+            // fg its full-strength ring shade so the pin reads on both the
+            // ring and the fill — muted toward the fill on an inactive tab
+            // like every other glyph. The chip branch above already consumed
+            // its cells: a Mixed layer's chips own their corner over any
+            // overlay beneath (mirroring the router, which tries chips first).
+            if let Some(&(_, _, fi)) = pin_marks.iter().find(|(mc, mr, _)| *mc == c && *mr == tr) {
+                let fill = palette.color_for(float_rects[fi].id);
+                put_bg(&mut out, fill);
+                // `true` on purpose: the pin must read at full ring strength
+                // regardless of the float's focus, unlike the border — a
+                // pinned-but-unfocused float still needs its marker legible.
+                let base = palette.float_ring_for(float_rects[fi].id, true);
+                let pin_fg = if active {
+                    base
+                } else {
+                    crate::color::mixed(base, fill, INACTIVE_LABEL_BLEND)
+                };
+                put_fg(&mut out, pin_fg);
+                out.push(PIN_MARKER_GLYPH);
+                continue;
+            }
             // A float label (#120) is the top layer: it paints over its own
             // float's interior on a cell that float fully owns (verified at
             // placement), white (or muted toward the fill on an inactive tab,
@@ -1747,6 +1800,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         assert_eq!(out.lines().count(), 3);
     }
@@ -1777,6 +1831,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let lines: Vec<&str> = out.lines().collect();
@@ -1813,6 +1868,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(
@@ -1855,6 +1911,7 @@ mod tests {
             false,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 4);
@@ -1892,6 +1949,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let (r, g, b) = palette.color_for(1);
         assert!(
@@ -1915,6 +1973,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         assert!(out.contains("\x1b[38;2;"), "expected a truecolor fg escape");
         assert!(out.contains("\x1b[48;2;"), "expected a truecolor bg escape");
@@ -1936,6 +1995,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(
@@ -1966,6 +2026,7 @@ mod tests {
                 GradientSpec::OFF,
                 true,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             )
         };
@@ -2003,6 +2064,7 @@ mod tests {
                 true,
                 crate::floating::FloatLayer::None,
                 &[],
+                &[],
             )
             .is_empty()
         );
@@ -2019,6 +2081,7 @@ mod tests {
                 GradientSpec::OFF,
                 true,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             )
             .is_empty()
@@ -2045,6 +2108,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::Hidden(&hidden),
+            &[],
             &[],
         );
         assert!(out.contains(crate::floating::CHIP_GLYPH), "chips are drawn");
@@ -2077,6 +2141,7 @@ mod tests {
                 true,
                 floats,
                 &[],
+                &[],
             )
         };
         let empty: [usize; 0] = [];
@@ -2107,6 +2172,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::Visible(&floats),
+            &[],
             &[],
         );
         let float_fg = format!(
@@ -2148,6 +2214,7 @@ mod tests {
                 GradientSpec::OFF,
                 true,
                 crate::floating::FloatLayer::Visible(&floats),
+                &[],
                 &[],
             )
         };
@@ -2194,6 +2261,7 @@ mod tests {
                 true,
                 crate::floating::FloatLayer::None,
                 covers,
+                &[],
             )
         };
         let marker_fg = triple(palette.ring_for(3));
@@ -2240,6 +2308,7 @@ mod tests {
                 true,
                 floats,
                 &[3], // pane 3 covers a suppressed pane
+                &[],
             )
         };
 
@@ -2287,6 +2356,7 @@ mod tests {
                 true,
                 layer,
                 &[2], // pane 2 covers a suppressed pane
+                &[],
             )
         };
 
@@ -2326,6 +2396,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[3],
+            &[],
         );
         assert!(
             out.contains(crate::suppressed::SUPPRESSED_MARKER_GLYPH),
@@ -2522,6 +2593,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         let stripped = visible_lines(&out).join("\n");
         assert!(
@@ -2559,6 +2631,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         let fill = palette.color_for(0);
         let shaded = crate::color::mixed(fill, (0, 0, 0), FLOAT_SHADOW_BLEND);
@@ -2590,6 +2663,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let stripped = visible_lines(&out).join("\n");
@@ -2634,6 +2708,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert_eq!(out.lines().count(), 2);
@@ -2784,6 +2859,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         assert!(wide.contains('c'), "expected label text in a wide block");
         // Too narrow (cw < 4 after normalization): no label, only block glyphs.
@@ -2799,6 +2875,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(!narrow.contains('c'), "narrow block should drop the label");
@@ -2821,6 +2898,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(
@@ -2852,6 +2930,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         for ch in ['a', 'b', 'c'] {
@@ -2885,6 +2964,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(
@@ -2925,6 +3005,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         assert_eq!(
@@ -2963,6 +3044,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         assert_eq!(
@@ -2998,6 +3080,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let lines = visible_lines(&out);
@@ -3035,6 +3118,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let lines = visible_lines(&out);
@@ -3076,6 +3160,7 @@ mod tests {
                 GradientSpec::OFF,
                 true,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             );
             for line in visible_lines(&out) {
@@ -3145,6 +3230,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         // 6-column label centered in the 10-column inner span: 3 block cells
@@ -3187,6 +3273,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         // Both halves are emitted, centered by the 4-column char-sum width …
@@ -3227,6 +3314,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         assert!(
@@ -3265,6 +3353,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         assert!(wide.contains('⌘'), "wide block should host the badge");
         let narrow = render(
@@ -3279,6 +3368,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(
@@ -3308,6 +3398,7 @@ mod tests {
                 GradientSpec::OFF,
                 active,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             )
         };
@@ -3356,6 +3447,7 @@ mod tests {
                 GradientSpec::OFF,
                 active,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             )
         };
@@ -3415,6 +3507,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         assert!(
@@ -3449,6 +3542,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         assert!(
             !out.contains('符'),
@@ -3478,6 +3572,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
         assert!(out.contains(&fg(palette.color_for(1))));
@@ -3501,6 +3596,7 @@ mod tests {
             GradientSpec::SHEEN,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let base = fg(palette.color_for(1));
@@ -3532,6 +3628,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let fill = palette.color_for(1);
         let stop = crate::color::gradient_at(fill, 100);
@@ -3559,6 +3656,7 @@ mod tests {
             GradientSpec::SHEEN,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(out.starts_with(&fg(palette.color_for(1))));
@@ -3713,6 +3811,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let fill = palette.color_for(1);
         // size 2 → 4 px tall → an inclusive span of 3 pixels.
@@ -3757,6 +3856,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
         assert!(
@@ -3783,6 +3883,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let without = render(
             &one_plain(),
@@ -3796,6 +3897,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let with_top = with.lines().next().unwrap_or_default();
@@ -3825,6 +3927,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert_eq!(
@@ -3863,6 +3966,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let active_top = active.lines().next().unwrap_or_default();
         assert!(
@@ -3890,6 +3994,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let inactive_top = inactive.lines().next().unwrap_or_default();
@@ -3931,6 +4036,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         assert!(
@@ -3960,6 +4066,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let top = out.lines().next().unwrap_or_default();
         assert!(top.contains('⌘'), "badge survives alongside close: {top:?}");
@@ -3987,6 +4094,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let top: Vec<char> = visible_lines(&out)[0].chars().collect();
@@ -4016,6 +4124,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let top_line = out.lines().next().unwrap_or_default();
@@ -4060,6 +4169,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         assert!(
             out.contains('c') && out.contains('a') && out.contains('r'),
@@ -4088,6 +4198,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         // "cargo" summarizes to a command basename; none of its glyphs should
         // appear as a label on a box too small to hold one.
@@ -4115,6 +4226,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         assert!(out.contains("\x1b[1m"), "a focused float's label is bold");
     }
@@ -4141,6 +4253,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             crate::floating::FloatLayer::Visible(&floats),
+            &[],
             &[],
         );
         assert!(
@@ -4198,6 +4311,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         assert!(
             out.contains('c') && out.contains('g'),
@@ -4227,6 +4341,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         assert!(
             !out.contains('c') && !out.contains('g'),
@@ -4253,6 +4368,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::Visible(&floats),
+            &[],
             &[],
         );
         // Each line (minus the trailing reset) must be `pw` display columns wide.
@@ -4293,6 +4409,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         assert!(
             out.contains('c') && out.contains('g'),
@@ -4301,6 +4418,261 @@ mod tests {
         assert!(
             !out.contains('v'),
             "the occluded float (vim) does not bleed its label through"
+        );
+    }
+
+    #[test]
+    fn f_a_pinned_float_carries_the_corner_pin_marker() {
+        // A visible float on the block's right half, pinned: its top-right
+        // corner cell (col 23, row 0 at pw=24) carries the pin glyph. The
+        // same render without the pinned id must not.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 60, 0, 60, 40, "htop", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[9],
+        );
+        let top: Vec<char> = visible_lines(&out)[0].chars().collect();
+        assert_eq!(
+            top[23], PIN_MARKER_GLYPH,
+            "the pinned float's top-right corner carries the pin: {top:?}"
+        );
+
+        let unpinned = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[],
+        );
+        let top: Vec<char> = visible_lines(&unpinned)[0].chars().collect();
+        assert_ne!(top[23], PIN_MARKER_GLYPH, "no pin id → no marker: {top:?}");
+    }
+
+    #[test]
+    fn f_a_one_column_float_draws_no_pin_marker() {
+        // A float projecting to a single column would be all marker — the
+        // size gate keeps it color + ring only.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 115, 0, 5, 40, "f", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[9],
+        );
+        assert!(
+            !out.contains(PIN_MARKER_GLYPH),
+            "a 1-column float carries no pin marker"
+        );
+    }
+
+    #[test]
+    fn f_an_occluded_corner_draws_no_pin_marker() {
+        // A later (topmost) float covers the pinned float's top-right corner:
+        // the pinned float no longer owns that cell, so no marker — and the
+        // unpinned cover float draws none of its own.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [
+            PaneRect::new(9, 60, 0, 60, 40, "under", false),
+            PaneRect::new(5, 100, 0, 20, 40, "over", false),
+        ];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[9],
+        );
+        assert!(
+            !out.contains(PIN_MARKER_GLYPH),
+            "an occluded corner stamps no marker"
+        );
+    }
+
+    #[test]
+    fn f_mixed_layer_draws_chips_and_the_pinned_overlay_together() {
+        // A hidden layer with one pinned float (#119): the pinned float
+        // overlays (with its pin marker) while the other float chips into the
+        // bottom-right corner — and the chip keeps owning its cell even where
+        // the overlay covers it.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let overlay = [PaneRect::new(9, 60, 0, 60, 40, "htop", false)];
+        let chips = [7usize];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Mixed {
+                chips: &chips,
+                overlay: &overlay,
+            },
+            &[],
+            &[9],
+        );
+        let lines = visible_lines(&out);
+        let top: Vec<char> = lines[0].chars().collect();
+        let bottom: Vec<char> = lines[3].chars().collect();
+        assert_eq!(top[23], PIN_MARKER_GLYPH, "pinned overlay pin: {top:?}");
+        assert_eq!(
+            bottom[23],
+            crate::floating::CHIP_GLYPH,
+            "the unpinned float still chips, over the overlay: {bottom:?}"
+        );
+    }
+
+    #[test]
+    fn f_an_inactive_tab_still_pins_but_muted() {
+        // The pin cue applies on every tab; inactive tabs mute the glyph's fg
+        // toward the fill like every other glyph, but the marker stays.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 60, 0, 60, 40, "htop", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            false,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[9],
+        );
+        assert!(
+            out.contains(PIN_MARKER_GLYPH),
+            "inactive tabs keep the (muted) pin marker"
+        );
+    }
+
+    #[test]
+    fn f_the_pin_glyph_keeps_full_ring_strength_on_an_unfocused_float() {
+        // The pin's fg hardcodes `focused = true` into `float_ring_for` on
+        // purpose (unlike the border, which weakens for an unfocused float
+        // and legitimately paints that weaker shade elsewhere in this same
+        // output — so the assertion below pins the exact bg+fg pair
+        // immediately preceding the glyph itself, not a bare `contains` over
+        // the whole string). Same geometry as
+        // `f_a_pinned_float_carries_the_corner_pin_marker`, whose float is
+        // already unfocused (`focused: false`).
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 60, 0, 60, 40, "htop", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[9],
+        );
+        let fill = palette.color_for(9);
+        let full_strength = format!(
+            "{}{}{}",
+            bg(fill),
+            fg(palette.float_ring_for(9, true)),
+            PIN_MARKER_GLYPH
+        );
+        assert!(
+            out.contains(&full_strength),
+            "the pin glyph paints at full ring strength: {out:?}"
+        );
+        let weakened = format!(
+            "{}{}{}",
+            bg(fill),
+            fg(palette.float_ring_for(9, false)),
+            PIN_MARKER_GLYPH
+        );
+        assert!(
+            !out.contains(&weakened),
+            "the pin glyph must not weaken toward the unfocused ring shade: {out:?}"
+        );
+    }
+
+    #[test]
+    fn f_a_pinned_float_still_pins_under_a_perspective_inset() {
+        // Same tiled+float geometry as the corner-marker test, but with an
+        // inactive tab's perspective recede (`vinset = 1`): the marker row
+        // shifts with the inset band and must still land, not vanish.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 60, 0, 60, 40, "htop", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            1,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            false,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[9],
+        );
+        assert!(
+            out.contains(PIN_MARKER_GLYPH),
+            "the pin marker survives a perspective inset: {out:?}"
         );
     }
 }

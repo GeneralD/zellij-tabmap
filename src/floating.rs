@@ -9,11 +9,20 @@ use crate::minimap::PaneRect;
 /// - `None` — the tab has no floats, or `floating = off`: draw nothing extra.
 /// - `Hidden` — the layer is hidden: draw one corner chip per float id.
 /// - `Visible` — the layer is shown: overlay each float's rect on the grid (P3).
+/// - `Mixed` — the layer is hidden but some floats are pinned (#119): the
+///   pinned ones still overlay, the rest chip.
 #[derive(Clone, Copy, Debug)]
 pub enum FloatLayer<'a> {
     None,
     Hidden(&'a [usize]),
     Visible(&'a [PaneRect]),
+    /// A hidden layer whose pinned floats stay on screen (#119): zellij keeps
+    /// pinned floats rendered while the layer is hidden, so the bar overlays
+    /// them like a visible layer and chips only the rest.
+    Mixed {
+        chips: &'a [usize],
+        overlay: &'a [PaneRect],
+    },
 }
 
 /// Per-tab floating data captured at the render site (#110), turned into a
@@ -25,6 +34,11 @@ pub enum FloatSpec {
     None,
     Hidden(Vec<usize>),
     Visible(Vec<PaneRect>),
+    /// See [`FloatLayer::Mixed`] — the owned per-frame form (#119).
+    Mixed {
+        chips: Vec<usize>,
+        overlay: Vec<PaneRect>,
+    },
 }
 
 impl FloatSpec {
@@ -34,6 +48,7 @@ impl FloatSpec {
             FloatSpec::None => FloatLayer::None,
             FloatSpec::Hidden(ids) => FloatLayer::Hidden(ids),
             FloatSpec::Visible(rects) => FloatLayer::Visible(rects),
+            FloatSpec::Mixed { chips, overlay } => FloatLayer::Mixed { chips, overlay },
         }
     }
 }
@@ -257,5 +272,23 @@ mod tests {
             vec![0, 1, 2],
             "only the 3 shown float chips are selectable"
         );
+    }
+
+    #[test]
+    fn mixed_spec_borrows_both_chip_ids_and_overlay_rects() {
+        // A hidden layer with pinned floats (#119): the pinned ones overlay
+        // while the rest chip — one spec carries both halves.
+        let spec = FloatSpec::Mixed {
+            chips: vec![9],
+            overlay: vec![PaneRect::new(7, 30, 12, 60, 18, "f", false)],
+        };
+        match spec.layer() {
+            FloatLayer::Mixed { chips, overlay } => {
+                assert_eq!(chips, &[9]);
+                assert_eq!(overlay.len(), 1);
+                assert_eq!(overlay[0].id, 7);
+            }
+            _ => assert!(false, "Mixed spec must borrow as Mixed layer"),
+        }
     }
 }

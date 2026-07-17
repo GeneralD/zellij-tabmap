@@ -500,3 +500,40 @@ grant — no new permission (so no #15 freeze).
 suppress happens (#3) — `zellij action edit-scrollback` / `new-pane --in-place`
 land as no-ops on the plugin's `update()` until an `expect` PTY re-attaches
 (#4); the attach and the trigger must overlap in time.
+
+---
+
+## 20. Pin state is readable only via `dump_session_layout_for_tab`'s KDL string (verified 0.44.3)
+
+`PaneInfo` never carries a pane's pinned flag, and a pin toggle
+(`toggle-pane-pinned`) arrives as a `PaneUpdate` with **no field changed** —
+so pin state is invisible to the manifest and manifest-keyed caching misses
+every toggle. The one read path (#119):
+
+- `dump_session_layout_for_tab(tab_index)` needs only `ReadApplicationState`
+  (zellij's `check_command_permission` puts `DumpSessionLayout` in that arm) —
+  no new permission, so no #15 freeze. The `tab_index` argument is the 0-based
+  tab position — the same space as `TabInfo::position` and the `PaneManifest`
+  keys (the #119 spike passed manifest keys and each tab's dump correlated
+  with that tab's own manifest geometry).
+- The returned `LayoutMetadata` does NOT carry pinned — parse the KDL
+  **string**. Each float serializes under `tab > floating_panes > pane` with
+  bare-integer `height/width/x/y` child nodes and a `pinned true` child node
+  (absent when unpinned). Live `PaneGeom`s normalize to Fixed on placement
+  (`pane_size.rs::apply_floating_pane_position`), so percent values
+  effectively never occur in a live dump — defend anyway.
+- The dump's cell values equal `PaneInfo.pane_x/pane_y/pane_columns/pane_rows`
+  exactly (same cell space) — geometry is the join key back to pane ids (the
+  KDL carries no ids; identical rects are ambiguous, degrade gracefully).
+- The same document carries `swap_floating_layout` / `new_tab_template`
+  template blocks with their own `floating_panes` — scope parsing to blocks
+  under a `tab` node or you will ingest layout templates as live panes.
+- Hidden floats ARE included: `screen.rs::get_layout_metadata` iterates
+  `get_floating_panes()` unfiltered, and `hide_floating_panes` is just a tab
+  attribute. And zellij keeps **pinned floats rendered while the layer is
+  hidden** (`floating_panes/mod.rs::render` filters to `is_pinned` when
+  `!show_panes`; e2e snapshot `pin_floating_panes.snap`), so a bar can
+  truthfully keep overlaying them.
+- The shim reads its reply back from stdin — rule #17 applies: the call
+  panics off-wasm. Keep it behind a `#[cfg(test)]`-stubbed seam and inject
+  the parsed state in native tests.

@@ -530,11 +530,14 @@ impl State {
             return;
         }
         self.pinned_by_tab = self
-            .panes
-            .panes
+            .tabs
             .iter()
-            .filter(|(_, panes)| panes.iter().any(projection::is_floating_terminal))
-            .filter_map(|(&position, panes)| {
+            .map(|t| t.position)
+            .filter_map(|position| {
+                let panes = self.panes.panes.get(&position)?;
+                if !panes.iter().any(projection::is_floating_terminal) {
+                    return None;
+                }
                 let kdl = layout_dump_for_tab(position);
                 let floats = projection::project_floating(panes);
                 let ids = pinned::pinned_ids_for_tab(kdl.as_deref(), &floats)?;

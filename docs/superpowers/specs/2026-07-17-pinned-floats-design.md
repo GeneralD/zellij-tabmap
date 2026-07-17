@@ -54,7 +54,7 @@ pinned と通常のフロートを見分けられず、さらに **レイヤー 
 新モジュール `src/pinned.rs`（純粋関数のみ）:
 
 ```text
-parse_pinned_float_rects(kdl: &str) -> Vec<CellRect>
+pinned_float_rects(kdl: &str) -> Vec<CellRect>
 ```
 
 - KDL 文字列から `floating_panes` ブロック内の各 pane の
@@ -71,7 +71,7 @@ parse_pinned_float_rects(kdl: &str) -> Vec<CellRect>
 ### 3.3 相関 — ジオメトリ完全一致で id に pinned を付与
 
 ```text
-correlate_pinned(pinned_rects: &[CellRect], floats: &[(id, CellRect)]) -> HashSet<id>
+pinned_ids(pinned: &[CellRect], floats: &[PaneRect]) -> Vec<usize>
 ```
 
 - S4 の座標一致を根拠に、pinned 矩形と完全一致する manifest フロートの
@@ -90,8 +90,12 @@ correlate_pinned(pinned_rects: &[CellRect], floats: &[(id, CellRect)]) -> HashSe
   POSITION INDICATOR)、次点 `⚲` (U+26B2)、`◉` (U+25C9)。Nerd Font には
   依存しない（既存の ◲ ◳ ⋯ と同じ方針）。最終選定は実装時に実描画で
   確認して決める。
-- fg 色はラベルと同じ規則（アクティブタブは `ACTIVE_FG`、非アクティブ
-  タブはブレンド）で、全タブに適用する。
+- fg 色は**コーナーマーカー語彙**（#118 の suppressed マーカーと同族）:
+  ベースは `float_ring_for(id, true)` — フォーカス状態に依らず常に
+  全強度のリング色。bg はフロートの塗り。非アクティブタブは fg を
+  `INACTIVE_LABEL_BLEND` でブレンド。ラベルの `ACTIVE_FG` 規則は
+  適用しない（マーカーは「どのフロートか」を色で示す記号であり、
+  ラベルの可読性規則とは目的が異なる）。
 - **サイズゲート**: マーカーセルがフロートの内側に確保できない極小
   フロート（内側幅 < 2 セル等、閾値は実装時に確定）では黙って省略する。
   float ラベルの min サイズゲートと同じ流儀。
@@ -108,16 +112,17 @@ correlate_pinned(pinned_rects: &[CellRect], floats: &[(id, CellRect)]) -> HashSe
 - hidden 中でもオーバーレイとして描かれる pinned フロートは、実画面でも
   見えているので**ヒットテスト・ホイール対象としても可視フロートと同じ
   扱い**にする（クリックで `FocusFloatingPane(id)` — 既存 intent）。
-- **実装冒頭の検証ゲート**（eprintln oracle、トラップ #4 の手順）:
-  - V1: レイヤー hidden 時に pinned フロートが実画面に残ること（zellij
-    のドキュメント上の pin の定義だが、0.44.3 実機で未確認）。
-  - V2: hidden 状態のフロートが `dump_session_layout_for_tab` の KDL に
-    含まれること（スパイクは visible な pinned でのみ確認）。
-  - **V1 が否**（pinned もレイヤーごと消える）なら 3.5 は丸ごと落とし、
-    3.4 の cue のみ出荷する（issue の本来スコープは cue）。
-  - **V2 が否**（hidden フロートが dump に出ない）なら、可視時に相関した
-    pinned id 集合を hidden 遷移後も保持して使う（id はトラップ #18 の
-    通り hidden 中も有効）。
+- **検証結果**（2026-07-17、zellij v0.44.3 ソースの静的読解で確認済み）:
+  - V1 = **YES** — レイヤー hidden 時も pinned フロートは描画され続ける
+    （`floating_panes/mod.rs:438-447` が `!show_panes` 時に描画対象を
+    `is_pinned` のみへフィルタ。e2e スナップショット
+    `pin_floating_panes.snap` も同挙動を固定）。
+  - V2 = **YES** — hidden 状態のフロートも dump に含まれる
+    （`screen.rs::get_layout_metadata` は `get_floating_panes()` を
+    無フィルタで走査。`hide_floating_panes` はタブの KDL 属性になる
+    だけで float の列挙には影響しない）。
+  - いずれも YES のため、当初用意したフォールバック（V1 否なら 3.5 を
+    落とし cue のみ出荷 / V2 否なら可視時相関の保持で代替）は不要だった。
 
 ### 3.6 エラー処理・劣化
 

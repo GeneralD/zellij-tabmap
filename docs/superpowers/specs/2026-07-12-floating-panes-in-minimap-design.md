@@ -182,5 +182,5 @@ eprintln オラクル harness（`.claude/rules/zellij-plugin-development.md` §4
 ## 12. スコープ外 / 先送り
 
 - suppressed / background ペインの表示（§4 決定どおり今回は対象外）。
-- pinned フロートの区別スタイル（0.44.3 では読めない）。
+- pinned フロートの区別スタイル — その後 `dump_session_layout_for_tab` の KDL 経由で読めることが判明し、#119（[`2026-07-17-pinned-floats-design.md`](2026-07-17-pinned-floats-design.md)）で別途出荷。
 - オーバーレイ内のフロートラベル（面積不足）。

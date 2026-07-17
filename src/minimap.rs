@@ -956,6 +956,9 @@ pub fn float_pane_at_cell(
 /// only enables it on grid rungs wide enough to host it (see
 /// [`crate::tab_block::assemble`]) and records the matching click cell — at the
 /// same per-mode [`Close::right_offset`] — so a `LeftClick` there closes the tab.
+///
+/// `pinned_floats` lists the ids of overlay floats that are pinned (#119);
+/// each stamps a [`PIN_MARKER_GLYPH`] in its top-right corner cell (Task 5).
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     panes: &[PaneRect],
@@ -970,7 +973,9 @@ pub fn render(
     active: bool,
     floats: crate::floating::FloatLayer<'_>,
     suppressed_covers: &[usize],
+    pinned_floats: &[usize],
 ) -> String {
+    let _ = pinned_floats;
     let pw = cols;
     let ph = text_rows * 2;
     if pw == 0 || text_rows == 0 {
@@ -1747,6 +1752,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         assert_eq!(out.lines().count(), 3);
     }
@@ -1777,6 +1783,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let lines: Vec<&str> = out.lines().collect();
@@ -1813,6 +1820,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(
@@ -1855,6 +1863,7 @@ mod tests {
             false,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 4);
@@ -1892,6 +1901,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let (r, g, b) = palette.color_for(1);
         assert!(
@@ -1915,6 +1925,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         assert!(out.contains("\x1b[38;2;"), "expected a truecolor fg escape");
         assert!(out.contains("\x1b[48;2;"), "expected a truecolor bg escape");
@@ -1936,6 +1947,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(
@@ -1966,6 +1978,7 @@ mod tests {
                 GradientSpec::OFF,
                 true,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             )
         };
@@ -2003,6 +2016,7 @@ mod tests {
                 true,
                 crate::floating::FloatLayer::None,
                 &[],
+                &[],
             )
             .is_empty()
         );
@@ -2019,6 +2033,7 @@ mod tests {
                 GradientSpec::OFF,
                 true,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             )
             .is_empty()
@@ -2045,6 +2060,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::Hidden(&hidden),
+            &[],
             &[],
         );
         assert!(out.contains(crate::floating::CHIP_GLYPH), "chips are drawn");
@@ -2077,6 +2093,7 @@ mod tests {
                 true,
                 floats,
                 &[],
+                &[],
             )
         };
         let empty: [usize; 0] = [];
@@ -2107,6 +2124,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::Visible(&floats),
+            &[],
             &[],
         );
         let float_fg = format!(
@@ -2148,6 +2166,7 @@ mod tests {
                 GradientSpec::OFF,
                 true,
                 crate::floating::FloatLayer::Visible(&floats),
+                &[],
                 &[],
             )
         };
@@ -2194,6 +2213,7 @@ mod tests {
                 true,
                 crate::floating::FloatLayer::None,
                 covers,
+                &[],
             )
         };
         let marker_fg = triple(palette.ring_for(3));
@@ -2240,6 +2260,7 @@ mod tests {
                 true,
                 floats,
                 &[3], // pane 3 covers a suppressed pane
+                &[],
             )
         };
 
@@ -2287,6 +2308,7 @@ mod tests {
                 true,
                 layer,
                 &[2], // pane 2 covers a suppressed pane
+                &[],
             )
         };
 
@@ -2326,6 +2348,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[3],
+            &[],
         );
         assert!(
             out.contains(crate::suppressed::SUPPRESSED_MARKER_GLYPH),
@@ -2522,6 +2545,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         let stripped = visible_lines(&out).join("\n");
         assert!(
@@ -2559,6 +2583,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         let fill = palette.color_for(0);
         let shaded = crate::color::mixed(fill, (0, 0, 0), FLOAT_SHADOW_BLEND);
@@ -2590,6 +2615,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let stripped = visible_lines(&out).join("\n");
@@ -2634,6 +2660,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert_eq!(out.lines().count(), 2);
@@ -2784,6 +2811,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         assert!(wide.contains('c'), "expected label text in a wide block");
         // Too narrow (cw < 4 after normalization): no label, only block glyphs.
@@ -2799,6 +2827,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(!narrow.contains('c'), "narrow block should drop the label");
@@ -2821,6 +2850,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(
@@ -2852,6 +2882,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         for ch in ['a', 'b', 'c'] {
@@ -2885,6 +2916,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(
@@ -2925,6 +2957,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         assert_eq!(
@@ -2963,6 +2996,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         assert_eq!(
@@ -2998,6 +3032,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let lines = visible_lines(&out);
@@ -3035,6 +3070,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let lines = visible_lines(&out);
@@ -3076,6 +3112,7 @@ mod tests {
                 GradientSpec::OFF,
                 true,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             );
             for line in visible_lines(&out) {
@@ -3145,6 +3182,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         // 6-column label centered in the 10-column inner span: 3 block cells
@@ -3187,6 +3225,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         // Both halves are emitted, centered by the 4-column char-sum width …
@@ -3227,6 +3266,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         assert!(
@@ -3265,6 +3305,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         assert!(wide.contains('⌘'), "wide block should host the badge");
         let narrow = render(
@@ -3279,6 +3320,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(
@@ -3308,6 +3350,7 @@ mod tests {
                 GradientSpec::OFF,
                 active,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             )
         };
@@ -3356,6 +3399,7 @@ mod tests {
                 GradientSpec::OFF,
                 active,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             )
         };
@@ -3415,6 +3459,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         assert!(
@@ -3449,6 +3494,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         assert!(
             !out.contains('符'),
@@ -3478,6 +3524,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
         assert!(out.contains(&fg(palette.color_for(1))));
@@ -3501,6 +3548,7 @@ mod tests {
             GradientSpec::SHEEN,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let base = fg(palette.color_for(1));
@@ -3532,6 +3580,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let fill = palette.color_for(1);
         let stop = crate::color::gradient_at(fill, 100);
@@ -3559,6 +3608,7 @@ mod tests {
             GradientSpec::SHEEN,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert!(out.starts_with(&fg(palette.color_for(1))));
@@ -3713,6 +3763,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let fill = palette.color_for(1);
         // size 2 → 4 px tall → an inclusive span of 3 pixels.
@@ -3757,6 +3808,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let stop = fg(crate::color::gradient_at(palette.color_for(1), 100));
         assert!(
@@ -3783,6 +3835,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let without = render(
             &one_plain(),
@@ -3796,6 +3849,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let with_top = with.lines().next().unwrap_or_default();
@@ -3825,6 +3879,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         assert_eq!(
@@ -3863,6 +3918,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let active_top = active.lines().next().unwrap_or_default();
         assert!(
@@ -3890,6 +3946,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let inactive_top = inactive.lines().next().unwrap_or_default();
@@ -3931,6 +3988,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let lines = visible_lines(&out);
         assert!(
@@ -3960,6 +4018,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let top = out.lines().next().unwrap_or_default();
         assert!(top.contains('⌘'), "badge survives alongside close: {top:?}");
@@ -3987,6 +4046,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let top: Vec<char> = visible_lines(&out)[0].chars().collect();
@@ -4016,6 +4076,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         let top_line = out.lines().next().unwrap_or_default();
@@ -4060,6 +4121,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         assert!(
             out.contains('c') && out.contains('a') && out.contains('r'),
@@ -4088,6 +4150,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         // "cargo" summarizes to a command basename; none of its glyphs should
         // appear as a label on a box too small to hold one.
@@ -4115,6 +4178,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         assert!(out.contains("\x1b[1m"), "a focused float's label is bold");
     }
@@ -4141,6 +4205,7 @@ mod tests {
             GradientSpec::OFF,
             false,
             crate::floating::FloatLayer::Visible(&floats),
+            &[],
             &[],
         );
         assert!(
@@ -4198,6 +4263,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         assert!(
             out.contains('c') && out.contains('g'),
@@ -4227,6 +4293,7 @@ mod tests {
             true,
             crate::floating::FloatLayer::Visible(&floats),
             &[],
+            &[],
         );
         assert!(
             !out.contains('c') && !out.contains('g'),
@@ -4253,6 +4320,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::Visible(&floats),
+            &[],
             &[],
         );
         // Each line (minus the trailing reset) must be `pw` display columns wide.
@@ -4292,6 +4360,7 @@ mod tests {
             GradientSpec::OFF,
             true,
             crate::floating::FloatLayer::Visible(&floats),
+            &[],
             &[],
         );
         assert!(

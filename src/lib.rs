@@ -380,6 +380,9 @@ impl ZellijPlugin for State {
                 // manifest + each tab's `are_floating_panes_visible`).
                 &floats_by_position,
                 &suppressed_covers_by_position,
+                // Pinned-float ids (#119): wired to live state in Task 6; empty
+                // here keeps this an intermediate no-behavior-change commit.
+                &BTreeMap::new(),
             )
         );
 

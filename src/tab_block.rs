@@ -169,6 +169,7 @@ pub fn assemble(
     close: Close,
     floats: crate::floating::FloatLayer<'_>,
     suppressed_covers: &[usize],
+    pinned_floats: &[usize],
 ) -> TabBlock {
     // Pixel rows of background to inset top and bottom of the minimap canvas: one
     // (a half text row) for an inactive block in perspective mode at ≥4 rows,
@@ -196,6 +197,7 @@ pub fn assemble(
             active,
             floats,
             suppressed_covers,
+            pinned_floats,
         ),
         Level::L1 => grid_lines(
             panes,
@@ -210,6 +212,7 @@ pub fn assemble(
             active,
             floats,
             suppressed_covers,
+            pinned_floats,
         ),
         Level::L2 => grid_lines(
             panes,
@@ -224,6 +227,7 @@ pub fn assemble(
             active,
             floats,
             suppressed_covers,
+            pinned_floats,
         ),
         // The narrow rungs (L3 glyph, L4 hint) have no room for a close "×" — it
         // degrades away with the label and grid, so `close` is unused here (#86).
@@ -312,6 +316,7 @@ fn grid_lines(
     active: bool,
     floats: crate::floating::FloatLayer<'_>,
     suppressed_covers: &[usize],
+    pinned_floats: &[usize],
 ) -> Vec<StyledLine> {
     let block = minimap::render(
         panes,
@@ -326,6 +331,7 @@ fn grid_lines(
         active,
         floats,
         suppressed_covers,
+        pinned_floats,
     );
     padded_rows(block.lines().map(str::to_string), width, rows)
 }
@@ -610,6 +616,7 @@ mod tests {
             Close::Off,
             crate::floating::FloatLayer::Hidden(&hidden),
             &[],
+            &[],
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(
@@ -689,6 +696,7 @@ mod tests {
                     Close::Off,
                     crate::floating::FloatLayer::None,
                     &[],
+                    &[],
                 );
                 assert_eq!(
                     block.lines.len(),
@@ -751,6 +759,7 @@ mod tests {
                         Close::Off,
                         crate::floating::FloatLayer::None,
                         &[],
+                        &[],
                     );
                     for (row, line) in block.lines.iter().enumerate() {
                         assert_eq!(
@@ -785,6 +794,7 @@ mod tests {
                 perspective,
                 Close::Off,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             )
             .lines
@@ -821,6 +831,7 @@ mod tests {
                 perspective,
                 Close::Off,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             )
             .lines
@@ -870,6 +881,7 @@ mod tests {
             Close::Off,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         for line in &block.lines {
             assert_eq!(measured(line), 2);
@@ -898,6 +910,7 @@ mod tests {
             false,
             Close::Off,
             crate::floating::FloatLayer::None,
+            &[],
             &[],
         );
         for line in &block.lines {
@@ -932,6 +945,7 @@ mod tests {
             Close::Off,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         for line in &block.lines {
             for ch in ['a', 'b', 'c'] {
@@ -965,6 +979,7 @@ mod tests {
             Close::Off,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(joined.contains('a'), "focused pane's label should appear");
@@ -997,6 +1012,7 @@ mod tests {
             Close::Off,
             crate::floating::FloatLayer::None,
             &[],
+            &[],
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(
@@ -1024,6 +1040,7 @@ mod tests {
                 false,
                 Close::Off,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             )
             .lines
@@ -1099,6 +1116,7 @@ mod tests {
                     Close::Off,
                     crate::floating::FloatLayer::None,
                     &[],
+                    &[],
                 )
                 .lines[1]
                     .as_str()
@@ -1136,6 +1154,7 @@ mod tests {
                 Close::Off,
                 crate::floating::FloatLayer::None,
                 &[],
+                &[],
             );
             let second = assemble(
                 &panes,
@@ -1149,6 +1168,7 @@ mod tests {
                 false,
                 Close::Off,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             );
             assert_eq!(first, second, "width {width} must render identically");
@@ -1182,6 +1202,7 @@ mod tests {
                 Close::Off,
                 crate::floating::FloatLayer::None,
                 &[],
+                &[],
             );
             let b = assemble(
                 &reversed,
@@ -1195,6 +1216,7 @@ mod tests {
                 false,
                 Close::Off,
                 crate::floating::FloatLayer::None,
+                &[],
                 &[],
             );
             assert_eq!(

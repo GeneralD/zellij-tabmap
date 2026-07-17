@@ -326,10 +326,9 @@ impl ZellijPlugin for State {
                         // screen (#119) — zellij renders pinned floats while
                         // the layer is hidden — so they keep overlaying and
                         // only the rest fold into chips.
-                        let pinned = self.pinned_by_tab.get(&hit.position);
                         let (overlay, chipped): (Vec<_>, Vec<_>) = floats
                             .into_iter()
-                            .partition(|f| pinned.is_some_and(|ids| ids.contains(&f.id)));
+                            .partition(|f| self.is_pinned(hit.position, f.id));
                         let chips = chipped.into_iter().map(|f| f.id).collect();
                         if overlay.is_empty() {
                             floating::FloatSpec::Hidden(chips)
@@ -592,10 +591,10 @@ impl State {
     /// Whether float `id` in the tab at `position` is pinned (#119). Pinned
     /// floats stay on the real screen while their layer is hidden, so the
     /// wheel and the focus anchor treat them as visible.
-    fn is_pinned(&self, position: usize, id: u32) -> bool {
+    fn is_pinned(&self, position: usize, id: usize) -> bool {
         self.pinned_by_tab
             .get(&position)
-            .is_some_and(|ids| ids.contains(&(id as usize)))
+            .is_some_and(|ids| ids.contains(&id))
     }
 
     /// The id of the focused terminal pane in the active tab that the wheel can
@@ -614,7 +613,7 @@ impl State {
                 projection::is_tiled_terminal(pane)
                     || (projection::is_floating_terminal(pane)
                         && (active.are_floating_panes_visible
-                            || self.is_pinned(active.position, pane.id)))
+                            || self.is_pinned(active.position, pane.id as usize)))
             })
             .find(|pane| pane.is_focused)
             .map(|pane| pane.id)
@@ -651,8 +650,7 @@ impl State {
                         projection::project_floating(p)
                             .into_iter()
                             .filter(|f| {
-                                tab.are_floating_panes_visible
-                                    || self.is_pinned(tab.position, f.id as u32)
+                                tab.are_floating_panes_visible || self.is_pinned(tab.position, f.id)
                             })
                             .map(|f| f.id as u32),
                     );
@@ -1696,6 +1694,32 @@ mod tests {
         }
         state.pinned_by_tab = BTreeMap::from([(1usize, vec![25usize])]);
         assert_eq!(state.pane_focus_order(), vec![10, 20, 30, 25]);
+    }
+
+    #[test]
+    fn pane_focus_order_skips_an_unpinned_float_beside_a_pinned_one() {
+        // Tab 1's hidden layer holds floats 25 and 26 but only 26 is pinned —
+        // the map entry gates per float id, not per tab, so 25 stays
+        // chip-only while 26 joins the walk.
+        let mut state = scroll_state(scroll::ScrollMode::Pane, Some(10));
+        if let Some(panes) = state.panes.panes.get_mut(&1) {
+            panes.push(PaneInfo {
+                id: 25,
+                is_floating: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+            panes.push(PaneInfo {
+                id: 26,
+                is_floating: true,
+                pane_x: 60,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
+        state.pinned_by_tab = BTreeMap::from([(1usize, vec![26usize])]);
+        assert_eq!(state.pane_focus_order(), vec![10, 20, 30, 26]);
     }
 
     #[test]

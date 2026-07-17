@@ -11,6 +11,7 @@ pub mod floating;
 pub mod line;
 pub mod minimap;
 pub mod paint;
+pub mod pinned;
 pub mod projection;
 pub(crate) mod router;
 pub mod scroll;

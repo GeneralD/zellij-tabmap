@@ -589,11 +589,21 @@ impl State {
         focus_terminal_pane(target, false, false);
     }
 
+    /// Whether float `id` in the tab at `position` is pinned (#119). Pinned
+    /// floats stay on the real screen while their layer is hidden, so the
+    /// wheel and the focus anchor treat them as visible.
+    fn is_pinned(&self, position: usize, id: u32) -> bool {
+        self.pinned_by_tab
+            .get(&position)
+            .is_some_and(|ids| ids.contains(&(id as usize)))
+    }
+
     /// The id of the focused terminal pane in the active tab that the wheel can
     /// step from in `pane` mode, if any — a tiled pane, or a floating one while
-    /// its layer is visible. The floating case mirrors `pane_focus_order`, which
-    /// appends visible floats: without it, wheeling from a focused float would
-    /// find no anchor in the order and stall (#80/#110).
+    /// its layer is visible or it is pinned. The floating case mirrors
+    /// `pane_focus_order`, which appends visible and pinned floats: without it,
+    /// wheeling from a focused float would find no anchor in the order and
+    /// stall (#80/#110/#119).
     fn focused_pane_id(&self) -> Option<u32> {
         let active = projection::active_tab(&self.tabs)?;
         self.panes
@@ -602,7 +612,9 @@ impl State {
             .iter()
             .filter(|pane| {
                 projection::is_tiled_terminal(pane)
-                    || (active.are_floating_panes_visible && projection::is_floating_terminal(pane))
+                    || (projection::is_floating_terminal(pane)
+                        && (active.are_floating_panes_visible
+                            || self.is_pinned(active.position, pane.id)))
             })
             .find(|pane| pane.is_focused)
             .map(|pane| pane.id)
@@ -610,8 +622,9 @@ impl State {
 
     /// Every tab's panes flattened into one wheel-traversal order: tabs in
     /// ascending position, and within each tab its tiled panes in reading order
-    /// followed by — only when that tab's floating layer is currently visible —
-    /// its floating panes (#80, #110).
+    /// followed by its floating panes that are on the real screen — all of them
+    /// when the tab's floating layer is visible, only the pinned ones while it
+    /// is hidden (#80, #110, #119).
     ///
     /// Tab order comes from the authoritative `self.tabs`, not the `PaneManifest`
     /// keys: `TabUpdate` and `PaneUpdate` arrive as separate events, so a just-
@@ -619,9 +632,11 @@ impl State {
     /// `self.tabs` drops those, so the wheel never steps into a pane of a tab that
     /// no longer exists.
     ///
-    /// A *hidden* float is deliberately excluded — it is reached only via its
-    /// corner chip (#110), never the wheel, so wheeling never pops a hidden layer
-    /// open (auto-hide-agnostic; the P0-3 spike left auto-hide unconfirmed).
+    /// A hidden *unpinned* float is deliberately excluded — it is reached only
+    /// via its corner chip (#110), never the wheel, so wheeling never pops a
+    /// hidden layer open (auto-hide-agnostic; the P0-3 spike left auto-hide
+    /// unconfirmed). A pinned float stays on the real screen while its layer is
+    /// hidden (#119), so it walks like a visible one.
     fn pane_focus_order(&self) -> Vec<u32> {
         let mut tabs: Vec<&TabInfo> = self.tabs.iter().collect();
         tabs.sort_by_key(|tab| tab.position);
@@ -631,14 +646,16 @@ impl State {
                 let mut order: Vec<u32> = panes
                     .map(|p| projection::pane_ids_in_reading_order(p))
                     .unwrap_or_default();
-                if tab.are_floating_panes_visible {
-                    if let Some(p) = panes {
-                        order.extend(
-                            projection::project_floating(p)
-                                .into_iter()
-                                .map(|f| f.id as u32),
-                        );
-                    }
+                if let Some(p) = panes {
+                    order.extend(
+                        projection::project_floating(p)
+                            .into_iter()
+                            .filter(|f| {
+                                tab.are_floating_panes_visible
+                                    || self.is_pinned(tab.position, f.id as u32)
+                            })
+                            .map(|f| f.id as u32),
+                    );
                 }
                 order
             })
@@ -1590,6 +1607,26 @@ mod tests {
     }
 
     #[test]
+    fn focused_pane_id_resolves_a_focused_hidden_pinned_float() {
+        // Mirrors `focused_pane_id_ignores_a_focused_float_while_the_layer_is
+        // _hidden`, but pinned: the float is on screen, so it anchors the
+        // wheel even while its layer is hidden.
+        let mut state = scroll_state(scroll::ScrollMode::Pane, None);
+        if let Some(panes) = state.panes.panes.get_mut(&0) {
+            panes.push(PaneInfo {
+                id: 15,
+                is_floating: true,
+                is_focused: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
+        state.pinned_by_tab = BTreeMap::from([(0usize, vec![15usize])]);
+        assert_eq!(state.focused_pane_id(), Some(15));
+    }
+
+    #[test]
     fn pane_focus_order_flattens_tabs_then_reading_order() {
         // Tabs in ascending position, panes in reading order within each: tab 0's
         // 10 (x=0) then 20 (x=40), then tab 1's 30 — the global wheel traversal.
@@ -1640,6 +1677,25 @@ mod tests {
             });
         }
         assert_eq!(state.pane_focus_order(), vec![10, 20, 15, 30]);
+    }
+
+    #[test]
+    fn pane_focus_order_includes_a_hidden_layers_pinned_float() {
+        // Tab 1's layer is hidden but its float 25 is pinned — it is on the
+        // real screen (#119), so the wheel walks it; the unpinned hidden
+        // float case stays excluded (pinned_by_tab carries no entry for it).
+        let mut state = scroll_state(scroll::ScrollMode::Pane, Some(10));
+        if let Some(panes) = state.panes.panes.get_mut(&1) {
+            panes.push(PaneInfo {
+                id: 25,
+                is_floating: true,
+                pane_x: 5,
+                pane_y: 5,
+                ..Default::default()
+            });
+        }
+        state.pinned_by_tab = BTreeMap::from([(1usize, vec![25usize])]);
+        assert_eq!(state.pane_focus_order(), vec![10, 20, 30, 25]);
     }
 
     #[test]

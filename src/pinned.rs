@@ -286,6 +286,73 @@ mod tests {
         assert!(pinned_float_rects(missing).is_empty());
     }
 
+    #[test]
+    fn two_pinned_floats_in_the_same_tab_are_both_captured() {
+        // Guards the accumulator reset: `current.take()` on the first
+        // float's closing `}` must hand back a fresh `FloatFields` for the
+        // second, or its fields would bleed into (or be shadowed by) the
+        // first's.
+        let kdl = r#"layout {
+    tab name="t" {
+        pane
+        floating_panes {
+            pane command="htop" {
+                height 18
+                width 60
+                x 30
+                y 12
+                pinned true
+            }
+            pane command="btm" {
+                height 6
+                width 20
+                x 90
+                y 30
+                pinned true
+            }
+        }
+    }
+}"#;
+        assert_eq!(
+            pinned_float_rects(kdl),
+            vec![
+                CellRect {
+                    x: 30,
+                    y: 12,
+                    w: 60,
+                    h: 18
+                },
+                CellRect {
+                    x: 90,
+                    y: 30,
+                    w: 20,
+                    h: 6
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_explicit_pinned_false_line_is_treated_as_unpinned() {
+        // A distinct path from a missing coordinate: geometry is complete,
+        // but an explicit `pinned false` line still excludes the float.
+        let kdl = r#"layout {
+    tab name="t" {
+        pane
+        floating_panes {
+            pane {
+                height 18
+                width 60
+                x 30
+                y 12
+                pinned false
+            }
+        }
+    }
+}"#;
+        assert!(pinned_float_rects(kdl).is_empty());
+    }
+
     /// A manifest float as the projection produces it (id + cell geometry).
     fn float(id: usize, x: u32, y: u32, w: u32, h: u32) -> PaneRect {
         PaneRect::new(id, x, y, w, h, "f", false)

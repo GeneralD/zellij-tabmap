@@ -45,6 +45,11 @@ const FLOAT_LABEL_MIN_INNER_WIDTH: usize = 4;
 /// (#120). A label is one text row (2px); the ring owns the top and bottom
 /// pixel, so 6px (3 text rows) is the smallest box with a fully-interior row.
 const FLOAT_LABEL_MIN_HEIGHT_PX: usize = 6;
+/// The pin-marker glyph stamped in a pinned float's top-right corner cell
+/// (#119): POSITION INDICATOR — standard Unicode, single display column, no
+/// Nerd Font dependency (matching ◲ / ◳ / ⋯). A visual parameter — retune
+/// freely after render checks; not a correctness constant.
+pub(crate) const PIN_MARKER_GLYPH: char = '⌖';
 /// The Nerd Font glyph stamped as a tab block's close affordance (#86). The
 /// Material Design `md-close_circle` (U+F0159) reads as a close control. It is
 /// drawn in alert red, one cell in from the block's right edge (#94) so a fill
@@ -958,7 +963,7 @@ pub fn float_pane_at_cell(
 /// same per-mode [`Close::right_offset`] — so a `LeftClick` there closes the tab.
 ///
 /// `pinned_floats` lists the ids of overlay floats that are pinned (#119);
-/// each stamps a `PIN_MARKER_GLYPH` in its top-right corner cell (Task 5).
+/// each stamps a [`PIN_MARKER_GLYPH`] in its top-right corner cell.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     panes: &[PaneRect],
@@ -975,9 +980,6 @@ pub fn render(
     suppressed_covers: &[usize],
     pinned_floats: &[usize],
 ) -> String {
-    // Consumed by the pin marker in the next step (#119); kept so the
-    // threaded parameter survives this no-behavior commit.
-    let _ = pinned_floats;
     let pw = cols;
     let ph = text_rows * 2;
     if pw == 0 || text_rows == 0 {
@@ -1087,6 +1089,26 @@ pub fn render(
             });
         });
     }
+
+    // Pin markers (#119): a pinned float stamps one glyph in its top-right
+    // corner cell, the float-layer sibling of the suppressed marker's
+    // corner-cell vocabulary (#118). Only where the float itself owns both of
+    // the cell's pixels (an overlapping float on top keeps its own paint),
+    // and only when the box is at least two columns wide — a one-column float
+    // would be all marker. Each entry is (col, text_row, float index).
+    let pin_marks: Vec<(usize, usize, usize)> = float_bounds
+        .iter()
+        .enumerate()
+        .filter(|(i, b)| pinned_floats.contains(&float_rects[*i].id) && b.px1 - b.px0 >= 2)
+        .filter_map(|(i, b)| {
+            let col = b.px1 - 1;
+            let row = b.py0.div_ceil(2);
+            let owned = row < text_rows
+                && float_grid[2 * row * pw + col] == Some(i)
+                && float_grid[(2 * row + 1) * pw + col] == Some(i);
+            owned.then_some((col, row, i))
+        })
+        .collect();
 
     // The shortcut badge occupies the top text row's left cells, after a
     // one-cell margin, drawn over the underlying cell color — the pane fill, or
@@ -1489,6 +1511,25 @@ pub fn render(
                     out.push(crate::suppressed::SUPPRESSED_MARKER_GLYPH);
                     continue;
                 }
+            }
+            // A pinned float's corner pin (#119): bg the float's flat fill,
+            // fg its full-strength ring shade so the pin reads on both the
+            // ring and the fill — muted toward the fill on an inactive tab
+            // like every other glyph. The chip branch above already consumed
+            // its cells: a Mixed layer's chips own their corner over any
+            // overlay beneath (mirroring the router, which tries chips first).
+            if let Some(&(_, _, fi)) = pin_marks.iter().find(|(mc, mr, _)| *mc == c && *mr == tr) {
+                let fill = palette.color_for(float_rects[fi].id);
+                put_bg(&mut out, fill);
+                let base = palette.float_ring_for(float_rects[fi].id, true);
+                let pin_fg = if active {
+                    base
+                } else {
+                    crate::color::mixed(base, fill, INACTIVE_LABEL_BLEND)
+                };
+                put_fg(&mut out, pin_fg);
+                out.push(PIN_MARKER_GLYPH);
+                continue;
             }
             // A float label (#120) is the top layer: it paints over its own
             // float's interior on a cell that float fully owns (verified at
@@ -4374,6 +4415,181 @@ mod tests {
         assert!(
             !out.contains('v'),
             "the occluded float (vim) does not bleed its label through"
+        );
+    }
+
+    #[test]
+    fn f_a_pinned_float_carries_the_corner_pin_marker() {
+        // A visible float on the block's right half, pinned: its top-right
+        // corner cell (col 23, row 0 at pw=24) carries the pin glyph. The
+        // same render without the pinned id must not.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 60, 0, 60, 40, "htop", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[9],
+        );
+        let top: Vec<char> = visible_lines(&out)[0].chars().collect();
+        assert_eq!(
+            top[23], PIN_MARKER_GLYPH,
+            "the pinned float's top-right corner carries the pin: {top:?}"
+        );
+
+        let unpinned = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[],
+        );
+        let top: Vec<char> = visible_lines(&unpinned)[0].chars().collect();
+        assert_ne!(top[23], PIN_MARKER_GLYPH, "no pin id → no marker: {top:?}");
+    }
+
+    #[test]
+    fn f_a_one_column_float_draws_no_pin_marker() {
+        // A float projecting to a single column would be all marker — the
+        // size gate keeps it color + ring only.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 115, 0, 5, 40, "f", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[9],
+        );
+        assert!(
+            !out.contains(PIN_MARKER_GLYPH),
+            "a 1-column float carries no pin marker"
+        );
+    }
+
+    #[test]
+    fn f_an_occluded_corner_draws_no_pin_marker() {
+        // A later (topmost) float covers the pinned float's top-right corner:
+        // the pinned float no longer owns that cell, so no marker — and the
+        // unpinned cover float draws none of its own.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [
+            PaneRect::new(9, 60, 0, 60, 40, "under", false),
+            PaneRect::new(5, 100, 0, 20, 40, "over", false),
+        ];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[9],
+        );
+        assert!(
+            !out.contains(PIN_MARKER_GLYPH),
+            "an occluded corner stamps no marker"
+        );
+    }
+
+    #[test]
+    fn f_mixed_layer_draws_chips_and_the_pinned_overlay_together() {
+        // A hidden layer with one pinned float (#119): the pinned float
+        // overlays (with its pin marker) while the other float chips into the
+        // bottom-right corner — and the chip keeps owning its cell even where
+        // the overlay covers it.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let overlay = [PaneRect::new(9, 60, 0, 60, 40, "htop", false)];
+        let chips = [7usize];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Mixed {
+                chips: &chips,
+                overlay: &overlay,
+            },
+            &[],
+            &[9],
+        );
+        let lines = visible_lines(&out);
+        let top: Vec<char> = lines[0].chars().collect();
+        let bottom: Vec<char> = lines[3].chars().collect();
+        assert_eq!(top[23], PIN_MARKER_GLYPH, "pinned overlay pin: {top:?}");
+        assert_eq!(
+            bottom[23],
+            crate::floating::CHIP_GLYPH,
+            "the unpinned float still chips, over the overlay: {bottom:?}"
+        );
+    }
+
+    #[test]
+    fn f_an_inactive_tab_still_pins_but_muted() {
+        // The pin cue applies on every tab; inactive tabs mute the glyph's fg
+        // toward the fill like every other glyph, but the marker stays.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 60, 0, 60, 40, "htop", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            false,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[9],
+        );
+        assert!(
+            out.contains(PIN_MARKER_GLYPH),
+            "inactive tabs keep the (muted) pin marker"
         );
     }
 }

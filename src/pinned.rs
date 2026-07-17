@@ -131,6 +131,24 @@ fn in_float_pane(stack: &[String]) -> bool {
     n >= 3 && stack[n - 1] == "pane" && stack[n - 2] == "floating_panes" && stack[n - 3] == "tab"
 }
 
+/// The ids of the manifest floats whose cell geometry exactly matches a
+/// pinned rect from the dump — the dump carries no pane ids, so geometry is
+/// the join key (both sides report the same tab-relative cell space). Every
+/// float matching a pinned rect is returned: two floats sharing an exact
+/// rect are indistinguishable, and an extra pin cue on the twin is the
+/// harmless reading of that ambiguity.
+pub fn pinned_ids(pinned: &[CellRect], floats: &[PaneRect]) -> Vec<usize> {
+    floats
+        .iter()
+        .filter(|f| {
+            pinned.iter().any(|r| {
+                (r.x, r.y, r.w, r.h) == (f.x as usize, f.y as usize, f.w as usize, f.h as usize)
+            })
+        })
+        .map(|f| f.id)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +284,52 @@ mod tests {
     }
 }"#;
         assert!(pinned_float_rects(missing).is_empty());
+    }
+
+    /// A manifest float as the projection produces it (id + cell geometry).
+    fn float(id: usize, x: u32, y: u32, w: u32, h: u32) -> PaneRect {
+        PaneRect::new(id, x, y, w, h, "f", false)
+    }
+
+    #[test]
+    fn correlates_a_pinned_rect_to_the_matching_float_id() {
+        let pinned = [CellRect {
+            x: 30,
+            y: 12,
+            w: 60,
+            h: 18,
+        }];
+        let floats = [float(7, 30, 12, 60, 18), float(9, 5, 8, 40, 10)];
+        assert_eq!(pinned_ids(&pinned, &floats), vec![7]);
+    }
+
+    #[test]
+    fn no_geometry_match_yields_no_ids() {
+        let pinned = [CellRect {
+            x: 30,
+            y: 12,
+            w: 60,
+            h: 18,
+        }];
+        // Same size, shifted one cell: not the same float.
+        let floats = [float(7, 31, 12, 60, 18)];
+        assert!(pinned_ids(&pinned, &floats).is_empty());
+        assert!(pinned_ids(&[], &floats).is_empty());
+        assert!(pinned_ids(&pinned, &[]).is_empty());
+    }
+
+    #[test]
+    fn twin_geometry_marks_both_floats() {
+        // Two floats sharing an exact rect are indistinguishable in the dump
+        // (it carries no ids); an extra pin cue on the twin is the harmless
+        // reading of that ambiguity (design §3.3).
+        let pinned = [CellRect {
+            x: 30,
+            y: 12,
+            w: 60,
+            h: 18,
+        }];
+        let floats = [float(7, 30, 12, 60, 18), float(9, 30, 12, 60, 18)];
+        assert_eq!(pinned_ids(&pinned, &floats), vec![7, 9]);
     }
 }

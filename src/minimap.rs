@@ -1521,6 +1521,9 @@ pub fn render(
             if let Some(&(_, _, fi)) = pin_marks.iter().find(|(mc, mr, _)| *mc == c && *mr == tr) {
                 let fill = palette.color_for(float_rects[fi].id);
                 put_bg(&mut out, fill);
+                // `true` on purpose: the pin must read at full ring strength
+                // regardless of the float's focus, unlike the border — a
+                // pinned-but-unfocused float still needs its marker legible.
                 let base = palette.float_ring_for(float_rects[fi].id, true);
                 let pin_fg = if active {
                     base
@@ -4590,6 +4593,86 @@ mod tests {
         assert!(
             out.contains(PIN_MARKER_GLYPH),
             "inactive tabs keep the (muted) pin marker"
+        );
+    }
+
+    #[test]
+    fn f_the_pin_glyph_keeps_full_ring_strength_on_an_unfocused_float() {
+        // The pin's fg hardcodes `focused = true` into `float_ring_for` on
+        // purpose (unlike the border, which weakens for an unfocused float
+        // and legitimately paints that weaker shade elsewhere in this same
+        // output — so the assertion below pins the exact bg+fg pair
+        // immediately preceding the glyph itself, not a bare `contains` over
+        // the whole string). Same geometry as
+        // `f_a_pinned_float_carries_the_corner_pin_marker`, whose float is
+        // already unfocused (`focused: false`).
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 60, 0, 60, 40, "htop", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[9],
+        );
+        let fill = palette.color_for(9);
+        let full_strength = format!(
+            "{}{}{}",
+            bg(fill),
+            fg(palette.float_ring_for(9, true)),
+            PIN_MARKER_GLYPH
+        );
+        assert!(
+            out.contains(&full_strength),
+            "the pin glyph paints at full ring strength: {out:?}"
+        );
+        let weakened = format!(
+            "{}{}{}",
+            bg(fill),
+            fg(palette.float_ring_for(9, false)),
+            PIN_MARKER_GLYPH
+        );
+        assert!(
+            !out.contains(&weakened),
+            "the pin glyph must not weaken toward the unfocused ring shade: {out:?}"
+        );
+    }
+
+    #[test]
+    fn f_a_pinned_float_still_pins_under_a_perspective_inset() {
+        // Same tiled+float geometry as the corner-marker test, but with an
+        // inactive tab's perspective recede (`vinset = 1`): the marker row
+        // shifts with the inset band and must still land, not vanish.
+        let palette = test_palette();
+        let tiled = [PaneRect::new(2, 0, 0, 120, 40, "sh", false)];
+        let floats = [PaneRect::new(9, 60, 0, 60, 40, "htop", false)];
+        let out = render(
+            &tiled,
+            &palette,
+            24,
+            4,
+            1,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            false,
+            crate::floating::FloatLayer::Visible(&floats),
+            &[],
+            &[9],
+        );
+        assert!(
+            out.contains(PIN_MARKER_GLYPH),
+            "the pin marker survives a perspective inset: {out:?}"
         );
     }
 }

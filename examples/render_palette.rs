@@ -113,6 +113,7 @@ fn main() {
             Close::Off,
             &BTreeMap::new(),
             &BTreeMap::new(), // suppressed-pane covers — none in this sample
+            &BTreeMap::new(), // pinned-float ids — none in this sample
         )
     );
 }

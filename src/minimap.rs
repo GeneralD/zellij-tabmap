@@ -958,7 +958,7 @@ pub fn float_pane_at_cell(
 /// same per-mode [`Close::right_offset`] — so a `LeftClick` there closes the tab.
 ///
 /// `pinned_floats` lists the ids of overlay floats that are pinned (#119);
-/// each stamps a [`PIN_MARKER_GLYPH`] in its top-right corner cell (Task 5).
+/// each stamps a `PIN_MARKER_GLYPH` in its top-right corner cell (Task 5).
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     panes: &[PaneRect],
@@ -975,6 +975,8 @@ pub fn render(
     suppressed_covers: &[usize],
     pinned_floats: &[usize],
 ) -> String {
+    // Consumed by the pin marker in the next step (#119); kept so the
+    // threaded parameter survives this no-behavior commit.
     let _ = pinned_floats;
     let pw = cols;
     let ph = text_rows * 2;
@@ -991,6 +993,7 @@ pub fn render(
     // grid/boxes so the tiled `grid[i]`/`panes[i]` index space is never mixed.
     let float_rects: &[PaneRect] = match floats {
         crate::floating::FloatLayer::Visible(f) => f,
+        crate::floating::FloatLayer::Mixed { overlay, .. } => overlay,
         _ => &[],
     };
     let (float_grid, float_bounds) = if float_rects.is_empty() {
@@ -1152,6 +1155,7 @@ pub fn render(
     // chips (`chip_left`), the mirror of the top-row close-glyph `right_bound`.
     let chip_ids: &[usize] = match floats {
         crate::floating::FloatLayer::Hidden(ids) => ids,
+        crate::floating::FloatLayer::Mixed { chips, .. } => chips,
         _ => &[],
     };
     let chip_layout: Vec<(usize, crate::floating::Chip)> =

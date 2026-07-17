@@ -52,7 +52,7 @@ pub fn bar(
     close: Close,
     floats_by_position: &BTreeMap<usize, crate::floating::FloatSpec>,
     suppressed_covers_by_position: &BTreeMap<usize, Vec<usize>>,
-    pinned_by_position: &BTreeMap<usize, Vec<usize>>,
+    pinned_floats_by_position: &BTreeMap<usize, Vec<usize>>,
 ) -> String {
     // #59: inactive tabs render through the canvas-receded palette while the
     // active tab keeps full vibrancy, so the selected tab reads at a glance.
@@ -99,7 +99,7 @@ pub fn bar(
             // This tab's pinned float ids (#119), resolved the same way as
             // `suppressed_covers` — absent → an empty slice, so a tab with no
             // pinned floats stamps no pin marker.
-            let pinned_floats = pinned_by_position
+            let pinned_floats = pinned_floats_by_position
                 .get(&hit.position)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);

@@ -134,6 +134,10 @@ impl ZellijPlugin for State {
             }
             Event::PaneUpdate(panes) => {
                 self.panes = panes;
+                // A manual pane rename lands here with the new title and
+                // repaints immediately (#75). OSC 0/2 changes do not reliably
+                // emit a title-bearing event in zellij 0.44.3 (zellij#5482),
+                // so do not hide that host limitation behind a polling loop.
                 // Pin state rides only in the session-layout dump (#119) —
                 // refresh it with the same cadence as the manifest it
                 // correlates against.
@@ -919,10 +923,13 @@ mod tests {
         assert!(state.update(Event::TabUpdate(vec![tab(0, 1), tab(1, 2)])));
         assert_eq!(state.tabs.len(), 2);
 
+        let mut renamed = content_pane(0, 1, 80, 24);
+        renamed.title = "renamed live".to_string();
         let mut manifest = PaneManifest::default();
-        manifest.panes.insert(0, vec![content_pane(0, 1, 80, 24)]);
+        manifest.panes.insert(0, vec![renamed]);
         assert!(state.update(Event::PaneUpdate(manifest)));
         assert_eq!(state.panes.panes.len(), 1);
+        assert_eq!(state.panes.panes[&0][0].title, "renamed live");
     }
 
     #[test]

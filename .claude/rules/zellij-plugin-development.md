@@ -537,3 +537,32 @@ every toggle. The one read path (#119):
 - The shim reads its reply back from stdin — rule #17 applies: the call
   panics off-wasm. Keep it behind a `#[cfg(test)]`-stubbed seam and inject
   the parsed state in native tests.
+
+---
+
+## 21. Pane-title event delivery depends on the title source (verified 0.44.3)
+
+Issue #75 tested title changes with the headless harness from rule #4. The
+three sources do not behave alike:
+
+- **Manual `rename-pane`:** immediately emits `PaneUpdate` with the new
+  `PaneInfo.title`. The plugin already replaces the manifest and returns
+  `true`, so the label updates in that repaint.
+- **OSC 0 / OSC 2:** Zellij's live state updates — both `get_pane_info` and
+  `zellij action list-panes --json` report the new title — but a long-lived
+  process can change its title without a `PaneUpdate` carrying it. In the
+  decisive probe, one Python process emitted `osc-first`, then `osc-second`;
+  a `CommandChanged` happened to coincide with the first change, while the
+  second produced neither event. The next unrelated pane event finally
+  delivered a manifest containing `osc-second`. Tracked upstream as
+  [zellij#5482](https://github.com/zellij-org/zellij/issues/5482).
+- **Foreground command change:** `/bin/sh` → `sleep 5` → `/bin/sh` emits
+  `CommandChanged`, but `PaneInfo.title` remains `/bin/sh`; only the separate
+  command payload changes. On 0.44.3 this is not a pane-title change for a
+  plugin to mirror.
+
+A timer can call `get_pane_info` and refresh the stored title, but without a
+reliable title-change event it must run at a fixed interval for every pane.
+Do not ship that polling loop: it makes an always-on UI plugin wake forever to
+mask a host event-delivery gap. Keep the event-driven `PaneUpdate` path, and
+revisit the OSC case when upstream provides a title-bearing notification.

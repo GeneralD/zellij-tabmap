@@ -29,6 +29,7 @@
 
 use crate::color::{self, Palette, Rgb};
 use crate::minimap::{self, Close, GradientSpec, LabelMode, PaneRect};
+use crate::spread::ColorStrategy;
 use unicode_width::UnicodeWidthChar;
 
 /// Minimum width for the richest rung (L0): a wide active tab showing the color
@@ -155,6 +156,11 @@ pub fn vinset_for(perspective: bool, rows: usize, active: bool) -> usize {
 /// detail. The caller passes an on-variant only when the close button is enabled
 /// *and* more than one tab is open (so the last tab keeps no close target), and
 /// records the matching click cell against the live frame.
+///
+/// `strategy` selects how the grid rungs key pane fills to palette slots
+/// (#111): `Stable` keys on each pane's id, `Distinct` spreads the palette so
+/// edge-adjacent panes avoid one hue. The narrow rungs (L3/L4) paint no
+/// per-pane color, so it only reaches the minimap.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble(
     panes: &[PaneRect],
@@ -170,6 +176,7 @@ pub fn assemble(
     floats: crate::floating::FloatLayer<'_>,
     suppressed_covers: &[usize],
     pinned_floats: &[usize],
+    strategy: ColorStrategy,
 ) -> TabBlock {
     // Pixel rows of background to inset top and bottom of the minimap canvas: one
     // (a half text row) for an inactive block in perspective mode at ≥4 rows,
@@ -198,6 +205,7 @@ pub fn assemble(
             floats,
             suppressed_covers,
             pinned_floats,
+            strategy,
         ),
         Level::L1 => grid_lines(
             panes,
@@ -213,6 +221,7 @@ pub fn assemble(
             floats,
             suppressed_covers,
             pinned_floats,
+            strategy,
         ),
         Level::L2 => grid_lines(
             panes,
@@ -228,6 +237,7 @@ pub fn assemble(
             floats,
             suppressed_covers,
             pinned_floats,
+            strategy,
         ),
         // The narrow rungs (L3 glyph, L4 hint) have no room for a close "×" — it
         // degrades away with the label and grid, so `close` is unused here (#86).
@@ -317,8 +327,9 @@ fn grid_lines(
     floats: crate::floating::FloatLayer<'_>,
     suppressed_covers: &[usize],
     pinned_floats: &[usize],
+    strategy: ColorStrategy,
 ) -> Vec<StyledLine> {
-    let block = minimap::render(
+    let block = minimap::render_with_strategy(
         panes,
         palette,
         width,
@@ -332,6 +343,7 @@ fn grid_lines(
         floats,
         suppressed_covers,
         pinned_floats,
+        strategy,
     );
     padded_rows(block.lines().map(str::to_string), width, rows)
 }
@@ -545,6 +557,12 @@ mod tests {
         )
     }
 
+    /// The SGR foreground form of a palette color, for asserting which slot a
+    /// pane painted with (mirrors the minimap tests' helper).
+    fn fg(c: Rgb) -> String {
+        format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
+    }
+
     /// A single full-size pane — exercises every rung without layout noise.
     fn one_pane(title: &str) -> Vec<PaneRect> {
         vec![PaneRect::new(0, 0, 0, 100, 40, title, true)]
@@ -617,6 +635,7 @@ mod tests {
             crate::floating::FloatLayer::Hidden(&hidden),
             &[],
             &[],
+            ColorStrategy::Stable,
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(
@@ -626,6 +645,58 @@ mod tests {
         for line in &block.lines {
             assert_eq!(measured(line), 16);
         }
+    }
+
+    #[test]
+    fn assemble_threads_the_distinct_strategy_to_the_minimap() {
+        // Two side-by-side panes on congruent ids (1 and 4 both hit slot 1 of
+        // the 3-slot test palette) blend into one hue under `Stable`; the
+        // `Distinct` strategy (#111) must reach the minimap through `assemble`
+        // so the colliding neighbor is recolored to the next free slot.
+        let palette = test_palette();
+        let panes = vec![
+            PaneRect::new(1, 0, 0, 50, 40, "a", false),
+            PaneRect::new(4, 50, 0, 50, 40, "b", false),
+        ];
+        let joined = |strategy| -> String {
+            assemble(
+                &panes,
+                &palette,
+                16,
+                3,
+                0,
+                "\u{2318}",
+                GradientSpec::OFF,
+                true,
+                false,
+                Close::Off,
+                crate::floating::FloatLayer::None,
+                &[],
+                &[],
+                strategy,
+            )
+            .lines
+            .iter()
+            .map(StyledLine::as_str)
+            .collect()
+        };
+        let slot1 = fg(palette.color_for(1));
+        let slot2 = fg(palette.color_for(2));
+        let stable = joined(ColorStrategy::Stable);
+        assert!(stable.contains(&slot1));
+        assert!(
+            !stable.contains(&slot2),
+            "stable: both panes sit on slot 1, slot 2 never paints"
+        );
+        let distinct = joined(ColorStrategy::Distinct);
+        assert!(
+            distinct.contains(&slot1),
+            "distinct: the reading-order first pane keeps its identity hue"
+        );
+        assert!(
+            distinct.contains(&slot2),
+            "distinct: the colliding neighbor moves to the next free slot"
+        );
     }
 
     #[test]
@@ -697,6 +768,7 @@ mod tests {
                     crate::floating::FloatLayer::None,
                     &[],
                     &[],
+                    ColorStrategy::Stable,
                 );
                 assert_eq!(
                     block.lines.len(),
@@ -760,6 +832,7 @@ mod tests {
                         crate::floating::FloatLayer::None,
                         &[],
                         &[],
+                        ColorStrategy::Stable,
                     );
                     for (row, line) in block.lines.iter().enumerate() {
                         assert_eq!(
@@ -796,6 +869,7 @@ mod tests {
                 crate::floating::FloatLayer::None,
                 &[],
                 &[],
+                ColorStrategy::Stable,
             )
             .lines
         };
@@ -833,6 +907,7 @@ mod tests {
                 crate::floating::FloatLayer::None,
                 &[],
                 &[],
+                ColorStrategy::Stable,
             )
             .lines
         };
@@ -882,6 +957,7 @@ mod tests {
             crate::floating::FloatLayer::None,
             &[],
             &[],
+            ColorStrategy::Stable,
         );
         for line in &block.lines {
             assert_eq!(measured(line), 2);
@@ -912,6 +988,7 @@ mod tests {
             crate::floating::FloatLayer::None,
             &[],
             &[],
+            ColorStrategy::Stable,
         );
         for line in &block.lines {
             assert_eq!(measured(line), 1, "a 1-column slot must stay 1 column");
@@ -946,6 +1023,7 @@ mod tests {
             crate::floating::FloatLayer::None,
             &[],
             &[],
+            ColorStrategy::Stable,
         );
         for line in &block.lines {
             for ch in ['a', 'b', 'c'] {
@@ -980,6 +1058,7 @@ mod tests {
             crate::floating::FloatLayer::None,
             &[],
             &[],
+            ColorStrategy::Stable,
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(joined.contains('a'), "focused pane's label should appear");
@@ -1013,6 +1092,7 @@ mod tests {
             crate::floating::FloatLayer::None,
             &[],
             &[],
+            ColorStrategy::Stable,
         );
         let joined: String = block.lines.iter().map(StyledLine::as_str).collect();
         assert!(
@@ -1042,6 +1122,7 @@ mod tests {
                 crate::floating::FloatLayer::None,
                 &[],
                 &[],
+                ColorStrategy::Stable,
             )
             .lines
             .iter()
@@ -1117,6 +1198,7 @@ mod tests {
                     crate::floating::FloatLayer::None,
                     &[],
                     &[],
+                    ColorStrategy::Stable,
                 )
                 .lines[1]
                     .as_str()
@@ -1155,6 +1237,7 @@ mod tests {
                 crate::floating::FloatLayer::None,
                 &[],
                 &[],
+                ColorStrategy::Stable,
             );
             let second = assemble(
                 &panes,
@@ -1170,6 +1253,7 @@ mod tests {
                 crate::floating::FloatLayer::None,
                 &[],
                 &[],
+                ColorStrategy::Stable,
             );
             assert_eq!(first, second, "width {width} must render identically");
         }
@@ -1203,6 +1287,7 @@ mod tests {
                 crate::floating::FloatLayer::None,
                 &[],
                 &[],
+                ColorStrategy::Stable,
             );
             let b = assemble(
                 &reversed,
@@ -1218,6 +1303,7 @@ mod tests {
                 crate::floating::FloatLayer::None,
                 &[],
                 &[],
+                ColorStrategy::Stable,
             );
             assert_eq!(
                 a, b,

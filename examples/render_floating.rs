@@ -126,7 +126,7 @@ fn main() {
         Close::Off, // keep the focus on the floating panes
         &floats,
         &suppressed_covers,
-        &BTreeMap::new(), // pinned-float ids — none in this sample (render_pinned demos #119)
+        &BTreeMap::new(), // pinned-float ids — none in this sample (render_pinned demos #119), zellij_tabmap::spread::ColorStrategy::Stable,
     );
 
     // Hide the cursor so a held screenshot doesn't catch a stray cursor block

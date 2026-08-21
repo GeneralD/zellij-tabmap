@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use crate::color::Palette;
 use crate::line::LineLayout;
 use crate::minimap::{Close, GradientSpec, PaneRect};
+use crate::spread::ColorStrategy;
 use crate::tab_block::{self, TabBlock};
 
 /// Render a packed [`LineLayout`] into the full multi-row bar string.
@@ -39,6 +40,11 @@ use crate::tab_block::{self, TabBlock};
 /// feature is on and closing a tab is safe (more than one tab open). It lands per
 /// tab on the active tab — and, when `perspective` is off, on every tab — but not
 /// on inactive perspective tabs, whose receded corner would carry it unbalanced.
+///
+/// `strategy` selects the pane-fill keying every block assembles with (#111):
+/// `Stable` keys on ids, `Distinct` spreads the palette so edge-adjacent panes
+/// in a tab avoid one hue. Per-tab by construction — each block's assignment
+/// sees only that tab's panes, so a change in one tab never recolors another.
 #[allow(clippy::too_many_arguments)]
 pub fn bar(
     rows: usize,
@@ -53,6 +59,7 @@ pub fn bar(
     floats_by_position: &BTreeMap<usize, crate::floating::FloatSpec>,
     suppressed_covers_by_position: &BTreeMap<usize, Vec<usize>>,
     pinned_floats_by_position: &BTreeMap<usize, Vec<usize>>,
+    strategy: ColorStrategy,
 ) -> String {
     // #59: inactive tabs render through the canvas-receded palette while the
     // active tab keeps full vibrancy, so the selected tab reads at a glance.
@@ -117,6 +124,7 @@ pub fn bar(
                 floats,
                 suppressed_covers,
                 pinned_floats,
+                strategy,
             )
         })
         .collect();
@@ -345,6 +353,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            ColorStrategy::Stable,
         );
         for row in 1..=3 {
             assert!(
@@ -377,6 +386,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            ColorStrategy::Stable,
         );
         assert!(out.contains("\u{2318}4"), "position 3 → ⌘4");
         assert!(out.contains("\u{2318}5"), "position 4 → ⌘5");
@@ -415,6 +425,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            ColorStrategy::Stable,
         );
         assert!(
             out.contains("\u{2318}2"),
@@ -471,6 +482,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            ColorStrategy::Stable,
         );
         assert!(
             out.contains(&fg(palette.color_for(0))),
@@ -512,6 +524,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            ColorStrategy::Stable,
         );
         assert!(
             out.contains(&fg(palette.color_for(1))),
@@ -551,6 +564,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            ColorStrategy::Stable,
         );
         // Middle row (row 2): left marker at col 1, right marker at col 8.
         assert!(out.contains("\u{1b}[2;1H\u{2190} +2 "));
@@ -584,6 +598,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            ColorStrategy::Stable,
         );
         // rows=3 → middle row index 1 → 1-based row 2, button start col 18+1=19.
         assert!(
@@ -615,6 +630,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            ColorStrategy::Stable,
         );
         assert!(!out.contains('+'), "no button reserved → no + drawn");
     }

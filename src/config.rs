@@ -14,6 +14,7 @@ use crate::floating::FloatingMode;
 use crate::line::Alignment;
 use crate::minimap::{GradientMode, GradientShape, GradientSpec, RadialDirection};
 use crate::scroll::ScrollMode;
+use crate::spread::ColorStrategy;
 
 /// Parsed plugin configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +108,14 @@ pub struct Config {
     /// reveals+focuses via `focus_terminal_pane`), so it triggers no new
     /// permission prompt on auto-update. See [`FloatingMode`].
     pub floating: FloatingMode,
+    /// How pane fills are keyed to palette slots (#111). `stable` (default)
+    /// keys on the pane's id — the identity-stable rule of #5, where a pane
+    /// keeps its hue for its whole life but adjacent panes with congruent ids
+    /// can land on the same color. `distinct` spreads the palette so panes
+    /// sharing an edge avoid one hue (each pane still keeps its identity slot
+    /// unless a neighbor forces it off). Purely a render-side choice — no
+    /// permission implications. See [`ColorStrategy`].
+    pub color_strategy: ColorStrategy,
 }
 
 impl Config {
@@ -165,6 +174,10 @@ impl Config {
     /// Default floating depiction — `Hybrid`, so floating panes show out of the
     /// box (#110). A tab with no floating panes renders identically to before.
     pub const DEFAULT_FLOATING: FloatingMode = FloatingMode::Hybrid;
+    /// Default color keying — `Stable`, preserving #5's identity-stable rule
+    /// for every existing install; the adjacency-aware `distinct` spreading is
+    /// a deliberate opt-in (#111).
+    pub const DEFAULT_COLOR_STRATEGY: ColorStrategy = ColorStrategy::Stable;
 
     /// Parse the configuration map, falling back to a default for any missing or
     /// malformed value. Total: never panics on bad input.
@@ -235,6 +248,10 @@ impl Config {
                 .get("floating")
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(Self::DEFAULT_FLOATING),
+            color_strategy: configuration
+                .get("color_strategy")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(Self::DEFAULT_COLOR_STRATEGY),
         }
     }
 
@@ -353,6 +370,7 @@ mod tests {
         assert!(config.close_button);
         assert_eq!(config.scroll, ScrollMode::Tab);
         assert_eq!(config.floating, FloatingMode::Hybrid);
+        assert_eq!(config.color_strategy, ColorStrategy::Stable);
     }
 
     #[test]
@@ -636,6 +654,33 @@ mod tests {
         // A malformed or empty value keeps the on-by-default button.
         assert!(config_from(&[("new_tab_button", "nope")]).new_tab_button);
         assert!(config_from(&[("new_tab_button", "")]).new_tab_button);
+    }
+
+    #[test]
+    fn parses_explicit_color_strategy_distinct() {
+        // The adjacency-aware spreading (#111) is a deliberate opt-in.
+        assert_eq!(
+            config_from(&[("color_strategy", "distinct")]).color_strategy,
+            ColorStrategy::Distinct
+        );
+    }
+
+    #[test]
+    fn malformed_color_strategy_falls_back() {
+        // Anything but the exact strategy names keeps the identity-stable
+        // default, preserving #5's guarantee for untouched configs.
+        assert_eq!(
+            config_from(&[("color_strategy", "nope")]).color_strategy,
+            ColorStrategy::Stable
+        );
+        assert_eq!(
+            config_from(&[("color_strategy", "")]).color_strategy,
+            ColorStrategy::Stable
+        );
+        assert_eq!(
+            config_from(&[("color_strategy", "Distinct")]).color_strategy,
+            ColorStrategy::Stable
+        );
     }
 
     #[test]

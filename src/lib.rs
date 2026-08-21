@@ -15,6 +15,7 @@ pub mod pinned;
 pub mod projection;
 pub(crate) mod router;
 pub mod scroll;
+pub mod spread;
 pub mod suppressed;
 pub mod tab_block;
 pub(crate) mod theme;
@@ -410,6 +411,9 @@ impl ZellijPlugin for State {
                 // Pinned-float ids (#119), rebuilt from the live session-layout
                 // dump on every `PaneUpdate` (see `refresh_pinned`).
                 &self.pinned_by_tab,
+                // Pane-fill keying (#111): the id-stable default, or the
+                // opt-in adjacency spread (`color_strategy "distinct"`).
+                self.config.color_strategy,
             )
         );
 

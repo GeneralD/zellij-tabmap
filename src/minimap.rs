@@ -2223,6 +2223,65 @@ mod tests {
     }
 
     #[test]
+    fn distinct_strategy_paints_the_suppressed_marker_in_the_cover_assigned_hue()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // The suppressed marker (#118) is stamped *on* its cover pane, so its
+        // colors must sample the cover's **painted** fill. When `Distinct`
+        // moves the cover off its identity slot, the marker follows the
+        // assigned hue — keying it on the id would paint a mismatched patch
+        // over a pane filled in a different color.
+        let palette = test_palette();
+        // Ids 1 and 4 collide on slot 1; the cover (id 4, reading-order
+        // second) is pushed to slot 2 under `Distinct`.
+        let panes = [
+            PaneRect::new(1, 0, 0, 60, 40, "a", false),
+            PaneRect::new(4, 60, 0, 60, 40, "b", false),
+        ];
+        let out = render_with_strategy(
+            &panes,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::None,
+            &[4],
+            &[],
+            ColorStrategy::Distinct,
+        );
+        assert!(
+            out.contains(crate::suppressed::SUPPRESSED_MARKER_GLYPH),
+            "the recolored cover still shows the marker glyph"
+        );
+        let before = out
+            .split(crate::suppressed::SUPPRESSED_MARKER_GLYPH)
+            .next()
+            .ok_or("marker glyph not found")?;
+        let fg = last_sgr_rgb(before, "38;2;").ok_or("no marker foreground")?;
+        let bg = last_sgr_rgb(before, "48;2;").ok_or("no marker background")?;
+        assert_eq!(
+            fg,
+            palette.ring_for(2),
+            "marker foreground follows the assigned slot's ring shade"
+        );
+        assert_ne!(
+            fg,
+            palette.ring_for(1),
+            "marker never falls back to the identity slot's shade"
+        );
+        assert_eq!(
+            bg,
+            palette.color_for(2),
+            "marker background samples the cover's painted (assigned) fill"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn render_zero_size_is_empty() {
         assert!(
             render(

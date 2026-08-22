@@ -79,6 +79,21 @@ pub fn next_pane(order: &[u32], current: u32, dir: ScrollDir) -> Option<u32> {
     Some(order[step(here, order.len(), dir)])
 }
 
+/// The pane-walk direction a pipe message `name` requests (#78), or `None` for
+/// any other message. `"focus-next-pane"` / `"focus-previous-pane"` alias one
+/// wheel step each, so a keybind piped to the bar follows the same traversal
+/// as `scroll "pane"`. Exists because zellij's own `FocusNextPane` handler
+/// skips the session-state report (#37, still unfixed in 0.45.0), freezing the
+/// highlight — the bar's absolute `focus_terminal_pane` path reports properly.
+/// Exact, case-sensitive match: any other name belongs to someone else's pipe.
+pub fn pane_step(name: &str) -> Option<ScrollDir> {
+    match name {
+        "focus-next-pane" => Some(ScrollDir::Forward),
+        "focus-previous-pane" => Some(ScrollDir::Backward),
+        _ => None,
+    }
+}
+
 /// One wrapping step over `0..len`. Both callers guarantee `len > 0` (a guarded
 /// `count`, or a `position` match that proves the slice non-empty).
 fn step(here: usize, len: usize, dir: ScrollDir) -> usize {
@@ -165,5 +180,23 @@ mod tests {
         // A lone pane (e.g. a single tab with one pane) steps to itself.
         assert_eq!(next_pane(&[7], 7, ScrollDir::Forward), Some(7));
         assert_eq!(next_pane(&[7], 7, ScrollDir::Backward), Some(7));
+    }
+
+    #[test]
+    fn pane_step_maps_the_two_pipe_messages() {
+        // The #78 pipe messages alias one wheel step each, so a keybind routed
+        // through the bar follows the same traversal as `scroll "pane"`.
+        assert_eq!(pane_step("focus-next-pane"), Some(ScrollDir::Forward));
+        assert_eq!(pane_step("focus-previous-pane"), Some(ScrollDir::Backward));
+    }
+
+    #[test]
+    fn pane_step_ignores_other_messages() {
+        // Unknown names are someone else's pipes — exact, case-sensitive match
+        // only, so the handler never hijacks a message it doesn't own.
+        assert_eq!(pane_step("focus-next-pane "), None);
+        assert_eq!(pane_step("Focus-Next-Pane"), None);
+        assert_eq!(pane_step("next-tab"), None);
+        assert_eq!(pane_step(""), None);
     }
 }

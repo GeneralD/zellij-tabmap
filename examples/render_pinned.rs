@@ -124,6 +124,7 @@ fn main() {
         &floats,
         &BTreeMap::new(), // no suppressed panes in this sample (#118 has its own)
         &pinned,
+        zellij_tabmap::spread::ColorStrategy::Stable,
     );
 
     // Hide the cursor so a held screenshot doesn't catch a stray cursor block

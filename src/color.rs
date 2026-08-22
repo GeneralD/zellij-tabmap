@@ -299,6 +299,15 @@ impl Palette {
         self.slots[pane_id % self.slots.len()]
     }
 
+    /// The fill colors backing each slot, in the cycle order
+    /// [`color_for`](Self::color_for) walks. Always non-empty ([`new`](Self::new)
+    /// floors an empty list at the accent). The `distinct` spreading (#111)
+    /// probes these by **value**, so slots a theme fills with one RGB count as
+    /// a single hue rather than as distinct choices.
+    pub fn slot_colors(&self) -> &[Rgb] {
+        &self.slots
+    }
+
     /// Accent-derived shade for degraded-rung hint/glyph text (the `⌘N` badge
     /// and the representative split glyph) — bright on a dark theme, dark on
     /// a light one, by the same luminance rule as the focus ring.

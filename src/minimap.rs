@@ -15,6 +15,7 @@
 use unicode_width::UnicodeWidthChar;
 
 use crate::color::Palette;
+use crate::spread::ColorStrategy;
 // Re-exported so the historical `minimap::Rgb` path keeps resolving (the
 // canonical definition lives in `crate::color`).
 pub use crate::color::Rgb;
@@ -680,16 +681,17 @@ fn gradient_t(
 /// Fill color of pane `i` at the continuous sample point `(px, py)` — the base
 /// fill swept by the pane's precomputed [`PaneSweep`] (`sweeps[i]`). A block with
 /// no sweep direction, or an `Off` gradient (then `sweeps[i]` is `None`),
-/// degenerates to the base fill.
+/// degenerates to the base fill. `keys[i]` is the pane's color key — its stable
+/// id, or its assigned slot under the `distinct` strategy (#111).
 fn fill_at(
-    panes: &[PaneRect],
+    keys: &[usize],
     palette: &Palette,
     sweeps: &[Option<PaneSweep>],
     i: usize,
     px: f32,
     py: f32,
 ) -> Rgb {
-    let fill = palette.color_for(panes[i].id);
+    let fill = palette.color_for(keys[i]);
     let Some(sweep) = sweeps[i].as_ref() else {
         return fill;
     };
@@ -702,14 +704,16 @@ fn fill_at(
 /// background pixel — one no pane owns, including the perspective recede inset
 /// (#66/#84) — which renders transparent (the terminal's default background)
 /// rather than a painted canvas color. `grid` stores the pane's *slice index*
-/// (to reach `panes[i]`); the color itself is keyed on that pane's stable `id`,
-/// never its position. Ring pixels are painted solid on top of the gradient
-/// sweep, so the focus outline stays intact in every [`GradientMode`].
+/// (to reach `keys[i]`); the color is keyed on that pane's color key — its
+/// stable `id` (never its position), or the slot the `distinct` strategy
+/// assigned it (#111). Ring pixels are painted solid on top of the gradient
+/// sweep, so the focus outline stays intact in every [`GradientMode`] — and
+/// derive from the same key, so the outline follows the painted fill (#47).
 #[allow(clippy::too_many_arguments)]
 fn pixel_color(
     grid: &[Option<usize>],
     ring: &[bool],
-    panes: &[PaneRect],
+    keys: &[usize],
     palette: &Palette,
     sweeps: &[Option<PaneSweep>],
     pw: usize,
@@ -717,8 +721,8 @@ fn pixel_color(
     py: usize,
 ) -> Option<Rgb> {
     match grid[py * pw + px] {
-        Some(i) if ring[py * pw + px] => Some(palette.ring_for(panes[i].id)),
-        Some(i) => Some(fill_at(panes, palette, sweeps, i, px as f32, py as f32)),
+        Some(i) if ring[py * pw + px] => Some(palette.ring_for(keys[i])),
+        Some(i) => Some(fill_at(keys, palette, sweeps, i, px as f32, py as f32)),
         None => None,
     }
 }
@@ -980,11 +984,61 @@ pub fn render(
     suppressed_covers: &[usize],
     pinned_floats: &[usize],
 ) -> String {
+    render_with_strategy(
+        panes,
+        palette,
+        cols,
+        text_rows,
+        vinset,
+        mode,
+        badge,
+        close,
+        gradient,
+        active,
+        floats,
+        suppressed_covers,
+        pinned_floats,
+        ColorStrategy::Stable,
+    )
+}
+
+/// Like [`render`], but with an explicit color `strategy` (#111): `Stable`
+/// reproduces `render` byte-for-byte (each tiled fill keys on the pane's id),
+/// while `Distinct` spreads the palette so edge-adjacent panes avoid one hue
+/// (see [`crate::spread::color_keys`]). Floats and chips always stay
+/// id-keyed — they overlap rather than tile, so the adjacency trade does not
+/// apply to them.
+#[allow(clippy::too_many_arguments)]
+pub fn render_with_strategy(
+    panes: &[PaneRect],
+    palette: &Palette,
+    cols: usize,
+    text_rows: usize,
+    vinset: usize,
+    mode: LabelMode,
+    badge: Option<&str>,
+    close: Close,
+    gradient: GradientSpec,
+    active: bool,
+    floats: crate::floating::FloatLayer<'_>,
+    suppressed_covers: &[usize],
+    pinned_floats: &[usize],
+    strategy: ColorStrategy,
+) -> String {
     let pw = cols;
     let ph = text_rows * 2;
     if pw == 0 || text_rows == 0 {
         return String::new();
     }
+    // Per-pane color keys, parallel to `panes`: the ids themselves under
+    // `Stable`, or the #111 adjacency-spread slots under `Distinct`. Every
+    // tiled fill/ring below resolves through these, so the two strategies
+    // differ only in this one precomputation.
+    let color_keys = crate::spread::color_keys(
+        panes,
+        palette.slot_colors(),
+        strategy == ColorStrategy::Distinct,
+    );
     // Project every pane to its block-local pixel box and the pixel-ownership
     // grid in one shared step (#74): `render` paints from them here, and
     // [`pane_at_cell`] hit-tests against the same `project_panes` output, so a
@@ -1383,7 +1437,7 @@ pub fn render(
                 // The badge rides the top text row, whose upper pixel is the
                 // recede inset on a receded tab — transparent there, so the
                 // glyph reads on the bar backdrop instead of a painted band.
-                let fill = pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 0);
+                let fill = pixel_color(&grid, &ring, &color_keys, palette, &sweeps, pw, c, 0);
                 match fill {
                     Some(f) => put_bg(&mut out, f),
                     None => put_default_bg(&mut out),
@@ -1420,7 +1474,7 @@ pub fn render(
                     let fill = pixel_color(
                         &grid,
                         &ring,
-                        panes,
+                        &color_keys,
                         palette,
                         &sweeps,
                         pw,
@@ -1454,8 +1508,16 @@ pub fn render(
             // chip is the sole click target for a hidden float (issue #2).
             if tr == chip_row {
                 if let Some((_, chip)) = chip_layout.iter().find(|(cc, _)| *cc == c) {
-                    let fill =
-                        pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * chip_row);
+                    let fill = pixel_color(
+                        &grid,
+                        &ring,
+                        &color_keys,
+                        palette,
+                        &sweeps,
+                        pw,
+                        c,
+                        2 * chip_row,
+                    );
                     match fill {
                         Some(f) => put_bg(&mut out, f),
                         None => put_default_bg(&mut out),
@@ -1500,14 +1562,21 @@ pub fn render(
             {
                 if !cell_covered[tr * pw + c] && !matches!(label_plan[tr * pw + c], LabelDraw::Skip)
                 {
-                    let base = fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
+                    let base = fill_at(
+                        &color_keys,
+                        palette,
+                        &sweeps,
+                        i,
+                        c as f32,
+                        2.0 * tr as f32 + 0.5,
+                    );
                     let bg = if shadow_px[2 * tr * pw + c] || shadow_px[(2 * tr + 1) * pw + c] {
                         crate::color::mixed(base, (0, 0, 0), FLOAT_SHADOW_BLEND)
                     } else {
                         base
                     };
                     put_bg(&mut out, bg);
-                    put_fg(&mut out, palette.ring_for(panes[i].id));
+                    put_fg(&mut out, palette.ring_for(color_keys[i]));
                     out.push(crate::suppressed::SUPPRESSED_MARKER_GLYPH);
                     continue;
                 }
@@ -1584,8 +1653,14 @@ pub fn render(
                         // so a vertical, diagonal, or radial sweep reads correctly
                         // through the text (at angle 0 the row is irrelevant —
                         // byte-identical to the pre-#71 top-pixel sample).
-                        let label_fill =
-                            fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
+                        let label_fill = fill_at(
+                            &color_keys,
+                            palette,
+                            &sweeps,
+                            i,
+                            c as f32,
+                            2.0 * tr as f32 + 0.5,
+                        );
                         // A label paints one uniform background, so it can't shade
                         // just its top or bottom half; darken the whole cell when
                         // EITHER of its two pixels falls in the drop-shadow (#110).
@@ -1620,8 +1695,14 @@ pub fn render(
                         // one faces the light and stays bright). Same fg/dim as a
                         // normal label, but never bold: `…` is a marker, not the
                         // pane's own glyph.
-                        let label_fill =
-                            fill_at(panes, palette, &sweeps, i, c as f32, 2.0 * tr as f32 + 0.5);
+                        let label_fill = fill_at(
+                            &color_keys,
+                            palette,
+                            &sweeps,
+                            i,
+                            c as f32,
+                            2.0 * tr as f32 + 0.5,
+                        );
                         // A label paints one uniform background, so it can't shade
                         // just its top or bottom half; darken the whole cell when
                         // EITHER of its two pixels falls in the drop-shadow (#110).
@@ -1674,13 +1755,22 @@ pub fn render(
             let top = float_px(2 * tr).or_else(|| {
                 shade(
                     2 * tr,
-                    pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr),
+                    pixel_color(&grid, &ring, &color_keys, palette, &sweeps, pw, c, 2 * tr),
                 )
             });
             let bottom = float_px(2 * tr + 1).or_else(|| {
                 shade(
                     2 * tr + 1,
-                    pixel_color(&grid, &ring, panes, palette, &sweeps, pw, c, 2 * tr + 1),
+                    pixel_color(
+                        &grid,
+                        &ring,
+                        &color_keys,
+                        palette,
+                        &sweeps,
+                        pw,
+                        c,
+                        2 * tr + 1,
+                    ),
                 )
             });
             put_halfblock(&mut out, top, bottom);
@@ -2046,6 +2136,149 @@ mod tests {
                 "id 2 keeps its color regardless of order"
             );
         }
+    }
+
+    #[test]
+    fn distinct_strategy_recolors_an_adjacent_congruent_pane() {
+        // Ids 1 and 4 both land on slot 1 of the 3-slot test palette: side by
+        // side they paint one hue under `Stable`, two under `Distinct` (#111)
+        // — the reading-order first pane keeps its identity color while the
+        // colliding neighbor moves to the next free slot.
+        let palette = test_palette();
+        let panes = [
+            PaneRect::new(1, 0, 0, 50, 40, "a", false),
+            PaneRect::new(4, 50, 0, 50, 40, "b", false),
+        ];
+        let paint = |strategy| {
+            render_with_strategy(
+                &panes,
+                &palette,
+                12,
+                3,
+                0,
+                LabelMode::None,
+                None,
+                Close::Off,
+                GradientSpec::OFF,
+                true,
+                crate::floating::FloatLayer::None,
+                &[],
+                &[],
+                strategy,
+            )
+        };
+        let stable = paint(ColorStrategy::Stable);
+        assert!(stable.contains(&fg(palette.color_for(1))));
+        assert!(
+            !stable.contains(&fg(palette.color_for(2))),
+            "stable: both panes sit on slot 1, slot 2 never paints"
+        );
+        let distinct = paint(ColorStrategy::Distinct);
+        assert!(
+            distinct.contains(&fg(palette.color_for(1))),
+            "distinct: the reading-order first pane keeps its identity hue"
+        );
+        assert!(
+            distinct.contains(&fg(palette.color_for(2))),
+            "distinct: the colliding neighbor moves to the next free slot"
+        );
+    }
+
+    #[test]
+    fn distinct_strategy_rings_the_focused_pane_in_its_assigned_hue() {
+        // The focus ring derives from the pane's *painted* fill (#47): when
+        // `Distinct` moves the focused pane off its identity slot, the ring
+        // must follow the assigned hue, never the stable one.
+        let palette = test_palette();
+        // Reading order: id 1 (top) keeps slot 1; the focused congruent id 4
+        // (bottom) is pushed to slot 2.
+        let panes = [
+            PaneRect::new(1, 0, 0, 100, 20, "a", false),
+            PaneRect::new(4, 0, 20, 100, 20, "b", true),
+        ];
+        let out = render_with_strategy(
+            &panes,
+            &palette,
+            20,
+            6,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::None,
+            &[],
+            &[],
+            ColorStrategy::Distinct,
+        );
+        assert!(
+            out.contains(&triple(palette.ring_for(2))),
+            "the ring follows the assigned slot's fill"
+        );
+        assert!(
+            !out.contains(&triple(palette.ring_for(1))),
+            "no ring is drawn in the stable slot's shade (id 1 is unfocused)"
+        );
+    }
+
+    #[test]
+    fn distinct_strategy_paints_the_suppressed_marker_in_the_cover_assigned_hue()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // The suppressed marker (#118) is stamped *on* its cover pane, so its
+        // colors must sample the cover's **painted** fill. When `Distinct`
+        // moves the cover off its identity slot, the marker follows the
+        // assigned hue — keying it on the id would paint a mismatched patch
+        // over a pane filled in a different color.
+        let palette = test_palette();
+        // Ids 1 and 4 collide on slot 1; the cover (id 4, reading-order
+        // second) is pushed to slot 2 under `Distinct`.
+        let panes = [
+            PaneRect::new(1, 0, 0, 60, 40, "a", false),
+            PaneRect::new(4, 60, 0, 60, 40, "b", false),
+        ];
+        let out = render_with_strategy(
+            &panes,
+            &palette,
+            24,
+            4,
+            0,
+            LabelMode::None,
+            None,
+            Close::Off,
+            GradientSpec::OFF,
+            true,
+            crate::floating::FloatLayer::None,
+            &[4],
+            &[],
+            ColorStrategy::Distinct,
+        );
+        assert!(
+            out.contains(crate::suppressed::SUPPRESSED_MARKER_GLYPH),
+            "the recolored cover still shows the marker glyph"
+        );
+        let before = out
+            .split(crate::suppressed::SUPPRESSED_MARKER_GLYPH)
+            .next()
+            .ok_or("marker glyph not found")?;
+        let fg = last_sgr_rgb(before, "38;2;").ok_or("no marker foreground")?;
+        let bg = last_sgr_rgb(before, "48;2;").ok_or("no marker background")?;
+        assert_eq!(
+            fg,
+            palette.ring_for(2),
+            "marker foreground follows the assigned slot's ring shade"
+        );
+        assert_ne!(
+            fg,
+            palette.ring_for(1),
+            "marker never falls back to the identity slot's shade"
+        );
+        assert_eq!(
+            bg,
+            palette.color_for(2),
+            "marker background samples the cover's painted (assigned) fill"
+        );
+        Ok(())
     }
 
     #[test]

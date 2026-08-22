@@ -138,6 +138,35 @@ Contributors hacking on the plugin [build from source](#build-from-source) and p
 >
 > **`color_strategy` — how pane fills pick their hue.** `stable` (default) keys a pane's color on its stable identity: the pane keeps its hue for its whole life no matter how siblings open, close, or move — but two adjacent panes whose ids land on the same palette slot then blend into one block, hiding the very split the minimap exists to show. `distinct` spreads the palette per tab so panes sharing an edge avoid one hue: each pane still prefers its identity slot and is moved to the nearest free one only when an adjacent pane already holds it, so conflict-free panes keep exactly their `stable` color and only collisions are recolored (when a pane has more edge-neighbors than the palette has hues, the unavoidable repeat takes the least-recently-used slot). The trade, and why this is opt-in: under `distinct` a pane's color can shift when its neighborhood changes. Purely a render-side choice — no extra permission, no re-grant on update.
 
+### Keyboard pane navigation that keeps the highlight honest
+
+zellij's `FocusNextPane` action moves the focus but **never notifies plugins** — its handler skips the session-state report ([#37](https://github.com/GeneralD/zellij-tabmap/issues/37) pins the omission in zellij's source; still present in zellij 0.45.0). With a bare `FocusNextPane` bind the bar's focus highlight freezes until some later action happens to report. (`FocusPreviousPane` reports correctly, and tab switching — `GoToNextTab` / `GoToPreviousTab` — is unaffected in both directions, so those binds need nothing.)
+
+As a workaround, the bar accepts two pipe messages that navigate panes through a path that *does* report, so the highlight follows every step. Rebind your focus-next key to pipe at the bar instead:
+
+```kdl
+keybinds {
+    normal {
+        bind "Alt ]" {
+            MessagePlugin "file:/Users/you/.config/zellij/plugins/zellij-tabmap.wasm" {
+                name "focus-next-pane"
+            }
+        }
+        bind "Alt [" {
+            MessagePlugin "file:/Users/you/.config/zellij/plugins/zellij-tabmap.wasm" {
+                name "focus-previous-pane"
+            }
+        }
+    }
+}
+```
+
+- The `MessagePlugin` location must be the **exact string** your layout loads the bar from (the `file:` path above, or the release URL if you installed that way) — that is how zellij routes the message to the running bar instead of launching a second instance.
+- Each message steps the focused pane exactly like the wheel's `scroll "pane"` walk: reading order (top→bottom, then left→right), crossing tab boundaries, wrapping globally. Bind **both** directions so next and previous traverse the same order — zellij's own next/previous use a different internal order, so mixing one native bind with one piped bind would feel asymmetric.
+- Works from scripts too: `zellij pipe --name focus-next-pane` does the same step.
+- No extra permission — the messages ride the existing grant, so this works on update without a re-grant.
+- This is a **workaround**: once zellij ships the missing report in `FocusNextPane`, a plain bind works again and this recipe can be retired ([#128](https://github.com/GeneralD/zellij-tabmap/issues/128) tracks the rollback).
+
 <details>
 <summary>Load straight from the release URL (quick try — does not auto-update)</summary>
 

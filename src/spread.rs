@@ -13,6 +13,7 @@
 //! opens, closes, or moves. The default `stable` strategy is untouched — this
 //! runs only behind the `color_strategy "distinct"` config opt-in.
 
+use crate::color::Rgb;
 use crate::minimap::PaneRect;
 
 /// How a tab's pane fills are keyed to palette slots (`color_strategy`).
@@ -52,26 +53,32 @@ impl std::str::FromStr for ColorStrategy {
 /// With `distinct` on, panes are walked in reading order (top→bottom, then
 /// left→right — the same `(y, x)` order as
 /// [`crate::projection::pane_ids_in_reading_order`]) and each is assigned a
-/// palette slot index (`0..slots`, so `slot % slots == slot` and the key feeds
+/// palette slot index (`0..slot_colors.len()`, so the key feeds
 /// [`crate::color::Palette::color_for`] unchanged):
 ///
 /// - **Identity anchor:** the walk starts each pane at its stable slot
-///   (`id % slots`); a pane with no colliding neighbor keeps exactly the color
-///   the `stable` strategy would give it.
-/// - **De-collision:** when an already-assigned pane sharing an **edge**
-///   (positive-length side contact — corner touch does not count) holds the
-///   preferred slot, the probe advances (`preferred + 1, + 2, …`, wrapping)
-///   to the first slot no assigned neighbor uses.
-/// - **Saturation fallback:** when neighbors cover every slot (pane degree ≥
-///   `slots`), a same-hue seam is unavoidable; the pane takes the least
-///   recently assigned slot (ties → the lower slot index) so forced repeats
-///   spread across the palette instead of clustering.
+///   (`id % slot_colors.len()`); a pane with no colliding neighbor keeps
+///   exactly the color the `stable` strategy would give it.
+/// - **De-collision:** collisions are judged by **rendered color**, not slot
+///   index — a theme may repeat one RGB across slots, and two slots sharing a
+///   hue are the same collision. When an already-assigned pane sharing an
+///   **edge** (positive-length side contact — corner touch does not count)
+///   holds the preferred hue, the probe advances (`preferred + 1, + 2, …`,
+///   wrapping) to the first slot whose color no assigned neighbor uses.
+/// - **Saturation fallback:** when neighbors cover every hue, a repeat is
+///   unavoidable without recoloring an already-placed pane — deliberately out
+///   of scope, so a conflict-free pane always keeps its stable hue (the #111
+///   identity anchor). The pane takes the least recently assigned slot (ties
+///   → the lower slot index) so forced repeats spread across the palette
+///   instead of clustering.
 ///
 /// The result is deterministic for a given pane set: it depends only on the
-/// panes' ids and geometry, never on the input slice order. `slots == 0`
-/// (never produced by [`crate::color::Palette`], which floors at one slot)
-/// degrades to the stable identity keys rather than dividing by zero.
-pub fn color_keys(panes: &[PaneRect], slots: usize, distinct: bool) -> Vec<usize> {
+/// panes' ids and geometry, never on the input slice order. An empty
+/// `slot_colors` (never produced by [`crate::color::Palette`], which floors
+/// at one slot) degrades to the stable identity keys rather than dividing by
+/// zero.
+pub fn color_keys(panes: &[PaneRect], slot_colors: &[Rgb], distinct: bool) -> Vec<usize> {
+    let slots = slot_colors.len();
     if !distinct || slots == 0 {
         return panes.iter().map(|p| p.id).collect();
     }
@@ -86,16 +93,19 @@ pub fn color_keys(panes: &[PaneRect], slots: usize, distinct: bool) -> Vec<usize
     // saturation fallback minimizes so forced repeats spread out.
     let mut last_used: Vec<Option<usize>> = vec![None; slots];
     for (step, &i) in order.iter().enumerate() {
-        let mut taken = vec![false; slots];
-        for (j, pane) in panes.iter().enumerate() {
-            if assigned[j] && shares_edge(&panes[i], pane) {
-                taken[keys[j]] = true;
-            }
-        }
+        // Hues (not slot indices) held by already-assigned edge-neighbors: a
+        // theme may repeat one RGB across slots, and two indices sharing a
+        // hue are the same collision.
+        let taken: Vec<Rgb> = panes
+            .iter()
+            .enumerate()
+            .filter(|&(j, pane)| assigned[j] && shares_edge(&panes[i], pane))
+            .map(|(j, _)| slot_colors[keys[j]])
+            .collect();
         let preferred = panes[i].id % slots;
         let slot = (0..slots)
             .map(|k| (preferred + k) % slots)
-            .find(|&s| !taken[s])
+            .find(|&s| !taken.contains(&slot_colors[s]))
             .unwrap_or_else(|| {
                 // Every slot is held by a neighbor: a repeat is unavoidable.
                 // Take the least recently assigned slot (ties → lower index).
@@ -134,18 +144,23 @@ mod tests {
         PaneRect::new(id, x, y, w, h, "", false)
     }
 
+    /// `n` distinct dummy hues, so index-keyed expectations read unchanged.
+    fn slots(n: usize) -> Vec<Rgb> {
+        (0..n).map(|i| (i as u8, 0, 0)).collect()
+    }
+
     // -- stable strategy (distinct = false) ---------------------------------
 
     #[test]
     fn stable_returns_ids_verbatim() -> R {
         let panes = [pane(3, 0, 0, 60, 20), pane(11, 60, 0, 60, 20)];
-        assert_eq!(color_keys(&panes, 8, false), vec![3, 11]);
+        assert_eq!(color_keys(&panes, &slots(8), false), vec![3, 11]);
         Ok(())
     }
 
     #[test]
     fn empty_input_yields_empty_keys() -> R {
-        assert!(color_keys(&[], 8, true).is_empty());
+        assert!(color_keys(&[], &slots(8), true).is_empty());
         Ok(())
     }
 
@@ -156,7 +171,7 @@ mod tests {
         // Ids 0 and 1 land on different slots already — distinct mode must
         // reproduce the stable coloring exactly (slot == id % slots).
         let panes = [pane(0, 0, 0, 60, 20), pane(1, 60, 0, 60, 20)];
-        assert_eq!(color_keys(&panes, 8, true), vec![0, 1]);
+        assert_eq!(color_keys(&panes, &slots(8), true), vec![0, 1]);
         Ok(())
     }
 
@@ -166,7 +181,7 @@ mod tests {
         // exists to kill. The reading-order first pane keeps its identity
         // slot; the second probes forward to the next free slot.
         let panes = [pane(0, 0, 0, 60, 20), pane(8, 60, 0, 60, 20)];
-        assert_eq!(color_keys(&panes, 8, true), vec![0, 1]);
+        assert_eq!(color_keys(&panes, &slots(8), true), vec![0, 1]);
         Ok(())
     }
 
@@ -178,10 +193,10 @@ mod tests {
         let top = pane(8, 0, 0, 120, 10);
         let bottom = pane(0, 0, 10, 120, 10);
         assert_eq!(
-            color_keys(&[bottom.clone(), top.clone()], 8, true),
+            color_keys(&[bottom.clone(), top.clone()], &slots(8), true),
             vec![1, 0]
         );
-        assert_eq!(color_keys(&[top, bottom], 8, true), vec![0, 1]);
+        assert_eq!(color_keys(&[top, bottom], &slots(8), true), vec![0, 1]);
         Ok(())
     }
 
@@ -195,7 +210,7 @@ mod tests {
             pane(1, 40, 0, 40, 20),
             pane(8, 80, 0, 40, 20),
         ];
-        assert_eq!(color_keys(&panes, 8, true), vec![0, 1, 0]);
+        assert_eq!(color_keys(&panes, &slots(8), true), vec![0, 1, 0]);
         Ok(())
     }
 
@@ -205,7 +220,7 @@ mod tests {
     fn vertical_edge_contact_counts_as_adjacent() -> R {
         // Stacked panes share a horizontal edge (top.y + top.h == bottom.y).
         let panes = [pane(0, 0, 0, 120, 10), pane(8, 0, 10, 120, 10)];
-        assert_eq!(color_keys(&panes, 8, true), vec![0, 1]);
+        assert_eq!(color_keys(&panes, &slots(8), true), vec![0, 1]);
         Ok(())
     }
 
@@ -220,7 +235,21 @@ mod tests {
             pane(2, 0, 10, 60, 10),
             pane(8, 60, 10, 60, 10),
         ];
-        assert_eq!(color_keys(&panes, 8, true), vec![0, 1, 2, 0]);
+        assert_eq!(color_keys(&panes, &slots(8), true), vec![0, 1, 2, 0]);
+        Ok(())
+    }
+
+    // -- hue equality across slots -------------------------------------------
+
+    #[test]
+    fn duplicate_slot_colors_collide_as_one_hue() -> R {
+        // A theme may repeat one RGB across slots ([red, red, blue]): slot 1
+        // is a different index but the same rendered hue as slot 0, so the
+        // probe must skip past it and land on blue — index-distinct is not
+        // color-distinct.
+        let colors = [(255, 0, 0), (255, 0, 0), (0, 0, 255)];
+        let panes = [pane(0, 0, 0, 60, 20), pane(3, 60, 0, 60, 20)];
+        assert_eq!(color_keys(&panes, &colors, true), vec![0, 2]);
         Ok(())
     }
 
@@ -237,7 +266,7 @@ mod tests {
             pane(1, 60, 0, 60, 10),
             pane(2, 0, 10, 120, 10),
         ];
-        assert_eq!(color_keys(&panes, 2, true), vec![0, 1, 0]);
+        assert_eq!(color_keys(&panes, &slots(2), true), vec![0, 1, 0]);
         Ok(())
     }
 
@@ -248,7 +277,7 @@ mod tests {
         // A one-slot palette (the accent-only fallback) cannot distinguish
         // anything; every pane keys 0, mirroring `color_for`'s cycling.
         let panes = [pane(3, 0, 0, 60, 20), pane(4, 60, 0, 60, 20)];
-        assert_eq!(color_keys(&panes, 1, true), vec![0, 0]);
+        assert_eq!(color_keys(&panes, &slots(1), true), vec![0, 0]);
         Ok(())
     }
 
@@ -257,7 +286,7 @@ mod tests {
         // `Palette` never yields zero slots; defend the division anyway by
         // falling back to the stable keys.
         let panes = [pane(3, 0, 0, 60, 20)];
-        assert_eq!(color_keys(&panes, 0, true), vec![3]);
+        assert_eq!(color_keys(&panes, &slots(0), true), vec![3]);
         Ok(())
     }
 
@@ -274,7 +303,7 @@ mod tests {
         let forward = [a.clone(), b.clone(), c.clone(), d.clone()];
         let shuffled = [d, b, a, c];
         let key_of = |panes: &[PaneRect]| {
-            let keys = color_keys(panes, 8, true);
+            let keys = color_keys(panes, &slots(8), true);
             let mut by_id: Vec<(usize, usize)> = panes.iter().map(|p| p.id).zip(keys).collect();
             by_id.sort_unstable();
             by_id

@@ -299,11 +299,13 @@ impl Palette {
         self.slots[pane_id % self.slots.len()]
     }
 
-    /// Number of distinct fill slots — the modulus [`color_for`](Self::color_for)
-    /// cycles by. Always at least one ([`new`](Self::new) floors an empty list at
-    /// the accent). The `distinct` spreading (#111) sizes its slot search on it.
-    pub fn slot_count(&self) -> usize {
-        self.slots.len()
+    /// The fill colors backing each slot, in the cycle order
+    /// [`color_for`](Self::color_for) walks. Always non-empty ([`new`](Self::new)
+    /// floors an empty list at the accent). The `distinct` spreading (#111)
+    /// probes these by **value**, so slots a theme fills with one RGB count as
+    /// a single hue rather than as distinct choices.
+    pub fn slot_colors(&self) -> &[Rgb] {
+        &self.slots
     }
 
     /// Accent-derived shade for degraded-rung hint/glyph text (the `⌘N` badge

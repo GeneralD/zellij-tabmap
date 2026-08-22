@@ -1036,7 +1036,7 @@ pub fn render_with_strategy(
     // differ only in this one precomputation.
     let color_keys = crate::spread::color_keys(
         panes,
-        palette.slot_count(),
+        palette.slot_colors(),
         strategy == ColorStrategy::Distinct,
     );
     // Project every pane to its block-local pixel box and the pixel-ownership

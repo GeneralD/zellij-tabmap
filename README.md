@@ -148,12 +148,12 @@ As a workaround, the bar accepts two pipe messages that navigate panes through a
 keybinds {
     normal {
         bind "Alt ]" {
-            MessagePlugin "file:/Users/you/.config/zellij/plugins/zellij-tabmap.wasm" {
+            MessagePlugin {
                 name "focus-next-pane"
             }
         }
         bind "Alt [" {
-            MessagePlugin "file:/Users/you/.config/zellij/plugins/zellij-tabmap.wasm" {
+            MessagePlugin {
                 name "focus-previous-pane"
             }
         }
@@ -161,7 +161,7 @@ keybinds {
 }
 ```
 
-- The `MessagePlugin` location must be the **exact string** your layout loads the bar from (the `file:` path above, or the release URL if you installed that way) — that is how zellij routes the message to the running bar instead of launching a second instance.
+- **Leave `MessagePlugin` without a plugin argument**, as above: zellij then broadcasts the message by name to every loaded plugin, and the bar picks up the two names it knows. Naming the plugin instead looks tidier but is a trap — zellij routes a named `MessagePlugin` by matching the pair *(location, configuration)* against the running instances, and the `name` child counts as configuration on the alias path, so the match fails and zellij **opens a second bar pane** instead of messaging the one you have. The same mismatch happens whenever your layout's `plugin` block carries options (`shortcut_prefix`, `scroll`, …) that the bind does not repeat verbatim.
 - Each message steps the focused pane exactly like the wheel's `scroll "pane"` walk: reading order (top→bottom, then left→right), crossing tab boundaries, wrapping globally. Bind **both** directions so next and previous traverse the same order — zellij's own next/previous use a different internal order, so mixing one native bind with one piped bind would feel asymmetric.
 - Works from scripts too: `zellij pipe --name focus-next-pane` does the same step.
 - No extra permission — the messages ride the existing grant, so this works on update without a re-grant.

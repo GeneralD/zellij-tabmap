@@ -598,3 +598,46 @@ their empty snapshot makes the walk no-op. Absolute targeting alone
 (`focus_terminal_pane`, `switch_tab_to`) is NOT enough to make a broadcast
 handler idempotent — idempotence holds only if every instance computes the
 same target, which stale snapshots break.
+
+---
+
+## 23. A *named* `MessagePlugin` is matched by (location, configuration) — the `name` child breaks the match on the alias path (verified 0.45.0)
+
+`MessagePlugin "<location>" { name "..." }` does **not** simply address "the
+plugin at that location". zellij resolves the target to a concrete instance by
+the pair **(location, configuration)**:
+`pipe_to_specific_plugins` → `RunPluginOrAlias::from_url` → `get_or_load_plugins`
+→ `all_plugin_and_client_ids_for_plugin_location(&run_plugin.location,
+&run_plugin.configuration)`. On no match it falls through to `load_plugin` +
+`ScreenInstruction::AddPlugin` — i.e. it **opens a second pane** rather than
+erroring.
+
+The KDL keybind parser folds the `name` child into that configuration map
+(`parse_plugin_user_configuration` skips only `location`, `path`,
+`_allow_exec_host_cmd`). Whether that matters depends on the path taken:
+
+- **URL / `file:` location** — `PluginUserConfiguration::new()` strips the
+  reserved keys (`name`, `payload`, `title`, `cwd`, `floating`, …), so `name`
+  vanishes and the configuration ends up empty. The bind works *only because of
+  this stripping*, and *only* if the layout loaded the bar with an equally empty
+  configuration.
+- **Alias location** — `from_url` takes
+  `aliases.get(url).map(|r| r.clone().merge_configuration(configuration))`, and
+  `PluginUserConfiguration::merge` is a raw `insert` loop with **no stripping**.
+  `name` lands in the configuration, the pair no longer matches the running bar,
+  and a duplicate instance is spawned.
+- **Either location with a configured layout block** — a layout
+  `plugin location=... { shortcut_prefix ... }` gives the running instance a
+  non-empty configuration; a bind that does not repeat those keys verbatim
+  mismatches for the same reason.
+
+**Way out:** omit the plugin argument entirely — `MessagePlugin { name "..." }`.
+The parser then sets `plugin: None`, `route.rs` dispatches to
+`pipe_to_all_plugins`, and the message is broadcast by name to every loaded
+plugin with no instance matching at all. Nothing to keep in sync, and no way to
+spawn a pane. Plugins that don't know the name ignore it — which is also why a
+pipe handler must match its message names exactly (`scroll::pane_step`), never
+loosely.
+
+The CLI is unaffected: `zellij pipe --name focus-next-pane --plugin <loc>` passes
+the name outside the configuration map.

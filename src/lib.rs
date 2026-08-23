@@ -41,6 +41,18 @@ pub struct State {
     permitted: bool,
     tabs: Vec<TabInfo>,
     panes: PaneManifest,
+    /// Whether this instance's pane is currently hidden (its tab is not the
+    /// active one), tracked from `Event::Visible` (#78). Pipe messages
+    /// broadcast to every tab's bar instance, but zellij starves hidden
+    /// instances of Tab/Pane updates (verified 0.45.0), so a previously
+    /// visible instance holds a stale snapshot — it must not act on pipes or
+    /// it computes a wrong navigation target. Inverted (`hidden`, not
+    /// `visible`) so the derived default `false` matches the instance that
+    /// never receives a `Visible` event: the session's first bar, which loads
+    /// visible and must act from the start. A never-shown sibling also
+    /// defaults to acting, harmlessly — event starvation leaves its snapshot
+    /// empty, so the pane walk finds no anchor and no-ops.
+    hidden: bool,
     /// Per-tab pinned floating-pane ids (#119), keyed by tab position and
     /// rebuilt on every `PaneUpdate` from a per-tab session-layout dump
     /// ([`Self::refresh_pinned`]) — pin state is invisible in `PaneInfo`.
@@ -111,6 +123,10 @@ impl ZellijPlugin for State {
             EventType::PaneUpdate,
             EventType::ModeUpdate,
             EventType::Mouse,
+            // Visibility gates the pipe navigation (#78); needs no permission
+            // (zellij grants Visible unconditionally), so subscribing costs
+            // existing installs nothing (rule #15).
+            EventType::Visible,
         ]);
     }
 
@@ -224,9 +240,46 @@ impl ZellijPlugin for State {
                 self.scroll(scroll::ScrollDir::Backward);
                 false
             }
+            // Track whether this instance's tab is on screen (#78): only the
+            // visible bar may act on pipe navigation (see `pipe`). No repaint —
+            // visibility changes what this instance may *do*, not what it draws.
+            Event::Visible(visible) => {
+                self.hidden = !visible;
+                false
+            }
             // Remaining events need no repaint.
             _ => false,
         }
+    }
+
+    /// Keybind-pipeable pane navigation (#78). zellij's own `FocusNextPane`
+    /// handler skips the session-state report (#37, still unfixed in 0.45.0),
+    /// so a bare `FocusNextPane` bind moves focus while the bar's highlight
+    /// freezes. Rebinding the key to pipe `focus-next-pane` /
+    /// `focus-previous-pane` at the bar routes the step through the wheel's
+    /// pane walk instead: `focus_terminal_pane` is absolute *and* reports, so
+    /// the highlight follows by construction. Delivery is broadcast — every
+    /// tab's bar instance receives the message (verified 0.45.0) — and stays
+    /// idempotent because each instance computes the same target from the same
+    /// broadcast state and issues the same absolute call. The name match is
+    /// source-agnostic on purpose: `zellij pipe --name focus-next-pane` works
+    /// from scripts exactly like the keybind. Requires no permission beyond
+    /// the existing grant (verified — no zellij#4982 freeze risk, rule #15).
+    fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        // Only the visible instance acts: hidden siblings are event-starved,
+        // so their stale snapshot would compute a wrong target and the focus
+        // would double-step (one fresh move plus one stale move per keypress —
+        // observed live before this gate). Never repaint on a pipe: the focus
+        // change arrives back as Tab/Pane updates that drive the redraw,
+        // exactly like the wheel and click paths; an unrecognized name is not
+        // ours and changes nothing.
+        if self.hidden {
+            return false;
+        }
+        if let Some(dir) = scroll::pane_step(&pipe_message.name) {
+            self.scroll_panes(dir);
+        }
+        false
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
@@ -971,6 +1024,71 @@ mod tests {
             !state.simplified_ui,
             "arrow_fonts=false restores the Nerd Font path"
         );
+    }
+
+    #[test]
+    fn pipe_steps_the_pane_walk_and_defers_the_repaint() {
+        // The #78 messages drive one wheel-style pane step through the host
+        // (stubbed here) and request no repaint — the focus change arrives
+        // back as Tab/Pane updates, exactly like the wheel and click paths.
+        let mut state = State::default();
+        let mut active = tab(0, 1);
+        active.active = true;
+        state.update(Event::TabUpdate(vec![active]));
+        let mut focused = content_pane(0, 3, 60, 20);
+        focused.id = 1;
+        focused.is_focused = true;
+        let mut other = content_pane(60, 3, 60, 20);
+        other.id = 2;
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(0, vec![focused, other]);
+        state.update(Event::PaneUpdate(manifest));
+
+        let message = |name: &str| PipeMessage::new(PipeSource::Keybind, name, &None, &None, false);
+        let stepped = host_commands_during(|| {
+            assert!(!state.pipe(message("focus-next-pane")));
+        });
+        assert_eq!(stepped, 1, "one absolute focus_terminal_pane per step");
+
+        let ignored = host_commands_during(|| {
+            assert!(!state.pipe(message("unrelated")));
+        });
+        assert_eq!(ignored, 0, "someone else's pipe is left untouched");
+    }
+
+    #[test]
+    fn hidden_instances_ignore_pipe_navigation() {
+        // Pipe messages broadcast to EVERY tab's bar instance, but zellij
+        // starves hidden instances of Tab/Pane updates (verified 0.45.0), so a
+        // previously-visible instance holds a STALE snapshot — acting on it
+        // computes a wrong target and double-steps the focus. Only the visible
+        // instance (fresh state by construction) may act; `Event::Visible`
+        // tracks that.
+        let mut state = State::default();
+        let mut active = tab(0, 1);
+        active.active = true;
+        state.update(Event::TabUpdate(vec![active]));
+        let mut focused = content_pane(0, 3, 60, 20);
+        focused.id = 1;
+        focused.is_focused = true;
+        let mut other = content_pane(60, 3, 60, 20);
+        other.id = 2;
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(0, vec![focused, other]);
+        state.update(Event::PaneUpdate(manifest));
+
+        let message = |name: &str| PipeMessage::new(PipeSource::Keybind, name, &None, &None, false);
+        assert!(!state.update(Event::Visible(false)));
+        let while_hidden = host_commands_during(|| {
+            assert!(!state.pipe(message("focus-next-pane")));
+        });
+        assert_eq!(while_hidden, 0, "a hidden instance must not act");
+
+        assert!(!state.update(Event::Visible(true)));
+        let while_visible = host_commands_during(|| {
+            assert!(!state.pipe(message("focus-next-pane")));
+        });
+        assert_eq!(while_visible, 1, "the visible instance steps as usual");
     }
 
     #[test]

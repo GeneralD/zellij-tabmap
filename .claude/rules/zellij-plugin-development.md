@@ -566,3 +566,35 @@ reliable title-change event it must run at a fixed interval for every pane.
 Do not ship that polling loop: it makes an always-on UI plugin wake forever to
 mask a host event-delivery gap. Keep the event-driven `PaneUpdate` path, and
 revisit the OSC case when upstream provides a title-bearing notification.
+
+---
+
+## 22. Hidden plugin instances are event-starved — broadcast pipes race their stale state (verified 0.45.0)
+
+A `default_tab_template` bar runs **one instance per tab**, but zellij delivers
+`TabUpdate`/`PaneUpdate` **only to the instance whose tab is on screen**. A
+hidden sibling receives nothing while hidden — not even the events for changes
+that happened to its own manifest snapshot — so its state freezes at whatever
+it last saw (a never-shown instance holds an *empty* snapshot: it missed even
+the initial broadcast). Verified with the #78 probe: after a tab switch, only
+the newly visible instance's oracle logged; the previous one fell silent.
+
+Pipe messages, by contrast, **broadcast to every loaded instance** (a keybind
+`MessagePlugin` reached all three bars in ~10 ms, `PipeSource::Keybind`, no
+extra permission). The combination is the trap: a handler that computes a
+navigation target from `self.tabs`/`self.panes` runs on N instances with
+*different* snapshots. Observed live: `focus-previous-pane` double-stepped —
+the visible instance computed the right target from fresh state, then a
+previously-visible instance computed a second, wrong target from its stale
+snapshot and moved focus again.
+
+**Way out:** gate host effects on visibility. Subscribe `EventType::Visible`
+(delivered on tab activation/deactivation via `Tab::visible`; falls in the
+permission map's catch-all, so it needs **no permission** — no #15 freeze) and
+act only when visible. Defaults matter: the session's first bar gets **no**
+initial `Visible(true)`, so store the flag inverted (`hidden: bool`, default
+`false`) — never-shown siblings then also default to acting, harmlessly, since
+their empty snapshot makes the walk no-op. Absolute targeting alone
+(`focus_terminal_pane`, `switch_tab_to`) is NOT enough to make a broadcast
+handler idempotent — idempotence holds only if every instance computes the
+same target, which stale snapshots break.

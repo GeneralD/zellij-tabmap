@@ -6,6 +6,7 @@
 //! dependency-free [`minimap`] module so it can be unit-tested off-wasm.
 
 pub mod color;
+pub mod compact;
 pub mod config;
 pub mod floating;
 pub mod line;
@@ -171,6 +172,12 @@ impl ZellijPlugin for State {
                 true
             }
             Event::Mouse(Mouse::LeftClick(row, column)) => {
+                // Compact mode paints only row zero, even in a taller pane.
+                // The shared tab fallback hit-tests columns, so reject blank
+                // rows before routing to avoid invisible switch targets.
+                if self.config.compact && row != 0 {
+                    return false;
+                }
                 // The pure router resolves the click against the live frame's
                 // recorded geometry, in the priority the bar paints its
                 // affordances: the "+" button (#76) > a tab's close "×" (#86) >
@@ -293,6 +300,35 @@ impl ZellijPlugin for State {
         self.tab_panes.clear();
         self.close_layout.clear();
         if !self.permitted {
+            return;
+        }
+        // Compact mode owns one text row and keeps the existing click
+        // dispatcher/host calls. No minimap regions are recorded in this mode.
+        if self.config.compact {
+            if rows == 0 {
+                return;
+            }
+            let Some(active) = projection::active_tab(&self.tabs).map(|tab| tab.position) else {
+                return;
+            };
+            let names: Vec<(usize, &str)> = self
+                .tabs
+                .iter()
+                .map(|tab| (tab.position, tab.name.as_str()))
+                .collect();
+            let frame = compact::render(
+                rows,
+                cols,
+                &names,
+                active,
+                &self.config.shortcut_prefix,
+                self.config.active_width,
+                self.config.tab_gap,
+                self.config.close_button,
+            );
+            print!("{}", frame.output);
+            self.tab_layout = frame.layout.tabs;
+            self.close_layout = frame.close;
             return;
         }
         // zellij hands us the row count from the layout's `pane size=N`. Below
@@ -1089,6 +1125,39 @@ mod tests {
             assert!(!state.pipe(message("focus-next-pane")));
         });
         assert_eq!(while_visible, 1, "the visible instance steps as usual");
+    }
+
+    #[test]
+    fn compact_bar_only_dispatches_clicks_on_its_drawn_row() {
+        let mut state = State::default();
+        state.permitted = true;
+        state.config.compact = true;
+        let mut active = tab(0, 1);
+        active.active = true;
+        state.tabs = vec![active, tab(1, 2)];
+
+        state.render(1, 80);
+        assert_eq!(state.tab_layout.len(), 2);
+        assert!(state.tab_panes.is_empty());
+        assert_eq!(state.close_layout.len(), 2);
+        let close_column = state.close_layout[0].column;
+
+        // A taller allocation clears extra rows without painting tab targets.
+        state.render(3, 80);
+        let ignored = host_commands_during(|| {
+            state.update(Event::Mouse(Mouse::LeftClick(1, close_column)));
+            state.update(Event::Mouse(Mouse::LeftClick(-1, close_column)));
+        });
+        assert_eq!(ignored, 0, "blank rows must never switch or close a tab");
+        let closed = host_commands_during(|| {
+            state.update(Event::Mouse(Mouse::LeftClick(0, close_column)));
+        });
+        assert_eq!(closed, 1, "the drawn close cell dispatches once");
+        assert!(state.close_layout.is_empty());
+
+        state.render(0, 80);
+        assert!(state.tab_layout.is_empty());
+        assert!(state.close_layout.is_empty());
     }
 
     #[test]

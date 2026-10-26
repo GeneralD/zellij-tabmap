@@ -106,6 +106,33 @@ default_tab_template {
 }
 ```
 
+**Optional: a compact one-row title bar.** Set `compact "true"` (default `false`) and use `pane size=1` to replace the minimaps with tab titles, numbered switch hints, and a white `×` close cell. The fixed high-contrast palette uses white text on dark backgrounds; the active tab also has a leading `>`, bold text, and an underline. Clicking a tab switches to it; clicking exactly its `×` closes it. The close cell is hidden on the last remaining tab and when `close_button "false"`.
+
+For a complete compact layout, replace the placeholder below with the absolute path used for the permission grant:
+
+```kdl
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="file:/absolute/path/to/zellij-tabmap.wasm" {
+                compact "true"
+                active_width "24"        // target width for every tab, clamped to 12–28 columns
+                tab_gap "2"
+                shortcut_prefix ""       // number-only switch hints
+                close_button "true"
+                scroll "tab"             // "tab", "pane", or "off", as below
+            }
+        }
+        children
+    }
+    tab {
+        pane
+    }
+}
+```
+
+Compact mode uses `active_width` for **every** tab and shrinks their width when needed. Long labels are clipped to the available columns. When tabs overflow, a contiguous window keeps the active tab visible and shows `← +N` / `+N →` counts for hidden tabs; on very narrow bars the counts are omitted to preserve room for the active tab. `tab_gap`, `shortcut_prefix`, `close_button`, and the existing `scroll` modes still apply. Minimap settings (`gutter`, `gradient*`, `floating`, `color_strategy`, `inactive_dim`), `perspective`, `align`, `close_button_color`, and `new_tab_button` do not affect compact rendering; it currently has no `+` button. The remaining option descriptions below describe the default minimap mode unless stated otherwise.
+
 Restart the session. Because the wasm is already local, the bar paints on the **first** tab immediately — there is no first-launch download wait (a remote-URL plugin is blank until its initial download lands, which can read as a broken bar).
 
 **4. Update** later by re-running step 1 — the download overwrites the file in place. zellij reads a local file from disk at each session start, so a **fresh session** picks up the new build automatically; a remote URL, by contrast, is cached by zellij **by URL and never re-fetched**, so updates silently never arrive. An already-running session keeps serving the old build until you start a new one — there is no in-place reload for the tab bar (`zellij action start-or-reload-plugin` opens a *stray plugin pane* instead of refreshing a layout-loaded plugin, [zellij#3927](https://github.com/zellij-org/zellij/issues/3927)), so simply start a fresh session to pick up the update. (Updating a release-URL install instead? Re-warm the new URL once — see the **blank bar after a bump** note in the collapsed section below — or the bar can come up empty on that first post-upgrade session; `file:` never has this race.)

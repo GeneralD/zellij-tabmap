@@ -19,9 +19,13 @@ use crate::spread::ColorStrategy;
 /// Parsed plugin configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
+    /// Opt-in one-row title bar with a fixed high-contrast palette and close cells.
+    /// Defaults to `false`, preserving the multi-row minimap renderer.
+    pub compact: bool,
     /// Prefix glyph shown before a tab's switch-hint position number.
     pub shortcut_prefix: String,
-    /// Column budget for the focused tab's detailed minimap.
+    /// Column budget for the focused tab's detailed minimap, or every tab in
+    /// compact mode (clamped to `12..=28` there).
     pub active_width: usize,
     /// How the all-fit tab row is anchored: `Center` re-centers the active block
     /// on each focus change (the strip slides), `Left` pins the row's left edge
@@ -183,6 +187,10 @@ impl Config {
     /// malformed value. Total: never panics on bad input.
     pub fn from_configuration(configuration: &BTreeMap<String, String>) -> Self {
         Self {
+            compact: configuration
+                .get("compact")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(false),
             shortcut_prefix: configuration
                 .get("shortcut_prefix")
                 .cloned()
@@ -355,6 +363,7 @@ mod tests {
     #[test]
     fn defaults_when_empty() {
         let config = config_from(&[]);
+        assert!(!config.compact);
         assert_eq!(config.shortcut_prefix, "⌘ ");
         assert_eq!(config.active_width, 24);
         assert_eq!(config.align, Alignment::Center);
@@ -376,6 +385,7 @@ mod tests {
     #[test]
     fn parses_valid_overrides() {
         let config = config_from(&[
+            ("compact", "true"),
             ("shortcut_prefix", "C-"),
             ("active_width", "30"),
             ("align", "left"),
@@ -383,6 +393,7 @@ mod tests {
             ("gutter", "true"),
             ("gradient", "sheen"),
         ]);
+        assert!(config.compact);
         assert_eq!(config.shortcut_prefix, "C-");
         assert_eq!(config.active_width, 30);
         assert_eq!(config.align, Alignment::Left);
